@@ -1,0 +1,4 @@
+interface:
+  display_name: "Meshy Character Wardrobe"
+  short_description: "Batch rigging and Blender part separation"
+  default_prompt: "Audit the Meshy character batch and continue from the next safe stage."

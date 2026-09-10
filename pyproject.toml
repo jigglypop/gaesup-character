@@ -1,0 +1,24 @@
+[project]
+name = "character-wardrobe-workspace"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["asset-3d-api"]
+
+[project.optional-dependencies]
+blender = ["asset-3d-api[blender]"]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["backend"]
+
+[tool.uv.sources]
+asset-3d-api = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8.0.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["backend"]
+testpaths = ["backend/tests"]

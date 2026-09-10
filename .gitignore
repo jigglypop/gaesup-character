@@ -1,0 +1,34 @@
+# Environment
+.env
+.env.local
+.env.production
+
+# Python / uv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage/
+.venv/
+
+# Runtime data
+data/
+logs/
+*.db
+*.sqlite
+*.log
+
+# Build and editors
+build/
+dist/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.tmp
+# Frontend build and local test artifacts
+node_modules/
+frontend/dist/
+frontend/test-results/
+backend/dist/
