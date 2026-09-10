@@ -32,7 +32,7 @@ def _submit(directory: Path, value: dict, endpoint: str, payload: dict, client: 
     return value
 
 
-def generate(directory: Path, image: Path, height: float, client: httpx.Client) -> dict:
+def generate(directory: Path, image: Path, height: float, client: httpx.Client, profile: str = "meshy-7") -> dict:
     if (directory / "character.json").exists():
         raise ValueError("Existing run: refresh or recover; never resubmit an uncertain task")
     if not 0.1 <= height <= 100:
@@ -42,13 +42,20 @@ def generate(directory: Path, image: Path, height: float, client: httpx.Client) 
         raise ValueError("Image must be PNG or JPEG")
     with Image.open(image) as reference:
         reference.verify()
-    value = {"image": str(image), "image_sha256": _digest(image), "height_meters": height,
+    if profile not in {"meshy-7", "smart-topology"}:
+        raise ValueError("Unknown generation profile")
+    value = {"image": str(image), "image_sha256": _digest(image), "height_meters": height, "profile": profile,
              "stage": "generation", "status": "submission_uncertain"}
     mime = "image/png" if image.suffix.lower() == ".png" else "image/jpeg"
     payload = {"image_url": f"data:{mime};base64," + base64.b64encode(image.read_bytes()).decode(),
-               "ai_model": "meshy-6", "should_texture": True, "enable_pbr": True,
+               "ai_model": "meshy-7", "model_type": "standard", "should_texture": True, "enable_pbr": True,
                "should_remesh": True, "target_polycount": 30000, "pose_mode": "a-pose",
                "image_enhancement": False, "target_formats": ["glb"]}
+    if profile == "smart-topology":
+        payload.update(model_type="smart-topology", ai_model="meshy-t2", target_polycount=15000)
+        payload.pop("should_remesh")
+        payload.pop("image_enhancement")  # Documented only for Meshy 6/7; do not send unsupported controls.
+    value["generation_settings"] = {k: v for k, v in payload.items() if k != "image_url"}
     return _submit(directory, value, "/openapi/v1/image-to-3d", payload, client)
 
 

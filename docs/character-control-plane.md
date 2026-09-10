@@ -23,7 +23,7 @@ backend/src/services/           상태 전이, 실행, 복구, 산출물 검증
 ## 책임과 저장
 
 - 서버가 manifest·작업 기록·실제 파일을 근거로 상태와 가능한 action을 계산한다. 프론트는 서버 상태를 표시하고 검증된 입력을 제출한다.
-- 초기 저장은 기존 파일 기반 상태를 확장한다. DB schema나 별도 큐 서비스가 필요해졌을 때 근거를 갖고 결정한다.
+- 파일 기반 상태·에셋을 보존하고 PostgreSQL에 등록·버전·작업·파츠·동작·검수 인덱스를 동기화한다. `CHARACTER_DATABASE_URL`, migration 002와 재색인·rollback 절차는 [캐릭터 준비 계약](character-preparation.md)을 따른다. DB는 다중 worker 큐가 아니다.
 - 데이터 루트는 설정으로 고정한다. `backend/`에서 시작해도 동일한 이미지·manifest·작업 기록을 읽어야 한다. 원본 GLB와 승인 버전은 보존한다.
 - 새 제어 API는 기존 인증 경계와 사용자 접근 범위를 따른다. 기존 `/api/world/*` 포맷과 인증을 바꾸지 않는다.
 - ID로 서버가 파일을 찾는다. 업로드는 파일 데이터로 받고 클라이언트의 서버 경로·실행 코드·provider payload를 실행하지 않는다. 다운로드와 미리보기는 인증된 산출물 URL을 사용한다.
@@ -79,9 +79,9 @@ UI는 캐릭터별 상태, 입력 편집, 허용 action, 파츠 표시/숨기기
 
 ## 구현 순서와 통과 증거
 
-현재 지원하는 action은 모델 검사, Meshy 제출·조회·ID 복구·다운로드, `separate_materials`, 파츠 역할 저장, 버전별 검수다. 유료 Meshy 실작업은 이 구현 검증에서 새로 제출하지 않았다.
+현재 지원하는 action은 모델 검사, Meshy 제출·조회·ID 복구·다운로드, `prepare_character`/`resume_character`/`recover_motion_task`, `separate_materials`/`separate_parts`, 파츠 역할 저장, 버전별 검수다. 유료 Meshy 실작업은 이 구현 검증에서 새로 제출하지 않았다.
 
-`separate_materials`는 한 armature에 연결된 메시의 재질 경계를 Blender에서 분리한다. 원본을 유지하고 operation별 `blender/character.glb`, `source.blend`, `rest.png`, `candidates.json`, `quality.json`을 만든다. 고정된 레시피이며 임의 코드·경로를 입력받지 않는다. shape key를 가진 분리 대상, 여러 armature, 한 재질로 붙은 몸과 의상은 아직 지원하지 않는다. 기본 자세 렌더는 동작 검증을 대체하지 않는다.
+`separate_materials`는 한 armature에 연결된 메시의 재질 경계를 Blender에서 분리한다. `separate_parts`는 같은 재질에서도 source hash와 node/primitive/face 선택으로 나눈다. 원본을 유지하고 operation별 `blender/character.glb`, `source.blend`, `rest.png`, `selection.json`, `quality.json`을 만든다. 임의 코드·경로를 입력받지 않는다. 면 분리는 accessor와 morph/animation 연결을 보존한다. 재질 분리의 shape key 대상 및 여러 armature는 지원하지 않는다. 기본 자세 렌더는 동작 검증을 대체하지 않는다.
 
 서버는 단일 worker로 실행한다. 재접속과 응답 유실은 동일 idempotency key로 복구하며 provider 작업은 task ID로 조회한다. 서버가 강제 종료된 로컬 작업의 자동 재개는 아직 없다. `operations/<id>/blender/runner.json`의 PID와 로그·완료 파일을 확인한 뒤 운영자가 해당 실행과 잠금을 복구해야 한다. 프로세스가 살아 있는지 확인하지 않고 lock을 삭제하거나 새 작업을 제출하지 않는다.
 

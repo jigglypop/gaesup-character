@@ -142,6 +142,7 @@ def _check_buffers(tables: dict, binary: bytes) -> None:
 def _check_scene(tables: dict, doc: dict) -> dict:
     nodes, meshes, accessors = tables["nodes"], tables["meshes"], tables["accessors"]
     vertices = triangles = 0
+    counted_positions = set()
     for mesh in meshes:
         primitives = mesh["primitives"]
         if not primitives:
@@ -151,7 +152,10 @@ def _check_scene(tables: dict, doc: dict) -> dict:
             position = _ref(accessors, attributes["POSITION"])
             if position["type"] != "VEC3":
                 raise ValueError("POSITION must be VEC3")
-            vertices += position["count"]
+            # Separated parts may share the exact source attribute buffers.
+            if attributes["POSITION"] not in counted_positions:
+                vertices += position["count"]
+                counted_positions.add(attributes["POSITION"])
             for index in attributes.values():
                 if _ref(accessors, index)["count"] != position["count"]:
                     raise ValueError("vertex attribute count mismatch")

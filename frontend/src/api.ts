@@ -5,6 +5,9 @@ export type Character = {
   pipeline_status: string; rig_origin: string; model_id: string | null; model_sha256: string | null;
   provider: { stage: string | null; status: string | null; progress: number | null; task_id: string | null; http_status: number | null };
   operation: Operation | null;
+  motion_pack: { status: string | null; submitted_tasks: number; max_new_tasks: number | null;
+    clips: Record<string, { action_id: number | null; source: string }>;
+    tasks: Record<string, { status: string; task_id: string | null; progress: number | null }> };
   problems: { code: string; message: string }[];
   next_actions: { id: string; label: string; enabled: boolean; reason: string | null; external_mutation: boolean }[];
   artifacts: { id: string; kind: string; bytes: number; url: string }[];

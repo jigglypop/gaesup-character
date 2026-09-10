@@ -9,7 +9,8 @@ try {
   const world = page.locator('#viewer');
   await expect(world).toHaveAttribute('data-world', 'gaesup-world', { timeout: 30000 });
   await expect(world).toHaveAttribute('data-renderer', 'webgpu');
-  await expect(world).toHaveAttribute('data-character-meshes', '2');
+  const detail = await (await page.request.get('http://127.0.0.1:5273/api/characters/A')).json();
+  await expect(world).toHaveAttribute('data-character-meshes', String(detail.inspection.nodes.length));
   await page.locator('#expand-world').click();
   const position = async () => JSON.parse(await world.getAttribute('data-character-position'));
   await expect.poll(async () => Math.abs((await position()).y)).toBeLessThan(.03);

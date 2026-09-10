@@ -40,6 +40,10 @@ class CharacterPipeline:
         self.port, self.owner = port, owner
         self.instance = uuid.uuid4().hex
 
+    def sync_storage(self, character_id, user_id):
+        from src.services.character_store import sync_after_change
+        sync_after_change(self, character_id, user_id)
+
     def resolve(self, value: str) -> Path:
         path = Path(value)
         if not path.is_absolute():
@@ -95,6 +99,12 @@ class CharacterPipeline:
         for name in ("generated", "rigged", "walking", "running"):
             if (run / (name + ".glb")).is_file():
                 files[name] = run / (name + ".glb")
+        pack = read_json(run / "motion-pack.json")
+        if pack.get("status") == "complete":
+            for name in ("character", "idle", "walk", "run", "jump", "fall"):
+                path = run / "motions" / (name + ".glb")
+                if path.is_file():
+                    files["animated" if name == "character" else name] = path
         if control.get("imported_model"):
             path = self.resolve(control["imported_model"])
             if path.is_file():
@@ -118,13 +128,14 @@ class CharacterPipeline:
         return files
 
     def model(self, files: dict[str, Path]) -> tuple[str | None, Path | None]:
-        for name in ("parts_model", "imported", "rigged", "local_fallback", "generated"):
+        for name in ("parts_model", "animated", "imported", "rigged", "local_fallback", "generated"):
             if name in files:
                 return name, files[name]
         return None, None
 
     def revision(self, entry: dict, run: Path, control: dict) -> str:
         value = {"entry": entry, "control": control, "provider": read_json(run / "character.json"),
+                 "motion_pack": read_json(run / "motion-pack.json"),
                  "operation": self.latest_operation(run),
                  "files": {key: [str(path), path.stat().st_size, path.stat().st_mtime_ns]
                            for key, path in self.files(entry, run, control).items()}}
@@ -133,6 +144,7 @@ class CharacterPipeline:
     def detail(self, character_id: str, user_id: int) -> dict:
         entry, run, control = self.entry(character_id, user_id)
         provider = read_json(run / "character.json")
+        motion_pack = read_json(run / "motion-pack.json")
         files = self.files(entry, run, control)
         model_id, model = self.model(files)
         operation = self.latest_operation(run)
@@ -161,6 +173,8 @@ class CharacterPipeline:
         rig_origin = control.get("rig_origin", "unknown")
         if model_id == "local_fallback":
             rig_origin = "local_fallback"
+        elif model_id == "animated":
+            rig_origin = "meshy"
         elif model_id == "rigged" and provider.get("stage") == "rigging" and provider.get("status") == "SUCCEEDED":
             rig_origin = "meshy"
         if model:
@@ -181,9 +195,20 @@ class CharacterPipeline:
             can_split = bool(inspection.get("material_boundaries") and inspection.get("metrics", {}).get("skins") and not inspection.get("errors"))
             add("separate_materials", "Blender 재질 경계 분리", can_split and bool(blender_executable()),
                 "모델 검사 후 분리 가능한 재질 경계와 Blender 설치가 필요합니다." if not can_split or not blender_executable() else None)
+            add("separate_parts", "선택한 영역을 파츠로 분리", bool(inspection.get("metrics", {}).get("skins") and not inspection.get("errors") and blender_executable()),
+                "모델 검사 후 편집 도구에서 원본 면을 선택해 주세요.")
             add("organize_parts", "파츠 역할 저장", bool(inspection.get("nodes")), "먼저 모델 검사를 실행해 주세요." if not inspection else None)
             add("record_review", "검수 기록", bool(inspection and not inspection.get("errors")), "오류 없는 모델 검사가 필요합니다." if not inspection or inspection.get("errors") else None)
         key_present = bool(os.getenv("MESHY_API_KEY"))
+        if not motion_pack:
+            ready = bool(height and (model or provider.get("task_id")) and (not provider or provider.get("status") == "SUCCEEDED"))
+            add("prepare_character", "리깅 + 기본 동작 5종 가져오기", key_present and ready,
+                "키와 모델 또는 성공한 Meshy 작업이 필요합니다. 최대 리깅 1회 + 동작 5회; 기본 walk/run은 재사용합니다.", True)
+        elif motion_pack.get("status") != "complete":
+            uncertain = any(t.get("status") == "submission_uncertain" for t in motion_pack.get("tasks", {}).values())
+            add("resume_character", "기본 동작 가져오기 이어가기", key_present and not uncertain, "기존 작업 ID와 처음 설정한 제출 한도를 이어갑니다.", True)
+            if uncertain:
+                add("recover_motion_task", "동작 패키지 작업 ID 복구", key_present)
         if provider.get("task_id"):
             add("refresh_provider", "Meshy 상태 확인", key_present, None if key_present else "서버에 Meshy API 키가 필요합니다.")
         if provider.get("status") == "submission_uncertain" and not provider.get("task_id"):
@@ -197,7 +222,7 @@ class CharacterPipeline:
         # Recovery GETs are allowed after a server restart; they do not resubmit work.
         if busy and operation["status"] == "recovery_required":
             for action in actions:
-                if action["id"] in {"refresh_provider", "recover_task"}:
+                if action["id"] in {"refresh_provider", "recover_task", "resume_character", "recover_motion_task"}:
                     action.update(enabled=key_present, reason=None)
         artifacts = [{"id": name, "kind": "image" if name in {"reference", "rest_render"} else ("file" if name == "parts_blend" else "model"), "bytes": path.stat().st_size,
                       "url": f"/api/characters/{character_id}/artifacts/{name}"} for name, path in files.items()]
@@ -207,6 +232,9 @@ class CharacterPipeline:
                 "pipeline_status": pipeline_status, "rig_origin": rig_origin, "operation": operation,
                 "problems": problems, "next_actions": actions, "artifacts": artifacts,
                 "model_id": model_id, "model_sha256": current_hash,
+                "motion_pack": {"status": motion_pack.get("status"), "submitted_tasks": motion_pack.get("submitted_tasks", 0),
+                    "max_new_tasks": motion_pack.get("max_new_tasks"), "clips": motion_pack.get("clips", {}),
+                    "tasks": {slot: {k: task.get(k) for k in ("task_id", "status", "progress", "http_status")} for slot, task in motion_pack.get("tasks", {}).items()}},
                 "inspection": inspection, "parts": control.get("parts", []) if control.get("parts_sha256") == current_hash else [],
                 "review": review, "body_coverage": control.get("body_coverage", "unknown")}
 
@@ -228,12 +256,13 @@ class CharacterPipeline:
             control = read_json(run / "control.json")
             self.check_revision(entry, run, control, revision)
             self.check_idle(run)
-            provider = read_json(run / "character.json")
+            provider = read_json(run / "motion-pack.json") or read_json(run / "character.json")
             if provider and "height_meters" in values and values["height_meters"] != provider.get("height_meters"):
                 raise PipelineError("source_frozen", "제출된 작업의 키는 변경할 수 없습니다. 새 캐릭터로 등록해 주세요.")
             run.mkdir(parents=True, exist_ok=True)
             control.update(values)
             _write_json(run / "control.json", control)
+        self.sync_storage(character_id, user_id)
         return self.detail(character_id, user_id)
 
     def create(self, name: str, height: float | None, user_id: int):
@@ -245,6 +274,7 @@ class CharacterPipeline:
                                        "owner_id": user_id, "required_parts": ["body", "outfit_base"]})
             self.manifest.parent.mkdir(parents=True, exist_ok=True)
             _write_json(self.manifest, data)
+        self.sync_storage(character_id, user_id)
         return self.detail(character_id, user_id)
 
     def upload(self, character_id, user_id, content: bytes, kind: str, revision: str):
@@ -253,8 +283,7 @@ class CharacterPipeline:
             if quality["errors"]:
                 raise PipelineError("invalid_glb", "GLB 구조 검사를 통과하지 못했습니다.", 400)
             doc, _ = parse_glb(content, strict=True)
-            if not doc.get("skins"):
-                raise PipelineError("rig_required", "리깅된 GLB 모델을 선택해 주세요.", 400)
+            # Unrigged imports can enter the Meshy rig + animation preparation action.
             suffix = ".glb"
         else:
             try:
@@ -270,7 +299,7 @@ class CharacterPipeline:
             control = read_json(run / "control.json")
             self.check_revision(entry, run, control, revision)
             self.check_idle(run)
-            if (run / "character.json").exists():
+            if (run / "character.json").exists() or (run / "motion-pack.json").exists():
                 raise PipelineError("source_frozen", "기존 생성 기록의 출처는 보존됩니다. 새 캐릭터로 등록해 주세요.")
             target = run / "sources" / (uuid.uuid4().hex + suffix)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -285,6 +314,7 @@ class CharacterPipeline:
                 control.pop("parts_blend", None)
                 control.pop("rest_render", None)
             _write_json(run / "control.json", control)
+        self.sync_storage(character_id, user_id)
         return self.detail(character_id, user_id)
 
     def artifact(self, character_id, user_id, artifact_id):
@@ -315,10 +345,16 @@ class CharacterPipeline:
             value = {"id": operation_id, "action_id": action_id, "status": "accepted", "payload": payload,
                      "fingerprint": fingerprint, "created_at": now(), "updated_at": now(),
                      "executor": self.instance, "input_sha256": view["model_sha256"], "error": None}
+            if action_id == "separate_parts" and payload.get("source_artifact_id"):
+                source = self.files(entry, run, control).get(payload["source_artifact_id"])
+                if not source or _digest(source) != payload["source_sha256"]:
+                    raise PipelineError("input_changed", "선택한 원본 버전과 면 선택의 해시가 다릅니다.")
+                value["input_sha256"] = payload["source_sha256"]
             reference = self.files(entry, run, control).get("reference")
             value["image_sha256"] = _digest(reference) if reference else None
             path.parent.mkdir(parents=True, exist_ok=False)
             _write_json(path, value)
+        self.sync_storage(character_id, user_id)
         return self.public_operation(value), True
 
     def operation(self, character_id, user_id, operation_id):

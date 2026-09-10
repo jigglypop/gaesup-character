@@ -22,6 +22,8 @@ def run(payload):
     meshes = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH' and obj not in custom_shapes]
     count = 0
     for obj in meshes:
+        if payload.get("review_only"):
+            continue
         used = {face.material_index for face in obj.data.polygons}
         if len(used) < 2:
             continue
@@ -35,19 +37,21 @@ def run(payload):
         bpy.ops.mesh.separate(type='MATERIAL')
         bpy.ops.object.mode_set(mode='OBJECT')
         count += 1
-    if not count:
+    if not count and not payload.get("review_only"):
         raise ValueError("No material boundaries to separate")
     meshes = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH' and obj not in custom_shapes]
     for index, obj in enumerate(meshes):
-        obj.name = f"candidate_{index:03d}"
+        if not payload.get("review_only"):
+            obj.name = f"candidate_{index:03d}"
         # Splitting preserves vertex groups and modifiers; never create a new rig.
         if not any(mod.type == 'ARMATURE' and mod.object == armatures[0] for mod in obj.modifiers) and not (obj.parent == armatures[0] and obj.parent_type == 'BONE'):
             raise ValueError(f"Candidate rig binding missing: {obj.name}, parent={obj.parent}, type={obj.parent_type}, modifiers={[(m.type, getattr(m, 'object', None)) for m in obj.modifiers]}")
     bpy.ops.object.select_all(action='DESELECT')
     for obj in meshes + armatures:
         obj.select_set(True)
-    bpy.ops.export_scene.gltf(filepath=str(output / 'character.glb'), export_format='GLB',
-                              use_selection=True, export_animations=True, export_skins=True)
+    if not payload.get("review_only"):
+        bpy.ops.export_scene.gltf(filepath=str(output / 'character.glb'), export_format='GLB',
+                                  use_selection=True, export_animations=True, export_skins=True)
     scene = bpy.context.scene
     points = [obj.matrix_world @ Vector(corner) for obj in meshes for corner in obj.bound_box]
     lo = Vector(tuple(min(p[i] for p in points) for i in range(3)))

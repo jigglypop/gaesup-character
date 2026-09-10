@@ -33,7 +33,40 @@ class CharacterUpdate(StrictModel):
 
 class Part(StrictModel):
     node_index: int = Field(ge=0)
-    role: Literal["body", "outfit_base", "hair", "accessory", "eyes", "other"]
+    role: Literal["body", "head", "hair", "hat", "top", "pants", "skirt", "dress", "shoes", "outfit_base", "accessory", "eyes", "other"]
+
+
+class FaceSelection(Part):
+    primitive_index: int = Field(ge=0)
+    faces: list[int] = Field(min_length=1, max_length=300000)
+
+
+class SegmentationInput(StrictModel):
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_artifact_id: Literal["local_fallback", "imported", "rigged", "generated", "animated", "parts_model"] | None = None
+    selections: list[FaceSelection] = Field(min_length=1, max_length=100)
+
+
+class MotionActions(StrictModel):
+    idle: int = Field(default=0, ge=0)
+    walk: int = Field(default=1, ge=0)
+    run: int = Field(default=14, ge=0)
+    jump: int = Field(default=466, ge=0)
+    fall: int = Field(default=502, ge=0)
+
+
+class PrepareInput(StrictModel):
+    actions: MotionActions = Field(default_factory=MotionActions)
+    max_new_tasks: int = Field(default=6, ge=1, le=6)
+
+
+class GenerationInput(StrictModel):
+    profile: Literal["meshy-7", "smart-topology"] = "meshy-7"
+
+
+class MotionRecovery(StrictModel):
+    slot: Literal["rig", "idle", "walk", "run", "jump", "fall"]
+    task_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,100}$")
 
 
 class PartsInput(StrictModel):
@@ -52,9 +85,10 @@ class RecoverInput(StrictModel):
     task_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,100}$")
 
 
-ACTION_INPUTS = {"inspect_model": StrictModel, "separate_materials": StrictModel, "organize_parts": PartsInput, "record_review": ReviewInput,
+ACTION_INPUTS = {"inspect_model": StrictModel, "separate_materials": StrictModel, "separate_parts": SegmentationInput, "organize_parts": PartsInput, "record_review": ReviewInput,
+                 "prepare_character": PrepareInput, "resume_character": StrictModel, "recover_motion_task": MotionRecovery,
                  "refresh_provider": StrictModel, "recover_task": RecoverInput,
-                 "submit_generation": StrictModel, "submit_rigging": StrictModel,
+                 "submit_generation": GenerationInput, "submit_rigging": StrictModel,
                  "download_generation": StrictModel, "download_rigging": StrictModel}
 
 

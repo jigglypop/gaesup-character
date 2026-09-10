@@ -24,6 +24,7 @@ def main():
     generate = commands.add_parser("generate")
     generate.add_argument("--image", type=Path, default=data_root() / "image/A.png")
     generate.add_argument("--height", type=float, required=True)
+    generate.add_argument("--profile", choices=["meshy-7", "smart-topology"], default="meshy-7")
     status = commands.add_parser("status")
     status.add_argument("--task-id", help="Recover an uncertain submission using the Meshy task list")
     commands.add_parser("rig")
@@ -39,7 +40,7 @@ def main():
     key = os.getenv("MESHY_API_KEY")
     if not key and args.command not in {"download", "local-rig"}:
         parser.error("MESHY_API_KEY is required")
-    with run_lock(args.run, getattr(args, "port", 9878)):
+    with run_lock(args.run, getattr(args, "port", int(os.getenv("BLENDER_PORT", "9878")))):
         if args.command == "local-rig":
             from src.services.blender_mcp import BlenderMCP
             from src.services.character_setup import setup_character
@@ -52,7 +53,7 @@ def main():
                               headers={"Authorization": f"Bearer {key}"}, timeout=120) as client:
                 try:
                     if args.command == "generate":
-                        result = character_jobs.generate(args.run, args.image, args.height, client)
+                        result = character_jobs.generate(args.run, args.image, args.height, client, args.profile)
                     elif args.command == "rig":
                         result = character_jobs.rig(args.run, client)
                     else:

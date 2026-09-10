@@ -16,13 +16,13 @@ character_<id>/
   review/v001/pose-*.png
 ```
 
-`parts.json` records the source SHA-256, armature, output object names, semantic role, detachable flag, coverage limitation, and review status. Required roles are `body` and `outfit_base`. Add `hair`, `accessory`, `eyes`, or other roles only when the source contains a real separable part.
+`parts.json` records the source SHA-256, armature, output object names, semantic role, detachable flag, coverage limitation, and review status. Require `body` and the original clothing, represented by legacy `outfit_base` or explicit `top`, `pants`, `skirt`, `dress` roles. Add `head`, `hair`, `hat`, `shoes`, `accessory`, or `eyes` only where the source supports the distinction.
 
 ## Authoring order
 
 1. Import the untouched rigged GLB and verify armature, bind pose, scale, axes, and animation playback.
 2. Duplicate into a new work version. Identify candidate regions using material boundaries, connected components, texture islands, and visual inspection.
-3. Separate the original outfit as `outfit_base`; separate optional parts only when their boundary is defensible. Retain the same armature modifier and vertex groups.
+3. Separate the original outfit using `outfit_base` or the explicit clothing roles; separate optional parts only when their boundary is defensible. Retain the same armature modifier and vertex groups.
 4. Inspect seams, duplicate vertices, normals, weights, and deformation at shoulders, elbows, hips, knees, neck, and part attachment points.
 5. Export a combined character GLB and retain `source.blend`. Export detachable part GLBs only when the consumer needs them and their armature contract is preserved.
 
@@ -30,3 +30,4 @@ If the source has no hidden torso or limbs beneath the original outfit, set `bod
 
 The current repository's `local-rig` recipe supports region-authored `outfit_base` extraction for Meshy rigging failures. It is a fallback for one generated model, not a generic semantic segmenter.
 
+The browser now supports source-bound triangle painting and `separate_parts`. The GLB splitter preserves original attribute buffers and skin references; Blender makes the editable file and review render. See the [current preparation contract](../../../../docs/character-preparation.md) for role, API, and version rules. Coarse spatial selections remain candidates until isolated-part views confirm their boundaries.

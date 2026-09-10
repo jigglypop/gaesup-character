@@ -143,3 +143,10 @@ dialog { border: 1px solid var(--line); border-radius: 14px; padding: 30px; widt
 .preview-panel.world-expanded { position: fixed; inset: 20px; z-index: 50; box-shadow: 0 0 0 40px #18261bcc; }
 .world-expanded .viewer { flex: 1; height: auto; }
 #expand-world { padding: 6px 10px; font-size: 11px; white-space: nowrap; }
+.part-editor { padding: 16px 20px; border-top: 1px solid #e7e4ed; background: #faf9fd; }
+.paint-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+.paint-row label { flex: 1; min-width: 90px; }
+.paint-row input[type=checkbox] { width: auto; }
+.paint-row input[type=range] { padding: 0; }
+.motion-status { margin-top: 16px; }
+.motion-slot { display: inline-block; padding: 5px 8px; margin: 3px; background: #eeebf5; border-radius: 6px; font-size: 12px; }

@@ -1,13 +1,17 @@
 import { Component, Suspense, useEffect, useMemo, useRef, type ReactNode } from 'react';
-import { createRoot, events, useFrame, useThree } from '@react-three/fiber';
+import { createRoot, events, extend, useFrame, useThree } from '@react-three/fiber';
 import { GaesupWorld, GaesupWorldContent, GaesupController, useGaesupStore } from 'gaesup-world';
 import { Physics, RigidBody, type RapierRigidBody } from '@react-three/rapier';
 import { WebGPURenderer } from 'three/webgpu';
 import * as THREE from 'three';
-import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 
-type Model = { gltf: GLTF; url: string };
-type ViewProps = { model: Model; animation: number; hidden: Set<number>; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
+extend(THREE as unknown as Parameters<typeof extend>[0]);
+import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { FaceEditor, type PaintSettings } from './face-editor';
+
+type Model = { gltf: GLTF; url: string; rigged: boolean };
+type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
 const worldMode = { type: 'character', controller: 'keyboard', control: 'thirdPerson' } as const;
 
 function release(object: THREE.Object3D) {
@@ -41,6 +45,7 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
   const mixer = useMemo(() => new THREE.AnimationMixer(model.gltf.scene), [model]);
   const playing = useRef(-2);
   const ready = useRef(false), sample = useRef(0);
+  useEffect(() => { ready.current = false; playing.current = -2; }, [model]);
   const bounds = useMemo(() => new THREE.Box3().setFromObject(model.gltf.scene), [model]);
   const size = useMemo(() => bounds.getSize(new THREE.Vector3()), [bounds]);
   const origin = useMemo(() => [-((bounds.min.x + bounds.max.x) / 2), -bounds.min.y, -((bounds.min.z + bounds.max.z) / 2)] as [number, number, number], [bounds]);
@@ -70,11 +75,16 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
   useFrame((_, delta) => {
     if (!body.current || !outer.current) return;
     const velocity = body.current.linvel(), speed = Math.hypot(velocity.x, velocity.z);
-    const pattern = speed > 5 ? /run|running/i : speed > .1 ? /walk|walking/i : /idle|standing/i;
+    const pattern = velocity.y > .8 ? /^jump$/i : velocity.y < -1 ? /^fall$/i : speed > 5 ? /run|running/i : speed > .1 ? /walk|walking/i : /idle|standing/i;
     const requested = animation >= 0 ? animation : model.gltf.animations.findIndex(clip => pattern.test(clip.name));
     if (requested !== playing.current) {
       mixer.stopAllAction();
-      if (requested >= 0) mixer.clipAction(model.gltf.animations[requested]).reset().play();
+      if (requested >= 0) {
+        const clip = model.gltf.animations[requested];
+        const action = mixer.clipAction(clip).reset();
+        action.setLoop(/^jump$|^fall$/i.test(clip.name) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
+        action.clampWhenFinished = true; action.fadeIn(.12).play();
+      }
       playing.current = requested;
     }
     mixer.update(Math.min(delta, .1));
@@ -91,6 +101,36 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
     excludeBaseNodes={excluded}>
     <group rotation={[0, Math.PI, 0]}><group position={origin}><primitive object={model.gltf.scene} dispose={null} /></group></group>
   </GaesupController>;
+}
+
+function EditingScene({ model, editing, hidden, onEditor, onPaint, onReady }: ViewProps) {
+  const { camera, gl } = useThree();
+  const controls = useRef<OrbitControls | null>(null);
+  const group = useRef<THREE.Group>(null!);
+  useEffect(() => {
+    model.gltf.scene.traverse(node => {
+      const index = model.gltf.parser.associations.get(node)?.nodes;
+      if (index !== undefined) node.visible = !hidden.has(index);
+    });
+  }, [model, hidden]);
+  useEffect(() => {
+    useGaesupStore.getState().setInteractionActive(false);
+    model.gltf.scene.traverse(object => { if (object instanceof THREE.SkinnedMesh) object.skeleton.pose(); });
+    model.gltf.scene.updateMatrixWorld(true);
+    let box = new THREE.Box3().setFromObject(model.gltf.scene);
+    const initialCenter = box.getCenter(new THREE.Vector3());
+    group.current.position.set(-initialCenter.x, -box.min.y, -initialCenter.z);
+    group.current.updateMatrixWorld(true);
+    box = new THREE.Box3().setFromObject(model.gltf.scene);
+    const center = box.getCenter(new THREE.Vector3()), height = Math.max(box.getSize(new THREE.Vector3()).y, .5);
+    camera.position.copy(center).add(new THREE.Vector3(0, height * .1, height * 2.4)); camera.lookAt(center);
+    const orbit = new OrbitControls(camera, gl.domElement); orbit.target.copy(center); orbit.enableDamping = true;
+    orbit.mouseButtons = { LEFT: -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }; orbit.update(); controls.current = orbit;
+    const editor = editing ? new FaceEditor(model.gltf, gl.domElement, camera, onPaint, `atelier.faces:${model.url}`) : null; onEditor(editor); onReady();
+    return () => { editor?.dispose(); orbit.dispose(); controls.current = null; onEditor(null); };
+  }, [model, editing, camera, gl, onEditor, onPaint, onReady]);
+  useFrame(() => controls.current?.update());
+  return <group ref={group}><primitive object={model.gltf.scene} dispose={null} /></group>;
 }
 
 function Garden() {
@@ -121,10 +161,10 @@ function CharacterViewport(props: ViewProps) {
     <PreviewBoundary onError={props.onError}>
         <Suspense fallback={null}>
           <Physics gravity={[0, -9.81, 0]}>
-            <GaesupWorldContent showGrid={false} showAxes={false}>
+            {props.editing || !props.model.rigged ? <><Garden /><EditingScene {...props} /></> : <GaesupWorldContent showGrid={false} showAxes={false}>
               <Garden />
               <CharacterScene {...props} />
-            </GaesupWorldContent>
+            </GaesupWorldContent>}
           </Physics>
         </Suspense>
     </PreviewBoundary>
@@ -142,6 +182,12 @@ export class ModelViewer {
   private model: Model | null = null;
   private retired: THREE.Object3D[] = [];
   private animation = -1;
+  private editing = false;
+  private editor: FaceEditor | null = null;
+  private paintSettings: PaintSettings = { role: 'hair', radius: .04, erase: false };
+  private paintCount: (count: number) => void = () => {};
+  private onEditor = (editor: FaceEditor | null) => { this.editor = editor; if (editor) editor.settings = this.paintSettings; };
+  private onPaint = (count: number) => this.paintCount(count);
   private hidden = new Set<number>();
   private generation = 0;
   private disposed = false;
@@ -197,7 +243,8 @@ export class ModelViewer {
   };
   private render() {
     if (!this.model || this.disposed || !this.root) return;
-    this.root.render(<CharacterViewport model={this.model} animation={this.animation} hidden={this.hidden}
+    this.root.render(<CharacterViewport model={this.model} animation={this.animation} hidden={this.hidden} editing={this.editing}
+      onEditor={this.onEditor} onPaint={this.onPaint}
       onReady={this.onReady} onError={this.onError} onWorld={this.onWorld} />);
   }
   async load(url: string) {
@@ -211,7 +258,8 @@ export class ModelViewer {
     const gltf = await new GLTFLoader().parseAsync(content, '');
     if (this.disposed || token !== this.generation) { release(gltf.scene); return []; }
     if (this.model) this.retired.push(this.model.gltf.scene);
-    this.model = { gltf, url: `${url}${url.includes('?') ? '&' : '?'}sha256=${digest}` }; this.animation = -1; this.hidden = new Set();
+    let rigged = false; gltf.scene.traverse(object => { if (object instanceof THREE.SkinnedMesh) rigged = true; });
+    this.model = { gltf, rigged, url: `${url}${url.includes('?') ? '&' : '?'}sha256=${digest}` }; this.animation = -1; this.hidden = new Set();
     this.container.dataset.modelSha256 = digest;
     await this.initialize();
     if (this.disposed || token !== this.generation) return [];
@@ -219,6 +267,11 @@ export class ModelViewer {
     return gltf.animations.map((clip, index) => ({ index, name: clip.name || `Animation ${index + 1}` }));
   }
   play(index: number) { this.animation = index; this.render(); }
+  setEditing(enabled: boolean, onCount: (count: number) => void) { this.editing = enabled; this.paintCount = onCount; this.render(); }
+  setPaint(settings: PaintSettings) { this.paintSettings = settings; if (this.editor) this.editor.settings = settings; }
+  selections() { return this.editor?.export() ?? []; }
+  undoPaint() { this.editor?.undo(); }
+  clearPaint() { this.editor?.clear(); }
   setVisible(index: number, visible: boolean) {
     this.hidden = new Set(this.hidden);
     if (visible) this.hidden.delete(index); else this.hidden.add(index);

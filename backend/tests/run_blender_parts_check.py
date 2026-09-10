@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import struct
 import tempfile
+import hashlib
 
 from api.test_characters import rigged_glb
 from src.services.character_parts import separate_materials
@@ -43,4 +44,14 @@ if __name__ == '__main__':
     assert all('skin' in node for node in doc['nodes'] if 'mesh' in node)
     assert model.read_bytes() == original
     assert (output / 'source.blend').is_file() and (output / 'rest.png').is_file()
+    face_output = root / 'authored-version'
+    separate_materials(model, face_output, [
+        {'node_index': 0, 'primitive_index': 0, 'role': 'head', 'faces': [0]},
+        {'node_index': 0, 'primitive_index': 1, 'role': 'hat', 'faces': [0]},
+    ], hashlib.sha256(original).hexdigest())
+    face_doc, face_binary = parse_glb((face_output / 'character.glb').read_bytes(), strict=True)
+    source_doc, source_binary = parse_glb(original, strict=True)
+    assert face_binary[:len(source_binary)] == source_binary
+    assert face_doc['skins'] == source_doc['skins']
+    assert (face_output / 'source.blend').is_file() and (face_output / 'rest.png').is_file()
     print(json.dumps({'status': 'passed', 'output': str(output), 'result': result, 'quality': quality['metrics']}))

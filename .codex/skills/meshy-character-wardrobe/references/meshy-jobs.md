@@ -26,4 +26,6 @@ uv run python -m src.character_cli --run <run> download --stage rigging
 When status is `submission_uncertain`, inspect Meshy's task list or dashboard and recover with `status --task-id <id>`. Do not infer that no task exists from the absence of a local task ID or from My Assets alone.
 
 When rigging is rejected, preserve the HTTP status and generated GLB. Decide per character whether to improve the source/model and create a new explicitly named run, or author a local rig recipe. Do not overwrite the rejected run or describe a local fallback as Meshy-rigged.
+# Current preparation profiles
 
+For Meshy 7 / Smart Topology generation and the resumable rig + idle/walk/run/jump/fall operation, use the [preparation contract](../../../../docs/character-preparation.md). Rigging and additional animation clips are separate provider tasks even when the UI offers one execution. Resolve current action IDs from the free library endpoint and retain the authorized task-count limit across resumes.

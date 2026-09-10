@@ -190,3 +190,6 @@ migration:
 
 backend/migrations/001_postgresql_3d_schema.down.sql은 위 테이블을 의존성 역순으로 삭제합니다.
 운영 데이터와 S3 객체 목록을 백업한 경우에만 직접 실행해야 합니다.
+## 캐릭터 작업 저장
+
+캐릭터 파이프라인은 migration `002_character_wardrobe`와 별도 `gaesup_character` schema, `CHARACTER_DATABASE_URL`을 사용한다. 원본 파일 일지와 PostgreSQL 인덱스의 역할·재색인·비파괴 rollback은 [캐릭터 준비 계약](character-preparation.md#postgresql)에 정의되어 있다. 기존 world schema와 분리되어 있다.

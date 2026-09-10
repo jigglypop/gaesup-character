@@ -73,3 +73,36 @@ test('registration, upload error and narrow viewport work with the real API', as
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: 'test-results/workspace-mobile.png', fullPage: true });
 });
+
+test('painted source faces become a versioned Blender part through the real API', async ({ page, request }) => {
+  test.setTimeout(90000);
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  const list = await (await request.get('/api/characters')).json();
+  const source = list.characters.find((c: { model_id: string }) => c.model_id);
+  await page.goto('/#' + source.id);
+  await expect(page.locator('#model-loading')).toHaveCount(0);
+  await page.locator('#expand-world').click();
+  await page.locator('#edit-parts').click();
+  await page.locator('#paint-role').selectOption('hat');
+  const canvas = page.locator('#viewer canvas');
+  await expect(canvas).toBeVisible();
+  // Camera framing completes on an actual rendered frame.
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.click(box.x + box.width * .47, box.y + box.height * .54);
+  await expect(page.locator('#split-painted')).toBeEnabled();
+  const actionResponse = page.waitForResponse(response => response.url().endsWith('/actions/separate_parts') && response.request().method() === 'POST');
+  await page.locator('#split-painted').click();
+  const receipt = await (await actionResponse).json();
+  await expect.poll(async () => (await (await request.get(`/api/characters/${source.id}/operations/${receipt.operation.id}`)).json()).status, { timeout: 60000 }).toBe('succeeded');
+  const result = await (await request.get('/api/characters/' + source.id)).json();
+  expect(result.model_sha256).not.toBe(source.model_sha256);
+  expect(result.parts.some((part: { role: string }) => part.role === 'hat')).toBe(true);
+  expect(result.artifacts.some((a: { id: string }) => a.id === 'parts_blend')).toBe(true);
+  expect(result.inspection.errors).toEqual([]);
+  expect(result.review.decision).not.toBe('approved');
+  await page.reload();
+  await expect(page.locator('#model-loading')).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: /hat_.* 역할/ })).toHaveValue('hat');
+  expect(errors).toEqual([]);
+});

@@ -7,6 +7,15 @@ import struct
 from typing import Any
 
 
+def build_glb(doc: dict, binary: bytes) -> bytes:
+    encoded = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    encoded += b" " * (-len(encoded) % 4)
+    binary += b"\0" * (-len(binary) % 4)
+    return (struct.pack("<III", 0x46546C67, 2, 28 + len(encoded) + len(binary))
+            + struct.pack("<II", len(encoded), 0x4E4F534A) + encoded
+            + struct.pack("<II", len(binary), 0x004E4942) + binary)
+
+
 def parse_glb(data: bytes, *, strict: bool = False) -> tuple[dict[str, Any], bytes]:
     if len(data) < 20:
         raise ValueError("GLB is too small")

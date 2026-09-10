@@ -5,10 +5,10 @@ import './style.css';
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const escape = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
 const statusNames: Record<string, string> = { ready: '준비됨', blocked: '입력 / 확인 필요', in_progress: '작업 중', review_required: '검수 대기', approved: '승인됨' };
-const roleNames: Record<string, string> = { body: '몸', outfit_base: '원래 의상', hair: '헤어', accessory: '액세서리', eyes: '눈', other: '기타' };
+const roleNames: Record<string, string> = { body: '몸', head: '머리', hair: '헤어', hat: '모자', top: '상의', pants: '바지', skirt: '치마', dress: '원피스', shoes: '신발', outfit_base: '원래 의상', accessory: '액세서리', eyes: '눈', other: '기타' };
 let characters: Character[] = [], selected = decodeURIComponent(location.hash.slice(1)), current: Character | null = null;
 let viewer: ModelViewer | null = null, loading = false, submitting = false, timer: ReturnType<typeof setTimeout> | undefined;
-let viewGeneration = 0;
+let viewGeneration = 0, editingParts = false;
 let renderedRevision: string | undefined, renderedId: string | undefined;
 
 app.innerHTML = `
@@ -52,7 +52,7 @@ function renderCards() {
 }
 
 async function renderDetail() {
-  viewer?.dispose(); viewer = null;
+  editingParts = false; viewer?.dispose(); viewer = null;
   const generation = ++viewGeneration;
   const c = current;
   renderedRevision = c?.revision; renderedId = c?.id;
@@ -63,7 +63,7 @@ async function renderDetail() {
   const metrics = c.inspection.metrics;
   const busy = ['accepted', 'running', 'recovery_required'].includes(c.operation?.status || '');
   const rig = { meshy: 'Meshy 기본 리깅', local_fallback: '로컬 리깅 · 검수 필요', unknown: '출처 확인 전' }[c.rig_origin] || c.rig_origin;
-  const rawActions = c.next_actions.filter(a => !['organize_parts', 'record_review'].includes(a.id));
+  const rawActions = c.next_actions.filter(a => !['organize_parts', 'record_review', 'separate_parts'].includes(a.id));
   element.innerHTML = `<div class="detail-heading"><div><span class="eyebrow">CHARACTER STUDIO</span><h2>${escape(c.name)} <span class="id-label">${escape(c.id)}</span></h2></div>${badge(c)}</div>
     <div class="studio-grid"><div class="preview-panel"><div class="preview-toolbar"><span class="preview-label"><i></i>${model ? '3D PREVIEW' : 'SOURCE PREVIEW'}</span><select id="model-select" aria-label="미리보기 모델">${c.artifacts.filter(a => a.kind === 'model').map(a => `<option value="${escape(a.url)}" ${a.id === c.model_id ? 'selected' : ''}>${escape({ local_fallback: '로컬 리깅 모델', generated: '생성 원본', rigged: 'Meshy 리깅', imported: '가져온 GLB', walking: '걷기', running: '달리기', parts_model: '파츠 모델' }[a.id] || a.id)}</option>`).join('') || '<option>입력 이미지</option>'}</select></div><div id="viewer" class="viewer">${!model ? source ? `<img class="source-preview" src="${escape(source.url)}" alt="캐릭터 입력 이미지" />` : '<div class="preview-empty"><span>◇</span><h3>캐릭터의 시작을 가져오세요</h3><p>이미지 또는 리깅된 GLB를 업로드해 주세요.</p></div>' : '<div id="model-loading" class="model-loading">3D 모델을 불러오는 중…</div>'}</div><div class="preview-bottom"><span>${model ? '드래그하여 회전 · 스크롤하여 확대' : '원본 이미지 보존'}</span><select id="animation" aria-label="애니메이션"><option value="-1">기본 자세</option></select></div></div>
     <div class="inspector"><div class="panel-heading"><h3>캐릭터 설정</h3><span class="small-label">OVERVIEW</span></div><form id="settings-form"><label>이름<input name="name" aria-label="캐릭터 이름" required maxlength="80" value="${escape(c.name)}" /></label><div class="field-row"><label>키 (m)<input name="height" aria-label="캐릭터 키" type="number" min="0.1" max="100" step="any" value="${c.height_meters ?? ''}" placeholder="예: 1.7" ${c.provider.status ? 'readonly' : ''} /></label><label>리깅 출처<div class="read-value">${escape(rig)}</div></label></div><button type="submit" class="secondary full" ${busy ? 'disabled' : ''}>설정 저장</button></form>
@@ -83,6 +83,14 @@ async function renderDetail() {
     if (button.dataset.action === 'recover_task') {
       const task = window.prompt('기존 Meshy 작업 ID를 입력하세요. 새 작업을 생성하지 않습니다.');
       if (task) void submitAction('recover_task', { task_id: task });
+    } else if (button.dataset.action === 'recover_motion_task') {
+      const slot = Object.entries(c.motion_pack.tasks).find(([, task]) => task.status === 'submission_uncertain')?.[0];
+      const task = window.prompt(`${slot} 단계의 기존 Meshy 작업 ID를 입력하세요.`);
+      if (slot && task) void submitAction('recover_motion_task', { slot, task_id: task });
+    } else if (button.dataset.action === 'submit_generation') {
+      void submitAction('submit_generation', { profile: document.querySelector<HTMLSelectElement>('#generation-profile')?.value || 'meshy-7' });
+    } else if (button.dataset.action === 'prepare_character') {
+      void submitAction('prepare_character', { max_new_tasks: 6, actions: { idle: 0, walk: 1, run: 14, jump: 466, fall: 502 } });
     } else void submitAction(button.dataset.action!);
   });
   document.querySelector<HTMLFormElement>('#parts-form')?.addEventListener('submit', event => {
@@ -109,6 +117,26 @@ async function renderDetail() {
     };
   }
   document.querySelector('.quality-note')?.insertAdjacentHTML('afterend', `<div class="artifact-links">${outputs.map(a => `<a href="${escape(a.url)}" target="_blank" rel="noopener">${a.id === 'parts_blend' ? 'Blender 작업 파일 ↗' : a.id === 'rest_render' ? '기본 자세 렌더 ↗' : '현재 GLB 받기 ↗'}</a>`).join('')}</div>`);
+  if (c.motion_pack?.status) document.querySelector('#pending-recovery')!.insertAdjacentHTML('beforebegin', `<div class="motion-status"><h3>기본 동작 패키지</h3><p>${escape(c.motion_pack.status)} · 새 요청 ${c.motion_pack.submitted_tasks}/${c.motion_pack.max_new_tasks}</p>${['idle','walk','run','jump','fall'].map(slot => `<span class="motion-slot">${slot} · ${c.motion_pack.clips[slot] ? '다운로드됨' : escape(c.motion_pack.tasks[slot]?.status || '대기')}</span>`).join('')}</div>`);
+  if (model && c.next_actions.some(a => a.id === 'separate_parts' && a.enabled)) {
+    document.querySelector('.preview-bottom')!.insertAdjacentHTML('afterend', `<div class="part-editor"><button id="edit-parts" class="secondary">파츠 영역 편집</button><div id="paint-tools" hidden><div class="paint-row"><label>파츠<select id="paint-role">${Object.entries(roleNames).map(([role,name]) => `<option value="${role}" ${role === 'hair' ? 'selected' : ''}>${name}</option>`).join('')}</select></label><label>브러시<input id="paint-size" type="range" min="1" max="15" value="4" /></label><label><input type="checkbox" id="paint-erase" /> 지우기</label></div><p class="form-hint">왼쪽 드래그로 원본 면 선택 · 오른쪽 드래그로 회전 · 휠 확대. 선택하지 않은 면은 기타 파츠로 보존됩니다.</p><div class="paint-row"><button class="quiet" id="paint-undo">되돌리기</button><button class="quiet" id="paint-clear">선택 지우기</button><span id="paint-count">0개 면 선택</span><button id="split-painted" class="primary" disabled>선택 영역 분리</button></div></div></div>`);
+    document.querySelector<HTMLButtonElement>('#edit-parts')!.onclick = () => {
+      editingParts = !editingParts; document.querySelector<HTMLElement>('#paint-tools')!.hidden = !editingParts;
+      document.querySelector('#edit-parts')!.textContent = editingParts ? '월드로 돌아가기' : '파츠 영역 편집';
+      document.querySelector<HTMLSelectElement>('#animation')!.disabled = editingParts;
+      document.querySelector<HTMLSelectElement>('#model-select')!.disabled = editingParts;
+      viewer?.setEditing(editingParts, count => { document.querySelector('#paint-count')!.textContent = `${count.toLocaleString()}개 면 선택`; document.querySelector<HTMLButtonElement>('#split-painted')!.disabled = count === 0; });
+    };
+    const settings = () => viewer?.setPaint({ role: document.querySelector<HTMLSelectElement>('#paint-role')!.value, radius: Number(document.querySelector<HTMLInputElement>('#paint-size')!.value) / 100, erase: document.querySelector<HTMLInputElement>('#paint-erase')!.checked });
+    for (const id of ['paint-role','paint-size','paint-erase']) document.querySelector(`#${id}`)!.addEventListener('input', settings);
+    document.querySelector<HTMLButtonElement>('#paint-undo')!.onclick = () => viewer?.undoPaint();
+    document.querySelector<HTMLButtonElement>('#paint-clear')!.onclick = () => viewer?.clearPaint();
+    document.querySelector<HTMLButtonElement>('#split-painted')!.onclick = () => {
+      const selections = viewer?.selections(); if (selections?.length) void submitAction('separate_parts', { source_sha256: c.model_sha256, selections });
+    };
+  }
+  document.querySelector('[data-action="prepare_character"]')?.insertAdjacentHTML('afterend', '<p class="form-hint">유료: 리깅 최대 1회 + 동작 최대 5회. idle(0), walk(1), run(14), jump(466), fall(502). 기존 walk/run은 재사용하며 실패를 자동 재제출하지 않습니다.</p>');
+  document.querySelector('[data-action="submit_generation"]')?.insertAdjacentHTML('beforebegin', '<label>생성 방식<select id="generation-profile"><option value="smart-topology">Smart Topology · 분리된 파츠 · 15,000면</option><option value="meshy-7">Meshy 7 · 디테일 · 30,000면</option></select></label>');
   renderRecovery();
   if (model) {
     try {
@@ -128,6 +156,7 @@ async function renderDetail() {
       document.querySelector<HTMLSelectElement>('#model-select')!.onchange = event => {
         const url = (event.target as HTMLSelectElement).value;
         const canonical = url === model.url;
+        const editorButton = document.querySelector<HTMLButtonElement>('#edit-parts'); if (editorButton) editorButton.disabled = !canonical;
         document.querySelectorAll<HTMLButtonElement>('#review-form button').forEach(button => { button.disabled = !canonical || !c.next_actions.find(a => a.id === 'record_review')?.enabled; });
         document.querySelectorAll<HTMLInputElement>('[data-visible]').forEach(input => { input.disabled = !canonical; input.checked = true; });
         if (!canonical) notice('다른 산출물을 미리 보는 중입니다. 현재 버전으로 돌아오면 검수를 기록할 수 있습니다.');
@@ -178,7 +207,7 @@ async function refresh(automatic = true) {
     const changed = fresh?.revision !== renderedRevision || fresh?.id !== renderedId;
     const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName || '');
     current = fresh; renderCards();
-    if (!automatic || (changed && !editing)) void renderDetail();
+    if (!automatic || (changed && !editing && !editingParts)) void renderDetail();
     document.querySelector('#connection-label')!.textContent = '동기화됨'; document.querySelector('#connection-dot')!.classList.add('online');
   } catch (error) {
     notice((error as Error).message, true); document.querySelector('#connection-label')!.textContent = '연결 확인'; document.querySelector('#connection-dot')!.classList.remove('online');
