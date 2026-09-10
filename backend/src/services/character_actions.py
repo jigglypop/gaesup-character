@@ -30,6 +30,17 @@ def inspect_model(path) -> dict:
                                        for mesh in doc.get("meshes", []))}
 
 
+def publish_parts(pipeline, entry, run, control, operation, user_id):
+    output = run / "operations" / operation["id"] / "blender"
+    control.update(parts_model=str((output / "character.glb").relative_to(pipeline.root)),
+                   parts_blend=str((output / "source.blend").relative_to(pipeline.root)),
+                   rest_render=str((output / "rest.png").relative_to(pipeline.root)),
+                   rig_origin=pipeline.detail(entry["id"], user_id)["rig_origin"],
+                   inspection=inspect_model(output / "character.glb"), parts=[], review={}, body_coverage="unknown")
+    if operation["action_id"] == "separate_parts":
+        control.update(parts=read_json(output / "selection.json")["parts"], parts_sha256=_digest(output / "character.glb"))
+
+
 def perform(pipeline: CharacterPipeline, entry, run, control, operation):
     action = operation["action_id"]
     payload = operation["payload"]
@@ -88,13 +99,7 @@ def perform(pipeline: CharacterPipeline, entry, run, control, operation):
             separate_materials(model, output, payload.get("selections"), payload.get("source_sha256"))
         except ValueError as exc:
             raise PipelineError("separation_failed", "재질 분리를 완료하지 못했습니다. 원본은 보존되며 영역별 Blender 편집이 필요할 수 있습니다.") from exc
-        control.update(parts_model=str((output / "character.glb").relative_to(pipeline.root)),
-                       parts_blend=str((output / "source.blend").relative_to(pipeline.root)),
-                       rest_render=str((output / "rest.png").relative_to(pipeline.root)),
-                       rig_origin=pipeline.detail(entry["id"], operation["user_id"])["rig_origin"],
-                       inspection=inspect_model(output / "character.glb"), parts=[], review={}, body_coverage="unknown")
-        if action == "separate_parts":
-            control.update(parts=read_json(output / "selection.json")["parts"], parts_sha256=_digest(output / "character.glb"))
+        publish_parts(pipeline, entry, run, control, operation, operation["user_id"])
     elif action == "organize_parts":
         inspection = inspect_model(model)
         known = {node["index"] for node in inspection["nodes"]}
@@ -139,7 +144,10 @@ def execute(pipeline: CharacterPipeline, character_id: str, user_id: int, operat
     if operation.get("status") != "accepted" or operation.get("executor") != pipeline.instance:
         return
     try:
-        with pipeline.lock(run):
+        with pipeline.lock(run, blender=operation["action_id"] in {"separate_materials", "separate_parts"}):
+            operation = read_json(path)
+            if operation.get("status") != "accepted" or operation.get("executor") != pipeline.instance:
+                return
             entry, _, control = pipeline.entry(character_id, user_id)
             operation.update(status="running", updated_at=now(), user_id=user_id)
             _write_json(path, operation)

@@ -4,10 +4,12 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import json
 
 from src.services.asset_delivery import DeliveryPolicy, inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.wardrobe import _digest
+from src.services.process_identity import identity
 
 
 def blender_executable() -> str | None:
@@ -39,13 +41,14 @@ def separate_materials(model: Path, output: Path, selections: list[dict] | None 
         worker_model.write_bytes(content)
         _write_json(output / "selection.json", {"source_sha256": source_sha256, "selections": selections, "parts": parts})
     _write_json(output / "input.json", {"model": str(worker_model.resolve()), "output": str(output.resolve()),
+                                      "original_model": str(model.resolve()),
                                       "source_sha256": _digest(worker_model), "review_only": selections is not None})
     command = [executable, "--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1",
                "--python", str(Path(__file__).with_name("character_parts_blender.py")), "--", str(output / "input.json")]
     with (output / "blender.log").open("wb") as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-        _write_json(output / "runner.json", {"pid": process.pid, "source_sha256": _digest(model)})
+        _write_json(output / "runner.json", {"process": identity(process.pid), "source_sha256": _digest(model)})
         try:
             code = process.wait(timeout=240)
         except subprocess.TimeoutExpired:
@@ -54,7 +57,33 @@ def separate_materials(model: Path, output: Path, selections: list[dict] | None 
             raise ValueError("Blender timed out; isolated worker was stopped")
     if code:
         raise ValueError("Blender separation failed; original model is preserved")
-    if selections is not None:
+    return finalize(model, output)
+
+
+def finalize(model: Path, output: Path) -> dict:
+    """Validate a sealed worker result; safe to repeat without launching Blender."""
+    source = inspect_glb(model.read_bytes())
+    payload = json.loads((output / "input.json").read_text(encoding="utf-8"))
+    runner = json.loads((output / "runner.json").read_text(encoding="utf-8"))
+    seal = json.loads((output / "worker-complete.json").read_text(encoding="utf-8"))
+    if runner.get("source_sha256") != _digest(model) or source["errors"]:
+        raise ValueError("Original source changed")
+    selections = payload.get("review_only", False)
+    worker_model = output / "selected.glb" if selections else model
+    expected = {"source.blend", "rest.png", "candidates.json", "selected.glb" if selections else "character.glb"}
+    if selections:
+        expected.add("selection.json")
+    if (payload.get("source_sha256") != _digest(worker_model)
+            or seal.get("source_sha256") != payload["source_sha256"]
+            or seal.get("input_sha256") != _digest(output / "input.json")
+            or set(seal.get("files", {})) != expected):
+        raise ValueError("Worker completion does not match its input")
+    if any(not (output / name).is_file() or _digest(output / name) != digest for name, digest in seal["files"].items()):
+        raise ValueError("Worker completion files changed")
+    if selections:
+        selection = json.loads((output / "selection.json").read_text(encoding="utf-8"))
+        if selection.get("source_sha256") != _digest(model):
+            raise ValueError("Part selection source changed")
         # The GLB retains exact source buffers; Blender produces the editable .blend and render.
         shutil.copyfile(worker_model, output / "character.glb")
     policy = DeliveryPolicy(required_joints=source["metrics"]["joints"],
@@ -64,6 +93,6 @@ def separate_materials(model: Path, output: Path, selections: list[dict] | None 
     if quality["errors"]:
         raise ValueError("Separated model failed validation; original model is preserved")
     result = {"source_sha256": _digest(model), "model_sha256": _digest(output / "character.glb"),
-              "recipe": "authored-faces-v1" if selections is not None else "material-boundaries-v1", "status": "review_required"}
+              "recipe": "authored-faces-v1" if selections else "material-boundaries-v1", "status": "review_required"}
     _write_json(output / "complete.json", result)
     return result

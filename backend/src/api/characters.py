@@ -167,3 +167,10 @@ def action(character_id: str, action_id: str, background: BackgroundTasks,
 @router.get("/{character_id}/operations/{operation_id}")
 def operation(character_id: str, operation_id: str, user: UserContext = Depends(get_current_user), pipeline=Depends(get_pipeline)):
     return pipeline.operation(character_id, user.user_id, operation_id)
+
+
+@router.post("/{character_id}/operations/{operation_id}/recover")
+def recover_operation(character_id: str, operation_id: str, if_match: str = Header(),
+                      user: UserContext = Depends(get_current_user), pipeline=Depends(get_pipeline)):
+    from src.services.character_recovery import recover
+    return {"operation": recover(pipeline, character_id, user.user_id, operation_id, if_match.strip('"'))}

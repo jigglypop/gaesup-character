@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import re
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -55,24 +56,28 @@ def _worker(payload: dict) -> str:
 
 
 @contextmanager
-def run_lock(directory: Path, port: int):
+def run_lock(directory: Path, port: int, *, blender: bool = True):
     """Serialize CLI processes; keep locks after uncertain Blender execution."""
     import tempfile
 
     directory = directory.resolve()
     directory.parent.mkdir(parents=True, exist_ok=True)
-    locks = [directory.with_name(directory.name + ".lock"),
-             Path(tempfile.gettempdir()) / f"asset-wardrobe-blender-{port}.lock"]
+    from src.services.process_identity import identity, lease_guard
+    lease = {"version": 1, "token": uuid.uuid4().hex, "directory": str(directory), "owner": identity()}
+    locks = [directory.with_name(directory.name + ".lock")]
+    if blender:
+        locks.append(Path(tempfile.gettempdir()) / f"asset-wardrobe-blender-{port}.lock")
     acquired = []
     uncertain = False
     try:
-        for path in locks:
-            try:
-                with path.open("x", encoding="utf-8") as stream:
-                    stream.write(str(directory))
-            except FileExistsError as exc:
-                raise ValueError(f"Run or Blender is busy; inspect lock: {path}") from exc
-            acquired.append(path)
+        with lease_guard(directory):
+            for path in locks:
+                try:
+                    with path.open("x", encoding="utf-8") as stream:
+                        stream.write(json.dumps(lease))
+                except FileExistsError as exc:
+                    raise ValueError(f"Run or Blender is busy; inspect lock: {path}") from exc
+                acquired.append(path)
         yield
     except (BlenderExecutionUncertain, KeyboardInterrupt):
         uncertain = True

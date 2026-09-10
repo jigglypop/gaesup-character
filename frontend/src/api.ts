@@ -39,4 +39,5 @@ export const api = {
   update: (c: Character, name: string, height: number | null) => request<Character>(endpoint(c.id), { method: 'PATCH', headers: { 'Content-Type': 'application/json', 'If-Match': c.revision }, body: JSON.stringify({ name, height_meters: height }) }),
   upload: (c: Character, file: File, kind: string) => request<Character>(`${endpoint(c.id)}/sources?kind=${kind}`, { method: 'POST', headers: { 'If-Match': c.revision, 'Content-Type': file.type || 'application/octet-stream' }, body: file }),
   action: (c: Character, action: string, payload: object, key: string) => request<{ operation: Operation }>(`${endpoint(c.id)}/actions/${action}`, { method: 'POST', headers: { 'If-Match': c.revision, 'Idempotency-Key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
+  recover: (c: Character) => request<{ operation: Operation }>(`${endpoint(c.id)}/operations/${c.operation!.id}/recover`, { method: 'POST', headers: { 'If-Match': c.revision } }),
 };

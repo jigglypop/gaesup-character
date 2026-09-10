@@ -66,9 +66,9 @@ class CharacterPipeline:
         raise PipelineError("not_found", "캐릭터를 찾을 수 없습니다.", 404)
 
     @contextmanager
-    def lock(self, run: Path):
+    def lock(self, run: Path, *, blender: bool = False):
         try:
-            with run_lock(run, self.port):
+            with run_lock(run, self.port, blender=blender):
                 yield
         except ValueError as exc:
             if "busy" in str(exc):
@@ -220,7 +220,7 @@ class CharacterPipeline:
         if next_action in {"download_generation", "download_rigging"}:
             add(next_action, "생성 모델 받기" if next_action == "download_generation" else "리깅 모델 받기")
         # Recovery GETs are allowed after a server restart; they do not resubmit work.
-        if busy and operation["status"] == "recovery_required":
+        if busy and operation["status"] == "recovery_required" and (operation.get("error") or {}).get("code") != "executor_interrupted":
             for action in actions:
                 if action["id"] in {"refresh_provider", "recover_task", "resume_character", "recover_motion_task"}:
                     action.update(enabled=key_present, reason=None)
@@ -345,6 +345,8 @@ class CharacterPipeline:
             value = {"id": operation_id, "action_id": action_id, "status": "accepted", "payload": payload,
                      "fingerprint": fingerprint, "created_at": now(), "updated_at": now(),
                      "executor": self.instance, "input_sha256": view["model_sha256"], "error": None}
+            from src.services.process_identity import identity
+            value["executor_process"] = identity()
             if action_id == "separate_parts" and payload.get("source_artifact_id"):
                 source = self.files(entry, run, control).get(payload["source_artifact_id"])
                 if not source or _digest(source) != payload["source_sha256"]:

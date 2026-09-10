@@ -93,6 +93,10 @@ async function renderDetail() {
       void submitAction('prepare_character', { max_new_tasks: 6, actions: { idle: 0, walk: 1, run: 14, jump: 466, fall: 502 } });
     } else void submitAction(button.dataset.action!);
   });
+  if (c.operation?.status === 'recovery_required' && c.operation.error?.code === 'executor_interrupted') {
+    document.querySelector('.operation')!.insertAdjacentHTML('beforeend', '<button class="secondary" id="recover-operation">중단된 실행 복구</button>');
+    document.querySelector<HTMLButtonElement>('#recover-operation')!.onclick = () => void mutation(() => api.recover(c), '기존 작업과 파일을 확인해 실행 상태를 복구했습니다.');
+  }
   document.querySelector<HTMLFormElement>('#parts-form')?.addEventListener('submit', event => {
     event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement);
     void submitAction('organize_parts', { parts: c.inspection.nodes!.map(node => ({ node_index: node.index, role: form.get(`node-${node.index}`) })), body_coverage: form.get('coverage') });

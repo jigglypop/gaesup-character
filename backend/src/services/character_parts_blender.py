@@ -84,6 +84,15 @@ def run(payload):
     (output / 'candidates.json').write_text(json.dumps({"source_sha256": payload['source_sha256'],
         "armature": armatures[0].name, "objects": [obj.name for obj in meshes],
         "body_coverage": "unknown", "semantic_roles": "unassigned"}), encoding='utf-8')
+    names = ['source.blend', 'rest.png', 'candidates.json', 'selected.glb' if payload.get('review_only') else 'character.glb']
+    if payload.get('review_only'):
+        names.append('selection.json')
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    seal = {"source_sha256": payload['source_sha256'], "input_sha256": digest(output / 'input.json'),
+            "files": {name: digest(output / name) for name in names}}
+    temporary = output / 'worker-complete.json.part'
+    temporary.write_text(json.dumps(seal), encoding='utf-8')
+    temporary.replace(output / 'worker-complete.json')
 
 
 if __name__ == '__main__':
