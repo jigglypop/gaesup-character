@@ -57,7 +57,7 @@ def test_connect_uses_postgresql_url(monkeypatch):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://db.internal/asset_3d")
     monkeypatch.setenv("DB_STATEMENT_TIMEOUT_MS", "15000")
-    monkeypatch.setattr(db.psycopg, "connect", fake_connect)
+    monkeypatch.setattr(db, "_driver", lambda: (fake_connect, None))
 
     db._connect()
 

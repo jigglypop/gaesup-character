@@ -13,7 +13,7 @@ import uuid
 from PIL import Image
 
 from src.services.asset_delivery import inspect_glb
-from src.services.asset_editor import _write_json
+from src.services.asset_editor import _retry_file_io, _write_json
 from src.services.character_audit import inspect_character
 from src.services.glb import parse_glb
 from src.services.wardrobe import _digest, run_lock
@@ -26,7 +26,11 @@ class PipelineError(Exception):
 
 
 def read_json(path: Path, default=None):
-    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else (default or {})
+    try:
+        contents = _retry_file_io(lambda: path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return default or {}
+    return json.loads(contents)
 
 
 def now() -> str:
@@ -133,21 +137,26 @@ class CharacterPipeline:
                 return name, files[name]
         return None, None
 
-    def revision(self, entry: dict, run: Path, control: dict) -> str:
-        value = {"entry": entry, "control": control, "provider": read_json(run / "character.json"),
-                 "motion_pack": read_json(run / "motion-pack.json"),
-                 "operation": self.latest_operation(run),
+    def revision(self, entry: dict, run: Path, control: dict, *, snapshot: dict | None = None) -> str:
+        snapshot = snapshot if snapshot is not None else {
+            "provider": read_json(run / "character.json"),
+            "motion_pack": read_json(run / "motion-pack.json"),
+            "operation": self.latest_operation(run)}
+        value = {"entry": entry, "control": control, **snapshot,
                  "files": {key: [str(path), path.stat().st_size, path.stat().st_mtime_ns]
                            for key, path in self.files(entry, run, control).items()}}
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
 
     def detail(self, character_id: str, user_id: int) -> dict:
         entry, run, control = self.entry(character_id, user_id)
+        # Workers persist control before marking an operation terminal. Read in the
+        # reverse order so a completed operation never accompanies an older result.
+        operation = self.latest_operation(run)
+        control = read_json(run / "control.json")
         provider = read_json(run / "character.json")
         motion_pack = read_json(run / "motion-pack.json")
         files = self.files(entry, run, control)
         model_id, model = self.model(files)
-        operation = self.latest_operation(run)
         busy = operation and operation["status"] in {"accepted", "running", "recovery_required"}
         height = control.get("height_meters", entry.get("height_meters"))
         effective = {**entry, "height_meters": height, "run": str(run)}
@@ -227,7 +236,7 @@ class CharacterPipeline:
         artifacts = [{"id": name, "kind": "image" if name in {"reference", "rest_render"} else ("file" if name == "parts_blend" else "model"), "bytes": path.stat().st_size,
                       "url": f"/api/characters/{character_id}/artifacts/{name}"} for name, path in files.items()]
         return {"id": character_id, "name": control.get("name", entry.get("name", f"Character {character_id}")),
-                "revision": self.revision(entry, run, control), "height_meters": height,
+                "revision": self.revision(entry, run, control, snapshot={"provider": provider, "motion_pack": motion_pack, "operation": operation}), "height_meters": height,
                 "provider": {key: provider.get(key) for key in ("stage", "status", "progress", "task_id", "http_status")},
                 "pipeline_status": pipeline_status, "rig_origin": rig_origin, "operation": operation,
                 "problems": problems, "next_actions": actions, "artifacts": artifacts,
@@ -292,7 +301,7 @@ class CharacterPipeline:
                         raise ValueError("unsupported image")
                     suffix = ".png" if image.format == "PNG" else ".jpg"
                     image.verify()
-            except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
                 raise PipelineError("invalid_image", "PNG 또는 JPEG 이미지를 선택해 주세요.", 400) from exc
         entry, run, _ = self.entry(character_id, user_id)
         with self.lock(run):

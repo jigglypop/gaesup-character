@@ -11,7 +11,7 @@ def test_app_preserves_world_routes_and_adds_character_control():
     assert "/api/health" in paths
     assert "/api/world/generate" in paths
     assert all(
-        path in {"/health", "/api/health", "/api/characters"} or path.startswith(("/api/world/", "/api/characters/"))
+        path in {"/health", "/api/health", "/api/characters"} or path.startswith(("/api/world/", "/api/characters/", "/api/avatars/", "/api/avatar-factory/", "/api/avatar-blueprints/"))
         for path in paths
     )
 
@@ -22,6 +22,20 @@ def test_app_preserves_world_routes_and_adds_character_control():
         if method in {"get", "post", "put", "patch", "delete"}
     }
     assert operations == {
+        ("GET", "/api/avatar-factory/profiles"),
+        ("GET", "/api/avatar-factory/capabilities"),
+        ("GET", "/api/avatar-factory/jobs"),
+        ("POST", "/api/avatar-factory/jobs"),
+        ("POST", "/api/avatar-factory/image-jobs"),
+        ("GET", "/api/avatar-factory/jobs/{job_id}"),
+        ("POST", "/api/avatar-factory/jobs/{job_id}/resume"),
+        ("POST", "/api/avatar-factory/jobs/{job_id}/recover-task"),
+        ("GET", "/api/avatar-factory/jobs/{job_id}/artifacts/{filename}"),
+        ("GET", "/api/avatar-blueprints/assets/{asset_id}"),
+        ("POST", "/api/avatar-blueprints/assets"),
+        ("GET", "/api/avatar-blueprints/{character_id}"),
+        ("PUT", "/api/avatar-blueprints/{character_id}"),
+        ("GET", "/api/avatar-blueprints/{character_id}/recipe"),
         ("GET", "/health"),
         ("GET", "/api/health"),
         ("POST", "/api/world/textures/generate"),
@@ -44,6 +58,11 @@ def test_app_preserves_world_routes_and_adds_character_control():
         ("GET", "/api/characters/{character_id}/artifacts/{artifact_id}"),
         ("POST", "/api/characters/{character_id}/actions/{action_id}"),
         ("GET", "/api/characters/{character_id}/operations/{operation_id}"),
+        ("POST", "/api/characters/{character_id}/operations/{operation_id}/recover"),
+        ("GET", "/api/avatars/catalog"),
+        ("GET", "/api/avatars/assets/{asset_id}/model"),
+        ("GET", "/api/avatars/me"),
+        ("PUT", "/api/avatars/me"),
     }
 
 

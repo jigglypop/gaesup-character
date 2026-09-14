@@ -11,7 +11,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FaceEditor, type PaintSettings } from './face-editor';
 
 type Model = { gltf: GLTF; url: string; rigged: boolean };
-type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
+type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; studio?: boolean; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
 const worldMode = { type: 'character', controller: 'keyboard', control: 'thirdPerson' } as const;
 
 function release(object: THREE.Object3D) {
@@ -103,10 +103,11 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
   </GaesupController>;
 }
 
-function EditingScene({ model, editing, hidden, onEditor, onPaint, onReady }: ViewProps) {
+function EditingScene({ model, animation, editing, studio, hidden, onEditor, onPaint, onReady }: ViewProps) {
   const { camera, gl } = useThree();
   const controls = useRef<OrbitControls | null>(null);
   const group = useRef<THREE.Group>(null!);
+  const mixer = useMemo(() => new THREE.AnimationMixer(model.gltf.scene), [model]);
   useEffect(() => {
     model.gltf.scene.traverse(node => {
       const index = model.gltf.parser.associations.get(node)?.nodes;
@@ -125,11 +126,17 @@ function EditingScene({ model, editing, hidden, onEditor, onPaint, onReady }: Vi
     const center = box.getCenter(new THREE.Vector3()), height = Math.max(box.getSize(new THREE.Vector3()).y, .5);
     camera.position.copy(center).add(new THREE.Vector3(0, height * .1, height * 2.4)); camera.lookAt(center);
     const orbit = new OrbitControls(camera, gl.domElement); orbit.target.copy(center); orbit.enableDamping = true;
-    orbit.mouseButtons = { LEFT: -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }; orbit.update(); controls.current = orbit;
+    orbit.mouseButtons = { LEFT: studio && !editing ? THREE.MOUSE.ROTATE : -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }; orbit.update(); controls.current = orbit;
     const editor = editing ? new FaceEditor(model.gltf, gl.domElement, camera, onPaint, `atelier.faces:${model.url}`) : null; onEditor(editor); onReady();
     return () => { editor?.dispose(); orbit.dispose(); controls.current = null; onEditor(null); };
-  }, [model, editing, camera, gl, onEditor, onPaint, onReady]);
-  useFrame(() => controls.current?.update());
+  }, [model, editing, studio, camera, gl, onEditor, onPaint, onReady]);
+  useEffect(() => {
+    mixer.stopAllAction();
+    if (studio && animation >= 0 && model.gltf.animations[animation]) mixer.clipAction(model.gltf.animations[animation]).reset().play();
+    else model.gltf.scene.traverse(object => { if (object instanceof THREE.SkinnedMesh) object.skeleton.pose(); });
+    return () => { mixer.stopAllAction(); mixer.uncacheRoot(model.gltf.scene); };
+  }, [studio, animation, model, mixer]);
+  useFrame((_, delta) => { controls.current?.update(); if (studio) mixer.update(Math.min(delta, .1)); });
   return <group ref={group}><primitive object={model.gltf.scene} dispose={null} /></group>;
 }
 
@@ -157,6 +164,16 @@ function CharacterViewport(props: ViewProps) {
     return { type: 'thirdPerson' as const, xDistance: 0, yDistance: height * 1.35, zDistance: height * 2.8,
       distance: height * 2.8, fov: 42, zoom: 1, enableZoom: true, minZoom: .6, maxZoom: 2, zoomSpeed: .001, enableCollision: false };
   }, [props.model]);
+  if (props.studio) return <GaesupWorld urls={urls} enablePhysics={false}>
+    <PreviewBoundary onError={props.onError}>
+      <color attach="background" args={['#191f17']} />
+      <hemisphereLight args={[0xffffff, 0x86907b, 2.4]} />
+      <directionalLight position={[3, 5, 4]} intensity={3} />
+      <directionalLight position={[-3, 2, -2]} intensity={1.2} />
+      <gridHelper args={[20, 40, '#3d4b32', '#293222']} position={[0, -.02, 0]} />
+      <EditingScene {...props} />
+    </PreviewBoundary>
+  </GaesupWorld>;
   return <GaesupWorld urls={urls} mode={worldMode} cameraOption={cameraOption} enablePhysics>
     <PreviewBoundary onError={props.onError}>
         <Suspense fallback={null}>
@@ -195,7 +212,7 @@ export class ModelViewer {
   private renderers = new Set<WebGPURenderer>();
   private finish?: () => void;
   private fail?: (error: Error) => void;
-  constructor(private container: HTMLElement) {
+  constructor(private container: HTMLElement, private presentation: 'world' | 'studio' = 'world') {
     this.mount.className = 'r3f-viewport'; this.badge.className = 'renderer-badge';
     this.badge.textContent = 'WebGPU 초기화 중';
     container.append(this.mount, this.badge);
@@ -243,7 +260,7 @@ export class ModelViewer {
   };
   private render() {
     if (!this.model || this.disposed || !this.root) return;
-    this.root.render(<CharacterViewport model={this.model} animation={this.animation} hidden={this.hidden} editing={this.editing}
+    this.root.render(<CharacterViewport model={this.model} animation={this.animation} hidden={this.hidden} editing={this.editing} studio={this.presentation === 'studio'}
       onEditor={this.onEditor} onPaint={this.onPaint}
       onReady={this.onReady} onError={this.onError} onWorld={this.onWorld} />);
   }

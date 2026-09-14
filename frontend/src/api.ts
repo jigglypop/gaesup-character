@@ -20,13 +20,15 @@ export class ApiError extends Error {
   constructor(public code: string, message: string, public status: number) { super(message); }
 }
 
-async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
+export async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   let response: Response;
   try { response = await fetch(url, options); }
   catch { throw new ApiError('connection', '백엔드에 연결할 수 없습니다. 연결이 복구되면 다시 동기화합니다.', 0); }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new ApiError(body.error?.code || 'request_failed', body.error?.message || (response.status === 401 ? 'API 인증이 필요합니다. 로컬 서버 설정을 확인해 주세요.' : `요청을 처리하지 못했습니다 (${response.status}).`), response.status);
+    const validation = Array.isArray(body.detail) ? body.detail.map((item: { loc?: string[]; msg?: string }) => `${item.loc?.slice(1).join('.') || '입력'}: ${item.msg || '값 확인 필요'}`).join(' / ') : typeof body.detail === 'string' && body.detail !== 'Not Found' ? body.detail : '';
+    const fallback = response.status === 401 ? 'API 인증이 필요합니다. 로컬 서버 설정을 확인해 주세요.' : response.status === 404 ? 'API 또는 자료를 찾을 수 없습니다. 프론트와 백엔드 버전·연결 주소를 확인해 주세요.' : response.status >= 500 ? `서버 오류 (${response.status}). 저장된 작업은 다시 불러와 확인할 수 있습니다.` : `요청 오류 (${response.status}). 입력을 확인해 주세요.`;
+    throw new ApiError(body.error?.code || 'request_failed', body.error?.message || validation || fallback, response.status);
   }
   return body as T;
 }

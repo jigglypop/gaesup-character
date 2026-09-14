@@ -6,19 +6,23 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterable, Optional, Sequence
 
-import psycopg
-from psycopg.rows import dict_row
-
 logger = logging.getLogger(__name__)
 
 _CONNECT_MAX_RETRIES = int(os.getenv("DB_CONNECT_MAX_RETRIES", "2") or "2")
 _CONNECT_RETRY_BACKOFF = float(os.getenv("DB_CONNECT_RETRY_BACKOFF", "0.5") or "0.5")
 
 
-def _connection_kwargs() -> dict[str, Any]:
+def _driver():
+    # File-backed character/avatar work must remain available without a DB driver.
+    import psycopg
+    from psycopg.rows import dict_row
+    return psycopg.connect, dict_row
+
+
+def _connection_kwargs(row_factory=None) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "autocommit": True,
-        "row_factory": dict_row,
+        "row_factory": row_factory,
         "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "10") or "10"),
         "application_name": os.getenv("DB_APPLICATION_NAME", "asset-3d-api") or "asset-3d-api",
     }
@@ -32,11 +36,12 @@ def _connection_kwargs() -> dict[str, Any]:
 
 
 def _connect():
+    connect, row_factory = _driver()
     database_url = os.getenv("DATABASE_URL", "").strip()
-    kwargs = _connection_kwargs()
+    kwargs = _connection_kwargs(row_factory)
     if database_url:
-        return psycopg.connect(database_url, **kwargs)
-    return psycopg.connect(
+        return connect(database_url, **kwargs)
+    return connect(
         host=os.getenv("DB_HOST", "").strip(),
         port=int(os.getenv("DB_PORT", "5432") or "5432"),
         user=os.getenv("DB_USERNAME", os.getenv("DB_USER", "postgres")),

@@ -86,6 +86,40 @@ def test_source_import_does_not_create_provider_work_and_is_owner_scoped(setup):
     assert client.get(f"/api/characters/{value['id']}").status_code == 404
 
 
+def test_terminal_operation_reads_its_committed_inspection(setup, monkeypatch):
+    client, pipeline, _ = setup
+    value = with_model(client)
+    entry, run, control = pipeline.entry(value['id'], 1)
+    original = pipeline.latest_operation
+    completed = False
+
+    def finish_while_reading(path):
+        nonlocal completed
+        if not completed:
+            completed = True
+            model = pipeline.artifact(value['id'], 1, 'imported')
+            control['inspection'] = character_actions.inspect_model(model)
+            _write_json(run / 'control.json', control)
+        return original(path)
+
+    monkeypatch.setattr(pipeline, 'latest_operation', finish_while_reading)
+    detail = pipeline.detail(value['id'], 1)
+    assert detail['inspection']['model_sha256'] == value['model_sha256']
+
+
+def test_view_revision_uses_the_same_operation_snapshot(setup, monkeypatch):
+    client, pipeline, _ = setup
+    value = with_model(client)
+    reads = 0
+    def snapshot(_run):
+        nonlocal reads
+        reads += 1
+        return None
+    monkeypatch.setattr(pipeline, 'latest_operation', snapshot)
+    pipeline.detail(value['id'], 1)
+    assert reads == 1  # A later status must produce a different revision on the next poll.
+
+
 def test_same_action_key_replays_receipt_without_executing_twice(setup, monkeypatch):
     client, _, _ = setup
     value = with_model(client)

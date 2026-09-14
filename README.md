@@ -8,6 +8,8 @@ Ally 기준 의상 교체와 기존 리깅 재사용은 [의상 파이프라인]
 
 기존 `/api/world/*`의 생성·GLB 후처리·애니메이션 병합·저장·프록시 API도 유지합니다.
 
+이미지 입력 → 파츠별 이미지 → 개별 Meshy 7 → 공통 23본 리그 → GLB·Blender 생산은 `/avatar.html`에서 사용합니다. 선택 파츠별 요청 한도를 표시하고 작업 일지로 중단·응답 유실을 복구합니다. 기존 GLB 변환은 `?stage=glb`, 런타임 옷장은 `?view=wardrobe`입니다. [이미지 생산 파이프라인](docs/avatar-image-pipeline.md)과 [모듈형 아바타 계약](docs/modular-avatar.md)에 실행·검증 범위가 있습니다.
+
 ## 시작하기
 
 Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다.

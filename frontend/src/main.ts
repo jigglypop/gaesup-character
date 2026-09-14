@@ -15,7 +15,7 @@ app.innerHTML = `
   <aside class="sidebar">
     <a class="brand" href="#"><span class="brand-icon">a</span><span>atelier<span class="brand-dot">.</span></span></a>
     <div class="workspace-label">CHARACTER WORKSPACE</div>
-    <nav aria-label="워크스페이스"><button class="nav-item active" id="nav-library"><span>◈</span> 캐릭터 라이브러리 <span class="nav-count">0</span></button></nav>
+    <nav aria-label="워크스페이스"><a class="nav-item" href="/avatar.html"><span>◇</span> 모듈형 아바타</a><button class="nav-item active" id="nav-library"><span>◈</span> 캐릭터 라이브러리 <span class="nav-count">0</span></button></nav>
     <div class="sidebar-note"><span class="tiny-label">YOUR WORKFLOW</span><p>하나의 캐릭터에서<br>다양한 가능성으로.</p><div class="workflow-mini">생성 <span>→</span> 리깅 <span>→</span> 파츠 <span>→</span> 검수</div></div>
     <div class="sidebar-footer"><span class="avatar">CW</span><div>Character Wardrobe<small>로컬 워크스페이스</small></div></div>
   </aside>
@@ -95,7 +95,7 @@ async function renderDetail() {
   });
   if (c.operation?.status === 'recovery_required' && c.operation.error?.code === 'executor_interrupted') {
     document.querySelector('.operation')!.insertAdjacentHTML('beforeend', '<button class="secondary" id="recover-operation">중단된 실행 복구</button>');
-    document.querySelector<HTMLButtonElement>('#recover-operation')!.onclick = () => void mutation(() => api.recover(c), '기존 작업과 파일을 확인해 실행 상태를 복구했습니다.');
+    document.querySelector<HTMLButtonElement>('#recover-operation')!.onclick = () => void mutation(async () => { await api.recover(c); return api.detail(c.id); }, '기존 작업과 파일을 확인해 실행 상태를 복구했습니다.');
   }
   document.querySelector<HTMLFormElement>('#parts-form')?.addEventListener('submit', event => {
     event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement);

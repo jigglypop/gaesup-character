@@ -32,7 +32,7 @@ def _submit(directory: Path, value: dict, endpoint: str, payload: dict, client: 
     return value
 
 
-def generate(directory: Path, image: Path, height: float, client: httpx.Client, profile: str = "meshy-7") -> dict:
+def generate(directory: Path, image: Path, height: float, client: httpx.Client, profile: str = "meshy-7", *, isolated_part: bool = False) -> dict:
     if (directory / "character.json").exists():
         raise ValueError("Existing run: refresh or recover; never resubmit an uncertain task")
     if not 0.1 <= height <= 100:
@@ -55,6 +55,9 @@ def generate(directory: Path, image: Path, height: float, client: httpx.Client, 
         payload.update(model_type="smart-topology", ai_model="meshy-t2", target_polycount=15000)
         payload.pop("should_remesh")
         payload.pop("image_enhancement")  # Documented only for Meshy 6/7; do not send unsupported controls.
+    if isolated_part:
+        payload.pop('pose_mode', None)  # A hat or shoe is not a humanoid to pose/auto-rig.
+        payload['target_polycount'] = 10000  # Seven pieces plus the shared body stay within the assembly triangle budget.
     value["generation_settings"] = {k: v for k, v in payload.items() if k != "image_url"}
     return _submit(directory, value, "/openapi/v1/image-to-3d", payload, client)
 

@@ -8,9 +8,6 @@ import json
 import logging
 import os
 
-import psycopg
-from psycopg.types.json import Jsonb
-
 from src.services.wardrobe import _digest
 
 logger = logging.getLogger(__name__)
@@ -21,6 +18,7 @@ def configured():
 
 
 def connect():
+    import psycopg
     return psycopg.connect(os.environ["CHARACTER_DATABASE_URL"], connect_timeout=5,
                            application_name="gaesup-character", options="-c statement_timeout=30000")
 
@@ -41,6 +39,7 @@ def sync(pipeline, character_id, user_id):
     marker = run / "postgres-sync.pending"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("Replay with uv run python -m src.character_db sync\n", encoding="utf-8")
+    from psycopg.types.json import Jsonb
     with connect() as conn:
         conn.execute("""INSERT INTO gaesup_character.characters(id,owner_id,name,height_meters,registry,control)
             VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id,

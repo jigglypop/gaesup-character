@@ -4,11 +4,13 @@ async function settled(page: Page) {
   await expect(page.locator('.operation b')).toHaveText('작업 완료');
 }
 
-test('real API settings, rig preview, parts and versioned review survive reload', async ({ page }) => {
+test('real API settings, rig preview, parts and versioned review survive reload', async ({ page, request }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto('/');
-  await expect(page.locator('.character-card')).toHaveCount(1);
+  const list = await request.get('/api/characters').then(response => response.json());
+  const source = list.characters.find((item: { model_id: string | null }) => item.model_id);
+  await page.goto('/#' + source.id);
+  await expect(page.locator('.character-card').first()).toBeVisible();
   await expect(page.locator('#model-loading')).toHaveCount(0);
   await expect(page.locator('canvas')).toBeVisible();
   await page.getByRole('textbox', { name: '캐릭터 이름', exact: true }).fill('Browser Checked');
@@ -41,7 +43,7 @@ test('real API settings, rig preview, parts and versioned review survive reload'
 
 test('lost action response restores same receipt after reload without a second execution', async ({ page, request }) => {
   const list = await (await request.get('/api/characters')).json();
-  const id = list.characters[0].id;
+  const id = list.characters.find((item: { model_id: string | null }) => item.model_id).id;
   let lostId = '';
   await page.goto('/#' + id);
   await page.route('**/actions/inspect_model', async route => {

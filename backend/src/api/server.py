@@ -27,6 +27,9 @@ from src.api.observability import (
 )
 from src.api.world import router as world_router
 from src.api.characters import router as character_router, pipeline_error_handler
+from src.api.avatars import router as avatar_router
+from src.api.avatar_factory import router as factory_router
+from src.api.avatar_blueprints import router as blueprint_router
 from src.services.character_pipeline import PipelineError
 from src.auth import is_public_path
 
@@ -99,3 +102,6 @@ def api_health() -> dict:
 
 app.include_router(world_router, prefix="/api")
 app.include_router(character_router, prefix="/api")
+app.include_router(avatar_router, prefix="/api")
+app.include_router(factory_router, prefix="/api")
+app.include_router(blueprint_router, prefix="/api")

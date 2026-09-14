@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import re
+import time
 import uuid
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from src.services.asset_delivery import DeliveryPolicy, inspect_glb, read_model
 from src.services.blender_edits import EditRecipe, edit_script
@@ -17,10 +21,30 @@ class RevisionConflict(ValueError):
     pass
 
 
+_T = TypeVar("_T")
+
+
+def _retry_file_io(operation: Callable[[], _T]) -> _T:
+    for attempt in range(6):
+        try:
+            return operation()
+        except PermissionError as error:
+            # Windows can briefly deny open/rename during an atomic replacement.
+            transient = getattr(error, "winerror", None) in (5, 32, 33) or (os.name == "nt" and error.errno == errno.EACCES)
+            if not transient or attempt == 5:
+                raise
+            time.sleep(.01 * 2 ** attempt)
+    raise AssertionError("Unreachable file retry state")
+
+
 def _write_json(path: Path, value: dict) -> None:
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    try:
+        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Retry only the atomic commit, never the underlying character action.
+        _retry_file_io(lambda: temporary.replace(path))
+    finally:
+        _retry_file_io(lambda: temporary.unlink(missing_ok=True))
 
 
 class AssetEditor:

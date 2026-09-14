@@ -10,6 +10,8 @@ Meshy에서 기본 리깅한 약 5종 캐릭터를 가져와 Blender에서 의�
 - 새 생성은 Meshy 7 또는 Smart Topology(`meshy-t2`)의 현재 공식 계약을 사용한다. 리깅과 추가 동작은 별도 task이며 화면의 한 번 실행으로 묶는다. [동작·분절·저장 계약](docs/character-preparation.md)을 해당 기능 변경 시 읽는다.
 - 백엔드와 관련 테스트를 수정할 때는 [backend/AGENTS.md](backend/AGENTS.md), UI를 수정할 때는 [frontend/AGENTS.md](frontend/AGENTS.md)를 읽는다. 두 영역의 계약을 바꿀 때는 [제어 설계](docs/character-control-plane.md)를 읽는다. 모든 문서를 매번 읽을 필요는 없다.
 
+
+
 ## 자율 진행과 경계
 
 - 구현 요청은 로컬 실행·결과 확인·실패 수정·관련 검증까지 포함한다. 이 범위의 재확인은 하지 않는다. 설명·진단·하네스 정비만 요청받았다면 실제 에셋 생성이나 앱 구현까지 확대하지 않는다.

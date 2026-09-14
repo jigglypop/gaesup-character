@@ -246,7 +246,7 @@ def _check_scene(tables: dict, doc: dict) -> dict:
             "animations": animation_names, "joints": sorted(joint_names)}
 
 
-def _check_images(tables: dict, binary: bytes, policy: DeliveryPolicy) -> int:
+def _check_images(tables: dict, binary: bytes, policy: DeliveryPolicy, budget_warnings: list | None = None) -> int:
     pixels = 0
     for image in tables["images"]:
         if "uri" in image:
@@ -266,7 +266,10 @@ def _check_images(tables: dict, binary: bytes, policy: DeliveryPolicy) -> int:
                 width, height = decoded.size
                 pixels += width * height
                 if max(width, height) > policy.max_texture_dimension or pixels > policy.max_texture_pixels:
-                    raise ValueError("texture budget exceeded")
+                    if budget_warnings is None:
+                        raise ValueError("texture budget exceeded")
+                    if "texture budget exceeded" not in budget_warnings:
+                        budget_warnings.append("texture budget exceeded")
                 decoded.load()
     for texture in tables["textures"]:
         _ref(tables["images"], texture["source"])
@@ -275,7 +278,7 @@ def _check_images(tables: dict, binary: bytes, policy: DeliveryPolicy) -> int:
     return pixels
 
 
-def inspect_glb(data: bytes, policy: DeliveryPolicy | None = None) -> dict[str, Any]:
+def inspect_glb(data: bytes, policy: DeliveryPolicy | None = None, *, budget_warnings: bool = False) -> dict[str, Any]:
     policy = policy or DeliveryPolicy()
     report: dict[str, Any] = {
         "inspector_version": "1.0", "sha256": hashlib.sha256(data).hexdigest(),
@@ -284,9 +287,13 @@ def inspect_glb(data: bytes, policy: DeliveryPolicy | None = None) -> dict[str, 
         "manual_checks": ["rights", "body_fit_and_pose_intersections", "materials_and_animation_playback",
                           "browser_gpu_budget_and_long_session_cleanup"],
     }
+    if budget_warnings:
+        report['warnings'] = []
     try:
         if len(data) > policy.max_file_bytes:
-            raise ValueError("file size budget exceeded")
+            if not budget_warnings:
+                raise ValueError("file size budget exceeded")
+            report['warnings'].append('file size budget exceeded')
         doc, binary = parse_glb(data, strict=True)
         if doc.get("asset", {}).get("version") != "2.0":
             raise ValueError("glTF asset version must be 2.0")
@@ -294,10 +301,10 @@ def inspect_glb(data: bytes, policy: DeliveryPolicy | None = None) -> dict[str, 
         _check_buffers(tables, binary)
         metrics = _check_scene(tables, doc)
         report["metrics"] = metrics
-        metrics["texture_pixels"] = _check_images(tables, binary, policy)
+        metrics["texture_pixels"] = _check_images(tables, binary, policy, report.get('warnings'))
         for key in ("vertices", "triangles", "materials"):
             if metrics[key] > getattr(policy, f"max_{key}"):
-                report["errors"].append(f"{key} budget exceeded")
+                report['warnings' if budget_warnings else 'errors'].append(f"{key} budget exceeded")
         for key, expected in (("animations", policy.required_animations), ("joints", policy.required_joints)):
             if not set(expected) <= set(metrics[key]):
                 report["errors"].append(f"required {key} missing")

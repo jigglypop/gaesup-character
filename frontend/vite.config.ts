@@ -9,5 +9,6 @@ export default defineConfig(({ mode }) => {
   if (env.API_KEY) headers['X-API-Key'] = env.API_KEY;
   const proxy = { '/api': { target: process.env.BACKEND_URL || 'http://127.0.0.1:8000', headers } };
   return { plugins: [react()], resolve: { dedupe: ['react', 'react-dom', 'three', '@react-three/fiber'] },
-    server: { proxy }, preview: { proxy }, build: { chunkSizeWarningLimit: 1000 } };
+    server: { proxy }, preview: { proxy }, build: { chunkSizeWarningLimit: 1000,
+      rollupOptions: { input: { workspace: fileURLToPath(new URL('./index.html', import.meta.url)), avatar: fileURLToPath(new URL('./avatar.html', import.meta.url)) } } } };
 });

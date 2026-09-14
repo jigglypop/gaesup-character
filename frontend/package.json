@@ -7,7 +7,9 @@
     "dev": "vite --host 127.0.0.1 --port 5273 --strictPort",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 5273 --strictPort",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "assets:avatar": "node scripts/build-avatar-fixtures.mjs",
+    "check:studio": "node scripts/check-studio.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d": "0.17.3",
@@ -26,11 +28,13 @@
     "three-stdlib": "2.36.1"
   },
   "devDependencies": {
+    "@gltf-transform/core": "4.4.0",
     "@playwright/test": "^1.63.0",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@types/three": "0.178.0",
     "@vitejs/plugin-react": "6.0.1",
+    "gltf-validator": "2.0.0-dev.3.10",
     "typescript": "^7.0.2",
     "vite": "^8.3.0"
   }

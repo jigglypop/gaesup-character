@@ -1,0 +1,113 @@
+from functools import lru_cache
+from typing import Literal
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Header
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+from src.auth import UserContext, get_current_user
+from src.paths import data_root
+from src.services.avatar_factory import AvatarFactory, PROFILE
+from src.services.avatar_image_pipeline import AvatarImagePipeline, capabilities
+
+router = APIRouter(prefix='/avatar-factory', tags=['avatar-factory'])
+
+
+@lru_cache
+def get_factory():
+    return AvatarFactory(data_root())
+
+
+class Selection(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    node_index: int = Field(ge=0)
+    primitive_index: int = Field(ge=0)
+    role: Literal['body', 'head', 'hair', 'hat', 'top', 'pants', 'skirt', 'dress', 'shoes', 'outfit_base', 'accessory', 'eyes', 'other']
+    faces: list[int] = Field(min_length=1, max_length=500000)
+
+
+class ProductionInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    character_id: str = Field(min_length=1, max_length=100)
+    source_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    selections: list[Selection] = Field(default_factory=list, max_length=100)
+
+
+class ImageProductionInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    character_id: str = Field(min_length=1, max_length=100)
+    source_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    blueprint_revision: str = Field(min_length=1, max_length=100)
+    image_mode: Literal['generate', 'prepared'] = 'generate'
+    slots: list[Literal['face', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes']] = Field(min_length=1, max_length=7)
+
+
+class RecoverPartInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    slot: Literal['face', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes']
+    task_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,100}$')
+
+
+@router.post('/jobs/{job_id}/recover-task')
+def recover_part(job_id: str, body: RecoverPartInput, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarImagePipeline(factory).recover_task(user.user_id, job_id, body.slot, body.task_id)
+
+
+@router.get('/capabilities')
+def provider_capabilities(user: UserContext = Depends(get_current_user)):
+    return capabilities()
+
+
+@router.post('/image-jobs', status_code=202)
+def create_images(body: ImageProductionInput, background: BackgroundTasks, idempotency_key: str = Header(),
+                  user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    service = AvatarImagePipeline(factory)
+    job, created = service.create(user.user_id, idempotency_key, body.model_dump())
+    if created:
+        background.add_task(service.execute, user.user_id, job['id'])
+    return job
+
+
+@router.post('/jobs/{job_id}/resume', status_code=202)
+def resume_images(job_id: str, background: BackgroundTasks, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    service = AvatarImagePipeline(factory)
+    job = service.resume(user.user_id, job_id)
+    background.add_task(service.execute, user.user_id, job_id)
+    return job
+
+
+@router.get('/profiles')
+def profiles(user: UserContext = Depends(get_current_user)):
+    return {'profiles': [PROFILE]}
+
+
+@router.post('/jobs/{job_id}/rebuild', status_code=202)
+def rebuild_images(job_id: str, background: BackgroundTasks, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    service = AvatarImagePipeline(factory)
+    job = service.rebuild(user.user_id, job_id)
+    background.add_task(service.execute, user.user_id, job['id'])
+    return job
+
+
+@router.get('/jobs')
+def jobs(user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return {'jobs': factory.listing(user.user_id)}
+
+
+@router.post('/jobs', status_code=202)
+def create(body: ProductionInput, background: BackgroundTasks, idempotency_key: str = Header(),
+           user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    job, created = factory.create(user.user_id, idempotency_key, body.model_dump())
+    if created:
+        background.add_task(factory.execute, user.user_id, job['id'])
+    return job
+
+
+@router.get('/jobs/{job_id}')
+def job(job_id: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return factory.get(user.user_id, job_id)
+
+
+@router.get('/jobs/{job_id}/artifacts/{filename}')
+def artifact(job_id: str, filename: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return FileResponse(factory.artifact(user.user_id, job_id, filename))
