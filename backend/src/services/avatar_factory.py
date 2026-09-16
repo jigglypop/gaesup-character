@@ -168,6 +168,8 @@ class AvatarFactory:
             for field in ('bodyRegions', 'hideBodyRegions'):
                 if field in item:
                     manifest[field] = item[field]
+            if item.get('wholeBody'):
+                manifest.update(wholeBody=True, bodyArchetypes=['MAPLE_WHOLE_V1'])
             records.append({'id': asset_id, 'name': f'{job["character_name"]} · {item["key"]}', 'kind': 'characterPart',
                             'url': uri, 'format': 'glb', 'tags': ['avatar-factory', 'review-required'],
                             'metadata': {'avatar': manifest, 'factory': {'jobId': job_id, 'sourceSha256': job['source_sha256'],
@@ -207,7 +209,9 @@ class AvatarFactory:
         public['next_actions'] = []
         if job.get('input_kind') == 'image' and job['status'] in ('pipeline_paused', 'failed', 'recovery_required'):
             state = read_json(directory/'pipeline.json')
-            blocked = any(p['image']['status'] not in ('pending', 'succeeded') for p in state.get('parts', []))
+            blocked = any(p['image']['status'] not in ('pending', 'received', 'succeeded') and
+                          not (p['image']['status'] == 'submitting' and (directory/'output'/f'{p["slot"]}-provider.response.json').is_file())
+                          for p in state.get('parts', []))
             runner = read_json(directory/'output/runner.json')
             if job['status'] in ('failed', 'recovery_required') and runner and process_state(runner.get('process')) != 'exited':
                 blocked = True
@@ -238,6 +242,9 @@ def factory_records(root, owner):
     for path in (Path(root)/'avatar-factory'/str(int(owner))).glob('*/job.json'):
         job = read_json(path)
         if job.get('status') in ('review_required', 'approved'):
+            # Native Meshy characters keep their arbitrary rig outside the 23-bone wardrobe catalog.
+            if 'catalog.json' not in job.get('files', {}):
+                continue
             catalog = path.parent/'output/catalog.json'
             if digest(catalog) != job.get('files', {}).get('catalog.json'):
                 raise PipelineError('catalog_changed', '생산 카탈로그가 변경되었습니다.')

@@ -106,6 +106,8 @@ export function parseAvatarManifest(value: unknown): AvatarManifest {
     );
   }
   const regions = value['bodyRegions'];
+  if (value['wholeBody'] !== undefined)
+    assert(typeof value['wholeBody'] === 'boolean' && value['kind'] === 'avatar-body', 'Invalid whole body flag');
   if (regions !== undefined)
     assert(
       record(regions) &&
@@ -116,8 +118,8 @@ export function parseAvatarManifest(value: unknown): AvatarManifest {
     );
   if (value['kind'] === 'avatar-body')
     assert(
-      record(regions) &&
-        BODY_REGIONS.every((key) => Array.isArray(regions[key]) && regions[key].length > 0) &&
+      (value['wholeBody'] === true ? regions === undefined : record(regions) &&
+        BODY_REGIONS.every((key) => Array.isArray(regions[key]) && regions[key].length > 0)) &&
         attachment['mode'] === 'skinned',
       'Canonical body requires all body regions',
     );

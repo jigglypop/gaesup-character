@@ -13,7 +13,7 @@ test('image upload, layer save, lost response recovery, provider gate and reques
   await page.getByLabel('파츠 X',{exact:true}).fill('120');
   await page.getByRole('button',{name:'설계 저장 *',exact:true}).click();
   await expect(page.getByRole('status').filter({hasText:'이미지 파츠 설계를 저장했습니다.'})).toBeVisible();
-  await expect(page.getByRole('button',{name:'전체 자동 생산',exact:true})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'한 캐릭터 파츠 전체 분리',exact:true})).toBeDisabled();
   await page.reload();await expect(page.getByLabel('파츠 X',{exact:true})).toHaveValue('120');
   await page.getByLabel('파츠 X',{exact:true}).fill('145');
   let lost=true;
@@ -28,7 +28,7 @@ test('image upload, layer save, lost response recovery, provider gate and reques
   await page.reload();await expect(page.getByLabel('파츠 X',{exact:true})).toHaveValue('145');
   const id=new URL(page.url()).searchParams.get('character')!;
   const blueprint=await request.get(`/api/avatar-blueprints/${id}`).then(r=>r.json());
-  const response=await request.post('/api/avatar-factory/image-jobs',{headers:{'Idempotency-Key':'fixture-no-provider'},data:{character_id:id,source_sha256:blueprint.source_sha256,blueprint_revision:blueprint.revision,image_mode:'generate',slots:['top']}});
+  const response=await request.post('/api/avatar-factory/image-jobs',{headers:{'Idempotency-Key':'fixture-no-provider'},data:{character_id:id,source_sha256:blueprint.source_sha256,blueprint_revision:blueprint.revision,image_mode:'generate',production_mode:'character_parts',slots:['body','hairBack','hairFront','hat','top','bottom','shoes'],body_purpose:'wardrobe_base',rig_with_meshy:true,motion_actions:{}}});
   expect(response.status()).toBe(422);expect((await response.json()).error.code).toBe('provider_unavailable');
   await page.route(`**/api/avatar-blueprints/${id}`,route=>route.fulfill({status:404,contentType:'application/json',body:JSON.stringify({detail:'Not Found'})}));
   await page.reload();await expect(page.getByRole('alert')).toContainText('프론트와 백엔드 버전');
@@ -45,24 +45,34 @@ test('production response loss reuses the same paid request and restores per-par
   // Only provider execution is simulated here. Character/image/blueprint APIs remain real.
   const id=new URL(page.url()).searchParams.get('character')!;
   const keys:string[]=[];let saved:Record<string,unknown>|null=null;
-  await page.route('**/api/avatar-factory/capabilities',route=>route.fulfill({json:{ready:true,image_configured:true,meshy_configured:true,blender_available:true,next_actions:[{id:'produce_images',enabled:true},{id:'produce_prepared',enabled:true}]}}));
-  await page.route('**/api/avatar-factory/jobs',route=>route.fulfill({json:{jobs:saved?[saved]:[]}}));
+  const partSlots=['hairBack','hairFront','hat','top','bottom','shoes'];
+  const prior={id:'e'.repeat(24),character_id:id,character_name:'Production Receipt Fixture',source_sha256:'',input_kind:'image',status:'review_required',created_at:'2026-01-01T00:00:00Z',progress:{stage:'review',message:'검수 후보'},artifacts:[],parts:partSlots.map(slot=>({slot,image_status:'succeeded',model_status:'ready'})),next_actions:[]};
+  await page.route('**/api/avatar-factory/capabilities',route=>route.fulfill({json:{ready:true,image_configured:true,meshy_configured:true,blender_available:true,slots:['body',...partSlots],next_actions:[{id:'produce_images',enabled:true},{id:'produce_prepared',enabled:true}]}}));
+  await page.route('**/api/avatar-factory/jobs',route=>route.fulfill({json:{jobs:saved?[saved,prior]:[prior]}}));
   await page.route('**/api/avatar-factory/image-jobs',async route=>{
     keys.push(route.request().headers()['idempotency-key']!);
     const input=route.request().postDataJSON();
-    expect(input.character_id).toBe(id);expect(input.slots).toHaveLength(7);
-    if(!saved){saved={id:'f'.repeat(24),character_id:id,character_name:'Production Receipt Fixture',source_sha256:input.source_sha256,input_kind:'image',status:'pipeline_running',created_at:new Date().toISOString(),progress:{stage:'images',message:'파츠 이미지 생성 중'},artifacts:[],parts:input.slots.map((slot:string)=>({slot,image_status:'pending',model_status:'pending'})),next_actions:[]};await route.abort();}
+    expect(input.character_id).toBe(id);expect(input.production_mode).toBe('character_parts');expect(input.slots).toEqual(['body',...partSlots]);
+    expect(input.body_purpose).toBe('wardrobe_base');expect(input.rig_with_meshy).toBe(true);expect(input.reuse_job_id).toBe(prior.id);
+    if(!saved){saved={id:'f'.repeat(24),character_id:id,character_name:'Production Receipt Fixture',source_sha256:input.source_sha256,input_kind:'image',production_mode:'character_parts',status:'pipeline_running',created_at:new Date().toISOString(),progress:{stage:'images',message:'파츠 이미지 생성 중'},artifacts:[],parts:input.slots.map((slot:string)=>({slot,image_status:'pending',model_status:'pending'})),next_actions:[]};await route.abort();}
     else await route.fulfill({status:202,json:saved});
   });
-  await page.reload();await expect(page.getByRole('button',{name:'전체 자동 생산',exact:true})).toBeEnabled();
-  await page.getByRole('button',{name:'전체 자동 생산',exact:true}).click();
+  prior.source_sha256=(await page.evaluate(()=>fetch('/api/avatar-blueprints/'+new URL(location.href).searchParams.get('character')).then(r=>r.json()).then(v=>v.source_sha256))) as string;
+  await page.reload();
+  await expect(page.getByRole('radio',{name:'7파트 모두 새로 생성 · 기본'})).toBeChecked();
+  await page.getByRole('radio',{name:'검증 가능한 기존 분리 파츠 재사용'}).check();
+  await expect(page.getByText('신규 유료 예상 이미지 1회 + Meshy 1회')).toBeVisible();
+  await expect(page.getByRole('button',{name:'한 캐릭터 파츠 전체 분리',exact:true})).toBeEnabled();
+  await page.getByRole('button',{name:'한 캐릭터 파츠 전체 분리',exact:true}).click();
   await expect(page.getByRole('alert')).toContainText('백엔드에 연결할 수 없습니다');
   await page.reload();await expect(page.getByRole('button',{name:'같은 생산 요청 복구'})).toBeEnabled();
   await page.getByRole('button',{name:'같은 생산 요청 복구'}).click();
   expect(keys).toHaveLength(2);expect(keys[0]).toBe(keys[1]);
   await expect(page.locator('.image-production-parts>div')).toHaveCount(7);
-  saved={...saved!,status:'pipeline_paused',error:'상의: Meshy 응답 유실. 기존 작업 ID 확인이 필요합니다.',parts:[{slot:'top',image_status:'succeeded',model_status:'submission_uncertain'}],next_actions:[{id:'resume',enabled:false,reason:'기존 작업 ID 확인 필요'}]};
+  saved={...saved!,status:'pipeline_paused',error:'상의: Meshy 응답 유실. 기존 작업 ID 확인이 필요합니다.',artifacts:[{name:'generated-hairBack.glb',url:`/api/avatar-factory/jobs/${'f'.repeat(24)}/artifacts/generated-hairBack.glb`}],parts:[{slot:'hairBack',image_status:'succeeded',model_status:'ready',image_asset:'a'.repeat(64)},{slot:'top',image_status:'succeeded',model_status:'submission_uncertain'}],next_actions:[{id:'resume',enabled:false,reason:'기존 작업 ID 확인 필요'}]};
   await page.reload();await expect(page.getByRole('alert')).toContainText('Meshy 응답 유실');
+  await expect(page.getByRole('link',{name:'PNG 받기'})).toHaveAttribute('href',`/api/avatar-blueprints/assets/${'a'.repeat(64)}`);
+  await expect(page.getByRole('link',{name:'GLB 받기'})).toHaveAttribute('href',`/api/avatar-factory/jobs/${'f'.repeat(24)}/artifacts/generated-hairBack.glb`);
   await expect(page.getByLabel('상의 Meshy 작업 ID')).toBeVisible();
   await expect(page.getByRole('button',{name:'기존 작업 이어가기'})).toBeDisabled();
   expect(keys).toHaveLength(2);

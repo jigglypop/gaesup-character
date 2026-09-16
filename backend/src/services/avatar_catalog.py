@@ -18,7 +18,7 @@ from src.services.character_pipeline import PipelineError, read_json
 
 
 SLOTS = ("face", "hair", "top", "bottom", "onepiece", "shoes", "hat", "ear",
-         "back", "bag", "hand", "faceAccessory", "neckAccessory")
+         "back", "bag", "hand", "offhand", "faceAccessory", "neckAccessory")
 DEFAULT_STATE = {"body": "body-sd-neutral-v1", "equipment": {
     "hair": "hair-001", "top": "top-001", "bottom": "bottom-001", "shoes": "shoes-001"}}
 ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")

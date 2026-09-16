@@ -11,7 +11,7 @@ import { ImplementationStatus } from './studio/status';
 import { PieceIcon, StudioIcon } from './studio/icons';
 import './avatar-page.css';
 
-const labels: Record<AvatarSlot, string> = { body: '몸', face: '얼굴', hair: '헤어', top: '상의', bottom: '하의', onepiece: '원피스', shoes: '신발', hat: '모자', ear: '귀', back: '등', bag: '가방', hand: '손 소품', faceAccessory: '얼굴 장식', neckAccessory: '목 장식' };
+const labels: Record<AvatarSlot, string> = { body: '몸', face: '얼굴', hair: '헤어', top: '상의', bottom: '하의', onepiece: '원피스', shoes: '신발', hat: '모자', ear: '귀', back: '등', bag: '가방', hand: '무기 · 오른손', offhand: '방패 · 왼손', faceAccessory: '얼굴 장식', neckAccessory: '목 장식' };
 const poses = { idle: 'Idle', walk: 'Walk', run: 'Run', jump: 'Jump', sit: 'Sit', armsUp: 'Arms Up', crouch: 'Crouch' };
 const empty: AvatarState = { body: '', equipment: {} };
 const idleSubscribe = () => () => {};

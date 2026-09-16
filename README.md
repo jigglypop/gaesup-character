@@ -8,9 +8,11 @@ Ally 기준 의상 교체와 기존 리깅 재사용은 [의상 파이프라인]
 
 기존 `/api/world/*`의 생성·GLB 후처리·애니메이션 병합·저장·프록시 API도 유지합니다.
 
-이미지 입력 → 파츠별 이미지 → 개별 Meshy 7 → 공통 23본 리그 → GLB·Blender 생산은 `/avatar.html`에서 사용합니다. 선택 파츠별 요청 한도를 표시하고 작업 일지로 중단·응답 유실을 복구합니다. 기존 GLB 변환은 `?stage=glb`, 런타임 옷장은 `?view=wardrobe`입니다. [이미지 생산 파이프라인](docs/avatar-image-pipeline.md)과 [모듈형 아바타 계약](docs/modular-avatar.md)에 실행·검증 범위가 있습니다.
+메이플풍 SD 캐릭터 생산은 `/avatar.html`에서 사용합니다. GPT Image 2.5 Sunburst → 파츠별 Meshy 7 → 공통 몸·리그 → 의상·무기·방패·장신구 조립 → GLB·Blender로 이어집니다. [현재 생산·설정·검증 문서](docs/maple-character-pipeline.md)를 참고하세요. 선택 파츠별 요청 한도를 표시하고 작업 일지로 중단·응답 유실을 복구합니다. 기존 GLB 변환은 `?stage=glb`, 런타임 옷장은 `?view=wardrobe`입니다. [이미지 생산 파이프라인](docs/avatar-image-pipeline.md)과 [모듈형 아바타 계약](docs/modular-avatar.md)에 실행·검증 범위가 있습니다.
 
 ## 시작하기
+
+Windows에서 의존성이 설치된 작업 트리는 루트에서 `./start-local.ps1`로 API와 메이플 캐릭터 공장을 함께 실행합니다. 이미 실행 중이면 재사용하고, 실제 UI/API 연결을 확인한 뒤 주소를 출력합니다. 기본 화면은 **http://127.0.0.1:5273/avatar.html** 입니다.
 
 Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다.
 
@@ -68,7 +70,7 @@ Swagger UI는 `/docs`, OpenAPI 문서는 `/openapi.json`에서 확인할 수 있
 - `WORLD_3D_PROVIDER=meshy`와 `MESHY_API_KEY`: Meshy 3D 생성. 설정하지 않으면 구조화된 월드 계획만 반환합니다.
 - `DATABASE_URL` 또는 PostgreSQL용 `DB_HOST` 계열 변수: job, asset, placement 영속화. 없으면 프로세스 메모리를 사용합니다.
 - AWS S3 변수: 생성 모델과 참조 이미지의 안정적인 저장 URL을 제공합니다.
-- Gemini 변수는 기본 참조 이미지 생성에 사용합니다. OpenAI는 요청이나 DB 모델 설정에서 OpenAI 이미지 모델을 명시했을 때 사용합니다.
+- 새 캐릭터 공장 이미지 생성은 `OPENAI_API_KEY`, `AVATAR_IMAGE_MODEL=gpt-image-2.5-sunburst`를 사용합니다. 기존 월드 미디어 API의 Gemini/OpenAI 선택과 저장된 Gemini 작업의 복구는 유지합니다.
 - `WORLD_SKIN_WASM_PATH`: 얼굴 스킨 가중치 후처리용 `gaesup_core.wasm` 경로입니다. 파일이 없으면 해당 단계는 `no_change`로 건너뜁니다.
 
 PostgreSQL 스키마는 `backend/migrations/001_postgresql_3d_schema.up.sql`에 있습니다. DB를 사용할 때 서버 시작 전에 적용하세요.

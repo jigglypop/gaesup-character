@@ -9,8 +9,10 @@ extend(THREE as unknown as Parameters<typeof extend>[0]);
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FaceEditor, type PaintSettings } from './face-editor';
+import { captureRestPose } from './model-pose';
+import { NativeWardrobe, type Wearable } from './native-wardrobe';
 
-type Model = { gltf: GLTF; url: string; rigged: boolean };
+type Model = { gltf: GLTF; url: string; rigged: boolean; restorePose(): void };
 type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; studio?: boolean; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
 const worldMode = { type: 'character', controller: 'keyboard', control: 'thirdPerson' } as const;
 
@@ -116,7 +118,7 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
   }, [model, hidden]);
   useEffect(() => {
     useGaesupStore.getState().setInteractionActive(false);
-    model.gltf.scene.traverse(object => { if (object instanceof THREE.SkinnedMesh) object.skeleton.pose(); });
+    model.restorePose();
     model.gltf.scene.updateMatrixWorld(true);
     let box = new THREE.Box3().setFromObject(model.gltf.scene);
     const initialCenter = box.getCenter(new THREE.Vector3());
@@ -133,7 +135,7 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
   useEffect(() => {
     mixer.stopAllAction();
     if (studio && animation >= 0 && model.gltf.animations[animation]) mixer.clipAction(model.gltf.animations[animation]).reset().play();
-    else model.gltf.scene.traverse(object => { if (object instanceof THREE.SkinnedMesh) object.skeleton.pose(); });
+    else model.restorePose();
     return () => { mixer.stopAllAction(); mixer.uncacheRoot(model.gltf.scene); };
   }, [studio, animation, model, mixer]);
   useFrame((_, delta) => { controls.current?.update(); if (studio) mixer.update(Math.min(delta, .1)); });
@@ -190,6 +192,7 @@ function CharacterViewport(props: ViewProps) {
 
 /** DOM workspace bridge; React/R3F own the canvas, render loop, camera and model scene. */
 export class ModelViewer {
+  private wardrobe?: NativeWardrobe;
   private root?: ReturnType<typeof createRoot>;
   private mount = document.createElement('div');
   private canvas = document.createElement('canvas');
@@ -264,7 +267,7 @@ export class ModelViewer {
       onEditor={this.onEditor} onPaint={this.onPaint}
       onReady={this.onReady} onError={this.onError} onWorld={this.onWorld} />);
   }
-  async load(url: string) {
+  async load(url: string, options: { sha256?: string; wardrobe?: boolean } = {}) {
     const token = ++this.generation;
     this.request?.abort(); this.finish?.();
     this.request = new AbortController();
@@ -272,11 +275,18 @@ export class ModelViewer {
     if (!response.ok) throw new Error('모델 파일을 불러올 수 없습니다.');
     const content = await response.arrayBuffer();
     const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', content))).map(value => value.toString(16).padStart(2, '0')).join('');
+    if (options.sha256 && options.sha256 !== digest) throw new Error('모델이 고정한 몸 버전과 다릅니다.');
     const gltf = await new GLTFLoader().parseAsync(content, '');
     if (this.disposed || token !== this.generation) { release(gltf.scene); return []; }
+    let wardrobe: NativeWardrobe | undefined;
+    if (options.wardrobe) {
+      try { wardrobe = new NativeWardrobe(gltf.scene); }
+      catch (error) { release(gltf.scene); throw error; }
+    }
     if (this.model) this.retired.push(this.model.gltf.scene);
+    this.wardrobe?.dispose(); this.wardrobe = wardrobe;
     let rigged = false; gltf.scene.traverse(object => { if (object instanceof THREE.SkinnedMesh) rigged = true; });
-    this.model = { gltf, rigged, url: `${url}${url.includes('?') ? '&' : '?'}sha256=${digest}` }; this.animation = -1; this.hidden = new Set();
+    this.model = { gltf, rigged, restorePose: captureRestPose(gltf.scene), url: `${url}${url.includes('?') ? '&' : '?'}sha256=${digest}` }; this.animation = -1; this.hidden = new Set();
     this.container.dataset.modelSha256 = digest;
     await this.initialize();
     if (this.disposed || token !== this.generation) return [];
@@ -284,6 +294,11 @@ export class ModelViewer {
     return gltf.animations.map((clip, index) => ({ index, name: clip.name || `Animation ${index + 1}` }));
   }
   play(index: number) { this.animation = index; this.render(); }
+  wear(parts: Wearable[]) {
+    if (!this.wardrobe) return Promise.reject(new Error('공용 골격 옷장이 준비되지 않았습니다.'));
+    return this.wardrobe.equip(parts);
+  }
+  wardrobeDiagnostics() { return this.wardrobe?.diagnostics(); }
   setEditing(enabled: boolean, onCount: (count: number) => void) { this.editing = enabled; this.paintCount = onCount; this.render(); }
   setPaint(settings: PaintSettings) { this.paintSettings = settings; if (this.editor) this.editor.settings = settings; }
   selections() { return this.editor?.export() ?? []; }
@@ -295,6 +310,7 @@ export class ModelViewer {
     this.render();
   }
   dispose() {
+    this.wardrobe?.dispose(); this.wardrobe = undefined;
     this.disposed = true; this.generation++; this.request?.abort(); this.finish?.();
     this.observer.disconnect(); this.root?.unmount();
     // R3F completes its canvas cleanup on a deferred callback; release the WebGPU device afterwards.

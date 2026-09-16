@@ -16,9 +16,12 @@ from PIL import Image
 from src.paths import BACKEND_ROOT
 from src.services.asset_editor import _write_json
 from src.services.character_pipeline import CharacterPipeline, PipelineError, read_json, now
+from src.services.avatar_equipment import EQUIPMENT, equipment_layer
 
 LOCK = RLock()
 SLOTS = ['body', 'face', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes']
+LEGACY_SLOTS = SLOTS[:]
+SLOTS += list(EQUIPMENT)
 ORDER = ['hairBack', 'body', 'shoes', 'bottom', 'top', 'face', 'hairFront', 'hat']
 LABELS = ['공통 몸', '얼굴', '뒷머리', '앞머리', '모자', '상의', '하의', '신발']
 PLACEMENTS = [[116, 45, 280, 430], [131, 45, 250, 226], [75, 38, 362, 366], [92, 40, 328, 278],
@@ -34,7 +37,7 @@ Top row: 1 complete common SD body mannequin in an opaque plain bodysuit, bald a
 Bottom row: 5 hat with complete rim, without head or hair; 6 top with complete collar, sleeves and waist,
 without hands or skirt; 7 bottom with a complete waistband and opaque inner shorts, without legs;
 8 shoes pair with complete hidden tops, without legs.
-Use the SAME approximately 2.5-head-tall front A-pose template for every character. Preserve the reference
+Use the SAME approximately 1.6-head-tall front A-pose template for every character. Preserve the reference
 identity, colors and clothing. Finish the shapes hidden by other pieces; do not merely crop visible fragments.
 Keep neck, shoulder, wrist, waist and ankle connection positions consistent. Provide generous hidden overlap.
 Each part is separate. No combined character. Parts are design candidates for review before 3D generation.'''
@@ -55,16 +58,20 @@ class AvatarBlueprints:
         saved = read_json(directory/'blueprint.json').get('current')
         source_hash = hashlib.sha256(self.pipeline.artifact(character_id, owner, 'reference').read_bytes()).hexdigest() if any(a['id'] == 'reference' for a in character['artifacts']) else None
         if saved:
+            saved = deepcopy(saved)
+            existing = {layer['slot'] for layer in saved['layers']}
+            saved['layers'] += [equipment_layer(slot, 8+i) for i, slot in enumerate(EQUIPMENT) if slot not in existing]
             return {**saved, 'source_sha256': source_hash}
         provenance = read_json(BACKEND_ROOT/'assets/avatars/image-design/provenance.json')
         reference_path = self.pipeline.artifact(character_id, owner, 'reference') if any(a['id'] == 'reference' for a in character['artifacts']) else None
         is_sample = owner == 1 and reference_path and hashlib.sha256(reference_path.read_bytes()).hexdigest() == provenance.get('source_sha256')
         layers = []
-        for i, slot in enumerate(SLOTS):
+        for i, slot in enumerate(LEGACY_SLOTS):
             available = is_sample or (owner == 1 and slot == 'body')
             layers.append({'slot': slot, 'label': LABELS[i], 'asset': 'sample-A-atlas' if available else None,
                            'crop': RECTS[i], 'placement': PLACEMENTS[i], 'visible': True, 'opacity': 1., 'order': ORDER.index(slot),
                            'background': 'border-gray', 'status': 'design_candidate' if available else 'needs_image'})
+        layers += [equipment_layer(slot, 8+i) for i, slot in enumerate(EQUIPMENT)]
         reference = next((a for a in character['artifacts'] if a['id'] == 'reference'), None)
         return {'revision': '0', 'character_id': character_id, 'source_sha256': source_hash, 'source_url': reference['url'] if reference else None,
                 'profile': 'maple-paper-doll-v1', 'canvas': [512, 512], 'layers': layers,
@@ -106,8 +113,9 @@ class AvatarBlueprints:
         directory = self.directory(owner, character_id)
         if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
             raise PipelineError('invalid_key', '저장 요청 식별자가 필요합니다.', 422)
-        if len(layers) != len(SLOTS) or {layer['slot'] for layer in layers} != set(SLOTS):
-            raise PipelineError('invalid_layers', '8개 공통 슬롯을 유지해 주세요.', 422)
+        slots = {layer['slot'] for layer in layers}
+        if len(slots) != len(layers) or slots not in (set(LEGACY_SLOTS), set(SLOTS)):
+            raise PipelineError('invalid_layers', '몸·의상·장비 공통 슬롯을 유지해 주세요.', 422)
         for layer in layers:
             if layer['asset']:
                 self.asset(owner, layer['asset'])
@@ -127,6 +135,7 @@ class AvatarBlueprints:
             current = self.read(owner, character_id)
             if current['revision'] != revision:
                 raise PipelineError('revision_conflict', '더 최근 설계가 있습니다. 다시 불러오세요.')
+            layers = deepcopy(layers) + [layer for layer in current['layers'] if layer['slot'] not in slots]
             current.update(layers=layers, revision=uuid.uuid4().hex, updated_at=now(), visual_approval='pending')
             receipts = journal.get('receipts', {}); receipts[key] = {'fingerprint': fingerprint, 'response': deepcopy(current)}
             directory.mkdir(parents=True, exist_ok=True)
@@ -137,5 +146,6 @@ class AvatarBlueprints:
         result = deepcopy(self.read(owner, character_id))
         result['pipeline'] = ['image_parts', 'hidden_shape_completion', 'overlay_review', 'per_part_3d', 'canonical_weight_transfer', 'glb_runtime']
         result['generation_prompt'] = PROMPT
+        result['equipment'] = deepcopy(EQUIPMENT)
         result['generation_gate'] = 'Review transparent, complete per-part silhouettes and front/side/back references before submitting 3D jobs.'
         return result

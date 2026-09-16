@@ -1,5 +1,5 @@
 /** Non-destructive image editor: keep source bitmap, crop/mask only the preview/export. */
-export type ImageLayer = { slot: string; label: string; asset: string | null; crop: [number, number, number, number]; placement: [number, number, number, number]; visible: boolean; opacity: number; order: number; background: 'alpha' | 'border-gray'; status: string };
+export type ImageLayer = { slot: string; label: string; asset: string | null; crop: [number, number, number, number]; placement: [number, number, number, number]; visible: boolean; opacity: number; order: number; background: 'alpha' | 'border-gray'; status: string; description?: string };
 export type Blueprint = { revision: string; character_id: string; source_url: string | null; source_sha256: string | null; canvas: [number, number]; profile: string; layers: ImageLayer[]; anchors: Record<string, [number, number]>; overlap: Record<string, number>; visual_approval: string };
 const cache = new Map<string, Promise<HTMLCanvasElement>>();
 

@@ -9,6 +9,8 @@ from src.auth import UserContext, get_current_user
 from src.paths import data_root
 from src.services.avatar_factory import AvatarFactory, PROFILE
 from src.services.avatar_image_pipeline import AvatarImagePipeline, capabilities
+from src.services.avatar_equipment import ImageSlot
+from src.services.avatar_meshy import AvatarMeshy
 
 router = APIRouter(prefix='/avatar-factory', tags=['avatar-factory'])
 
@@ -38,14 +40,88 @@ class ImageProductionInput(BaseModel):
     character_id: str = Field(min_length=1, max_length=100)
     source_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     blueprint_revision: str = Field(min_length=1, max_length=100)
+    production_mode: Literal['legacy', 'character_parts'] = 'legacy'
     image_mode: Literal['generate', 'prepared'] = 'generate'
-    slots: list[Literal['face', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes']] = Field(min_length=1, max_length=7)
+    slots: list[ImageSlot] = Field(default_factory=list, max_length=13)
+    rig_with_meshy: bool = False
+    body_purpose: Literal['whole_character', 'wardrobe_base'] = 'whole_character'
+    motion_actions: dict[str, int] = Field(default_factory=dict, max_length=8)
+    reuse_job_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{24}$')
 
 
 class RecoverPartInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    slot: Literal['face', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes']
+    slot: ImageSlot
     task_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,100}$')
+
+
+class MotionDefaultsInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    selections: dict[str, int] = Field(max_length=8)
+
+
+class MeshyMotionInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    slot: Literal['idle', 'walk', 'run', 'jump', 'fall', 'sit', 'armsUp', 'crouch']
+    action_id: int = Field(ge=0, strict=True)
+
+
+class MeshyRecoverInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    task_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,100}$')
+    action_id: int | None = Field(default=None, ge=0, strict=True)
+
+
+@router.get('/motion-library')
+def motion_library(user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return {'items': AvatarMeshy(factory).library(user.user_id)}
+
+
+@router.get('/motion-defaults')
+def motion_defaults(user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarMeshy(factory).defaults(user.user_id)
+
+
+@router.put('/motion-defaults')
+def save_motion_defaults(body: MotionDefaultsInput, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarMeshy(factory).defaults(user.user_id, body.selections)
+
+
+@router.get('/jobs/{job_id}/meshy')
+def meshy_state(job_id: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarMeshy(factory).get(user.user_id, job_id)
+
+
+@router.post('/jobs/{job_id}/meshy/rig', status_code=202)
+def meshy_rig(job_id: str, background: BackgroundTasks, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    service = AvatarMeshy(factory)
+    state = service.start(user.user_id, job_id)
+    background.add_task(service.execute, user.user_id, job_id)
+    return state
+
+
+@router.post('/jobs/{job_id}/meshy/actions', status_code=202)
+def meshy_action(job_id: str, body: MeshyMotionInput, background: BackgroundTasks,
+                 user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    service = AvatarMeshy(factory)
+    state = service.request_action(user.user_id, job_id, body.slot, body.action_id)
+    background.add_task(service.execute, user.user_id, job_id)
+    return state
+
+
+@router.get('/jobs/{job_id}/meshy/artifacts/{version}/{name}')
+def meshy_artifact(job_id: str, version: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return FileResponse(AvatarMeshy(factory).artifact(user.user_id, job_id, version, name))
+
+
+@router.get('/jobs/{job_id}/meshy/provider/{name}')
+def meshy_provider_artifact(job_id: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return FileResponse(AvatarMeshy(factory).provider_artifact(user.user_id, job_id, name))
+
+
+@router.post('/jobs/{job_id}/meshy/recover')
+def meshy_recover(job_id: str, body: MeshyRecoverInput, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarMeshy(factory).recover(user.user_id, job_id, body.task_id, body.action_id)
 
 
 @router.post('/jobs/{job_id}/recover-task')

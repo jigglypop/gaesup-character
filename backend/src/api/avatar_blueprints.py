@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.auth import UserContext, get_current_user
 from src.paths import data_root
 from src.services.avatar_blueprints import AvatarBlueprints
+from src.services.avatar_equipment import ImageSlot
 
 router = APIRouter(prefix='/avatar-blueprints', tags=['avatar-blueprints'])
 
@@ -17,20 +18,21 @@ def get_blueprints():
 
 class Layer(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
-    slot: Literal['body', 'face', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes']
+    slot: Literal['body'] | ImageSlot
     label: str = Field(min_length=1, max_length=40)
     asset: str | None
     crop: tuple[float, float, float, float]
     placement: tuple[float, float, float, float]
     visible: bool
     opacity: float = Field(ge=0, le=1)
-    order: int = Field(ge=0, le=7)
+    order: int = Field(ge=0, le=12)
+    description: str = Field(default='', max_length=600)
     background: Literal['alpha', 'border-gray']
     status: Literal['design_candidate', 'needs_image']
 
 class BlueprintInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    layers: list[Layer] = Field(min_length=8, max_length=8)
+    layers: list[Layer] = Field(min_length=8, max_length=13)
 
 @router.get('/assets/{asset_id}')
 def asset(asset_id: str, user: UserContext = Depends(get_current_user), service=Depends(get_blueprints)):

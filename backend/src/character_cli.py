@@ -25,9 +25,13 @@ def main():
     generate.add_argument("--image", type=Path, default=data_root() / "image/A.png")
     generate.add_argument("--height", type=float, required=True)
     generate.add_argument("--profile", choices=["meshy-7", "smart-topology"], default="meshy-7")
+    generate.add_argument("--body-type", choices=["humanoid", "quadruped"], default="humanoid")
     status = commands.add_parser("status")
     status.add_argument("--task-id", help="Recover an uncertain submission using the Meshy task list")
     commands.add_parser("rig")
+    model_rig = commands.add_parser("rig-model", help="Meshy-rig a preserved textured humanoid GLB; does not regenerate geometry")
+    model_rig.add_argument("--model", type=Path, required=True)
+    model_rig.add_argument("--height", type=float, required=True)
     downloading = commands.add_parser("download")
     downloading.add_argument("--stage", choices=["generation", "rigging"], default="rigging")
     local = commands.add_parser("local-rig", help="Blender fallback using authored landmarks and clothing regions")
@@ -53,9 +57,11 @@ def main():
                               headers={"Authorization": f"Bearer {key}"}, timeout=120) as client:
                 try:
                     if args.command == "generate":
-                        result = character_jobs.generate(args.run, args.image, args.height, client, args.profile)
+                        result = character_jobs.generate(args.run, args.image, args.height, client, args.profile, body_type=args.body_type)
                     elif args.command == "rig":
                         result = character_jobs.rig(args.run, client)
+                    elif args.command == "rig-model":
+                        result = character_jobs.rig_model(args.run, args.model, args.height, client)
                     else:
                         result = character_jobs.refresh(args.run, client, args.task_id)
                 except ValueError as exc:

@@ -11,6 +11,7 @@ export const AVATAR_SLOTS = [
   'back',
   'bag',
   'hand',
+  'offhand',
   'faceAccessory',
   'neckAccessory',
 ] as const;
@@ -87,6 +88,7 @@ export type AvatarManifest = {
   bones: Record<HumanoidBone, number>;
   attachment: AvatarAttachment;
   bodyRegions?: Partial<Record<BodyRegion, AvatarMeshReference[]>>;
+  wholeBody?: boolean;
   hideBodyRegions?: BodyRegion[];
   conflictsWith?: EquipmentSlot[];
   requires?: EquipmentSlot[];

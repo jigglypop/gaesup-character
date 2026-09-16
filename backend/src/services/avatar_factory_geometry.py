@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from src.services.glb import parse_glb, build_glb
+from src.services.avatar_equipment import EQUIPMENT
 
 ROLE_SLOT = {'head': 'face', 'eyes': 'face', 'hair': 'hair', 'hat': 'hat', 'top': 'top',
              'pants': 'bottom', 'skirt': 'bottom', 'dress': 'onepiece', 'outfit_base': 'onepiece',
@@ -545,14 +546,18 @@ def compile_part_models(payload, progress):
     body, combined = Package(rig), Package(rig)
     refs = {}; assets = []; counts = {}; packages = {}; provenance = []; segmentation = []
     maple = rig['id'] == 'gaesup-maple-v1'
+    whole = any(item['slot'] == 'body' for item in payload['part_models'])
+    if whole and len(payload['part_models']) != 1:
+        raise ValueError('Whole character cannot be mixed with separately generated parts')
     boxes = MAPLE_BOXES if maple else PART_BOXES
-    for region, points, triangles, bones in body_geometry(body):
+    for region, points, triangles, bones in ([] if whole else body_geometry(body)):
         joints, weights = weights_for(points, body, bones)
         refs.setdefault(region.split('.')[0], []).append(body.mesh(region, points, triangles, joints, weights, body.body_material(region)))
         combined.mesh('body_'+region, points, triangles, joints, weights, combined.body_material(region))
-    body.motions(Path(payload['motions'])); body.write(output/'body.glb')
-    assets.append({'key': 'body', 'file': 'body.glb', 'meshes': [ref for group in refs.values() for ref in group], 'bodyRegions': refs})
-    progress('fit', '개별 생성한 파츠를 공통 몸 연결점에 맞추는 중')
+    if not whole:
+        body.motions(Path(payload['motions'])); body.write(output/'body.glb')
+        assets.append({'key': 'body', 'file': 'body.glb', 'meshes': [ref for group in refs.values() for ref in group], 'bodyRegions': refs})
+    progress('fit', '생성된 통짜 전신을 보존하고 로컬 동작 리그를 연결하는 중' if whole else '개별 생성한 파츠를 공통 몸 연결점에 맞추는 중')
     for item in payload['part_models']:
         source_path = Path(item['path'])
         import hashlib
@@ -581,8 +586,10 @@ def compile_part_models(payload, progress):
                 if keep.any(): trimmed.append((primitive, points, triangles[keep]))
             primitives = trimmed
             all_points = np.concatenate([p[np.unique(t)] for _, p, t in primitives]); lo, hi = all_points.min(0), all_points.max(0)
-        target_lo, target_hi = (np.array(v) for v in boxes[item['slot']])
-        slot = 'hair' if item['slot'] in ('hairBack', 'hairFront') else item['slot']
+        equipment = EQUIPMENT.get(item['slot'])
+        if not equipment and not whole:
+            target_lo, target_hi = (np.array(v) for v in boxes[item['slot']])
+        slot = equipment['slot'] if equipment else ('hair' if item['slot'] in ('hairBack', 'hairFront') else item['slot'])
         if slot not in packages: packages[slot] = (Package(rig), [])
         package, part_refs = packages[slot]
         material_offset = import_materials(package, source, binary); combined_offset = import_materials(combined, source, binary)
@@ -591,30 +598,53 @@ def compile_part_models(payload, progress):
             ['hips', 'spine', 'chest', 'upperChest', 'shoulderL', 'upperArmL', 'lowerArmL', 'shoulderR', 'upperArmR', 'lowerArmR'])
         for index, (primitive, points, triangles) in enumerate(primitives):
             used, inverse = np.unique(triangles, return_inverse=True); triangles = inverse.reshape(-1, 3)
-            fitted = (points[used]-(lo+hi)/2)/np.maximum(hi-lo, .001)*(target_hi-target_lo)+(target_lo+target_hi)/2
+            if whole:
+                # One uniform scale and translation: never replace the generated body,
+                # trim its head, or stretch body regions independently.
+                fitted = (points[used]-[float((lo[0]+hi[0])/2), float(lo[1]), float((lo[2]+hi[2])/2)])*(1.81/max(float(hi[1]-lo[1]), .001))
+            elif equipment:
+                # Keep the silhouette and bind every vertex to one attachment bone.
+                # The reference recipe defines the normalized grip/attachment position.
+                anchor = lo+(hi-lo)*np.array(equipment['anchor'])
+                fitted = (points[used]-anchor)*(equipment['size']/max(float(max(hi-lo)), .001))
+                fitted += package.positions[equipment['bone']]
+                if slot == 'back': fitted[:, 2] -= .18
+                if slot == 'faceAccessory': fitted[:, 2] += .46 if maple else .3
+                if slot == 'neckAccessory': fitted[:, 2] += .13
+            else:
+                fitted = (points[used]-(lo+hi)/2)/np.maximum(hi-lo, .001)*(target_hi-target_lo)+(target_lo+target_hi)/2
             if maple and slot == 'face':
                 # Preserve the head's frontal aspect ratio after removing the bust.
                 scale = min((target_hi[0]-target_lo[0])/(hi[0]-lo[0]), (target_hi[1]-target_lo[1])/(hi[1]-lo[1]))
                 fitted[:, 0] = (points[used, 0]-(lo[0]+hi[0])/2)*scale
                 fitted[:, 1] = (points[used, 1]-lo[1])*scale+target_lo[1]
-            joints, weights = part_weights(fitted, package, slot) if maple else weights_for(fitted, package, candidates)
+            joints, weights = (weights_for(fitted, package, [n for n in package.bones if n != 'root']) if whole else
+                               weights_for(fitted, package, [equipment['bone']]) if equipment else
+                               part_weights(fitted, package, slot) if maple else weights_for(fitted, package, candidates))
             extras = {name: accessor(source, binary, a)[used] for name, a in primitive['attributes'].items() if name.startswith('TEXCOORD_') or name.startswith('COLOR_')}
             name = f'{item["slot"]}_{index}'
             part_refs.append(package.mesh(name, fitted, triangles, joints, weights, material_offset+primitive['material'] if 'material' in primitive else package.skin_material, extras))
             combined.mesh(name, fitted, triangles, joints, weights, combined_offset+primitive['material'] if 'material' in primitive else combined.skin_material, extras)
             counts[item['slot']] = counts.get(item['slot'], 0)+len(triangles)
-        provenance.append({'slot': item['slot'], 'sha256': item['sha256'], 'provider_task_id': item.get('task_id')})
+        provenance.append({'slot': item['slot'], 'sha256': item['sha256'], 'provider_task_id': item.get('task_id'),
+                           **({'attachment_bone': equipment['bone'], 'fit': 'uniform_grip_anchor',
+                               'anchor': equipment['anchor']} if equipment else {})})
     progress('rig', '모든 파츠에 동일한 23개 뼈와 가중치를 연결하는 중')
     for slot, (package, part_refs) in packages.items():
+        if whole:
+            package.motions(Path(payload['motions']))
         package.write(output/f'{slot}.glb')
-        assets.append({'key': slot, 'file': f'{slot}.glb', 'meshes': part_refs, 'hideBodyRegions': MASKS.get(slot, [])})
+        assets.append({'key': slot, 'file': f'{slot}.glb', 'meshes': part_refs,
+                       **({'wholeBody': True} if whole else {'hideBodyRegions': MASKS.get(slot, [])})})
     combined.motions(Path(payload['motions'])); combined.write(output/'workspace.glb')
     hidden = {region for slot in packages for region in MASKS.get(slot, [])}
     combined.doc['scenes'][0]['nodes'] = [i for i in combined.doc['scenes'][0]['nodes'] if combined.doc['nodes'][i]['name'].removeprefix('body_').split('.')[0] not in hidden]
     combined.write(output/'character.glb')
     return {'assets': assets, 'bones': body.bones, 'source_triangles': sum(counts.values()), 'part_triangles': counts,
-            'part_sources': provenance, 'segmentation': 'image_first_individual_generation', 'source_bone_mapping': [],
+            'part_sources': provenance, 'segmentation': 'whole_character_no_segmentation' if whole else 'image_first_individual_generation', 'source_bone_mapping': [],
             'geometry_corrections': segmentation,
-            'body_origin': 'authored_maple_chibi_template_v3' if maple else 'authored_maple_sd_clothed_template_v2', 'rig_origin': 'canonical_rebind',
-            'limitations': ['각 파츠의 뒷면·겹침 여유·가중치 변형은 검수 필요', '모든 파츠는 공통 몸에 맞춘 새 리그이며 개별 Meshy 자동 리그가 아님',
-                            '공통 동작은 변형 검사 클립이며 외형 승인과 별도로 확인']}
+            'body_origin': 'generated_whole_character' if whole else 'authored_maple_chibi_template_v3' if maple else 'authored_maple_sd_clothed_template_v2', 'rig_origin': 'canonical_rebind',
+            'limitations': (['전신 원본의 면·재질·비율을 보존한 로컬 리그 후보이며 Meshy 자동 리깅 결과가 아님',
+                             '머리·몸·의상은 분리하지 않았으며 골격 위치와 동작 변형은 시각 검수 필요'] if whole else
+                            ['각 파츠의 뒷면·겹침 여유·가중치 변형은 검수 필요', '모든 파츠는 공통 몸에 맞춘 새 리그이며 개별 Meshy 자동 리그가 아님',
+                             '공통 동작은 변형 검사 클립이며 외형 승인과 별도로 확인'])}
