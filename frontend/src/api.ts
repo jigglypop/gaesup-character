@@ -20,9 +20,17 @@ export class ApiError extends Error {
   constructor(public code: string, message: string, public status: number) { super(message); }
 }
 
-export async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
+export async function request<T>(url: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
+  const { timeoutMs = 15000, signal, ...init } = options;
+  const controller = new AbortController();
+  let timedOut = false;
+  const cancel = () => controller.abort();
+  if (signal?.aborted) cancel();
+  signal?.addEventListener('abort', cancel, { once: true });
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  try {
   let response: Response;
-  try { response = await fetch(url, options); }
+  try { response = await fetch(url, { ...init, signal: controller.signal }); }
   catch { throw new ApiError('connection', '백엔드에 연결할 수 없습니다. 연결이 복구되면 다시 동기화합니다.', 0); }
   const body = await response.json().catch(() => {
     if (response.ok) throw new ApiError('incomplete_response', '서버 응답을 끝까지 받지 못했습니다. 기존 요청으로 결과를 복구해 주세요.', 0);
@@ -34,15 +42,22 @@ export async function request<T>(url: string, options: RequestInit = {}): Promis
     throw new ApiError(body.error?.code || 'request_failed', body.error?.message || validation || fallback, response.status);
   }
   return body as T;
+  } catch (error) {
+    if (timedOut) throw new ApiError('timeout', '서버 응답이 늦어지고 있습니다. 저장된 작업을 유지하고 연결을 다시 확인합니다.', 0);
+    if (signal?.aborted) throw new ApiError('cancelled', '조회가 취소되었습니다.', 0);
+    throw error;
+  } finally {
+    clearTimeout(timer); signal?.removeEventListener('abort', cancel);
+  }
 }
 
 const endpoint = (id: string) => `/api/characters/${encodeURIComponent(id)}`;
 export const api = {
-  list: () => request<{ characters: Character[] }>('/api/characters'),
+  list: (signal?: AbortSignal) => request<{ characters: Character[] }>('/api/characters', { signal }),
   detail: (id: string) => request<Character>(endpoint(id)),
   create: (name: string, height: number | null) => request<Character>('/api/characters', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, height_meters: height }) }),
   update: (c: Character, name: string, height: number | null) => request<Character>(endpoint(c.id), { method: 'PATCH', headers: { 'Content-Type': 'application/json', 'If-Match': c.revision }, body: JSON.stringify({ name, height_meters: height }) }),
-  upload: (c: Character, file: File, kind: string) => request<Character>(`${endpoint(c.id)}/sources?kind=${kind}`, { method: 'POST', headers: { 'If-Match': c.revision, 'Content-Type': file.type || 'application/octet-stream' }, body: file }),
+  upload: (c: Character, file: File, kind: string) => request<Character>(`${endpoint(c.id)}/sources?kind=${kind}`, { method: 'POST', headers: { 'If-Match': c.revision, 'Content-Type': file.type || 'application/octet-stream' }, body: file, timeoutMs: 60000 }),
   action: (c: Character, action: string, payload: object, key: string) => request<{ operation: Operation }>(`${endpoint(c.id)}/actions/${action}`, { method: 'POST', headers: { 'If-Match': c.revision, 'Idempotency-Key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   recover: (c: Character) => request<{ operation: Operation }>(`${endpoint(c.id)}/operations/${c.operation!.id}/recover`, { method: 'POST', headers: { 'If-Match': c.revision } }),
 };

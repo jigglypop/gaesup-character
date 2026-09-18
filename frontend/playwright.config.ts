@@ -11,7 +11,7 @@ export default defineConfig({
     { command: `${process.env.WORKSPACE_TEST_SYSTEM_PYTHON === '1' ? 'python' : 'uv run python'} tests/serve_workspace.py`, cwd: '../backend',
       url: `${apiUrl}/health`, timeout: 30000 },
     { command: 'npx vite --host 127.0.0.1 --port 5274 --strictPort',
-      env: { BACKEND_URL: apiUrl },
+      env: { BACKEND_URL: apiUrl, WORKSPACE_ISOLATED: '1' },
       url: 'http://127.0.0.1:5274', timeout: 30000 },
   ],
 });

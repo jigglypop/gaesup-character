@@ -1,8 +1,9 @@
 """Persisted Meshy jobs shared by CLI and HTTP. Callers hold the run lock."""
 
 import base64
+import io
 import json
-from pathlib import Path
+from src.services.object_storage import StoredPath as Path
 import re
 
 import httpx
@@ -42,7 +43,7 @@ def generate(directory: Path, image: Path, height: float, client: httpx.Client, 
     image = image.resolve()
     if image.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
         raise ValueError("Image must be PNG or JPEG")
-    with Image.open(image) as reference:
+    with Image.open(io.BytesIO(image.read_bytes())) as reference:
         reference.verify()
     if profile not in {"meshy-7", "smart-topology"}:
         raise ValueError("Unknown generation profile")
@@ -78,7 +79,7 @@ def rig(directory: Path, client: httpx.Client) -> dict:
                    {"input_task_id": task_id, "height_meters": value["height_meters"]}, client)
 
 
-def generate_multiview_part(directory: Path, images: list[Path], client: httpx.Client) -> dict:
+def generate_multiview_part(directory: Path, images: list[Path], client: httpx.Client, *, isolated_part=True, height=1.2) -> dict:
     """One fixed Meshy 7 submission; caller validates object/view lineage."""
     if (directory/'character.json').exists():
         raise ValueError('Existing run: recover or refresh, never resubmit')
@@ -86,7 +87,7 @@ def generate_multiview_part(directory: Path, images: list[Path], client: httpx.C
         raise ValueError('One to four views of the same object are required')
     urls, sources = [], []
     for image in images:
-        with Image.open(image) as reference:
+        with Image.open(io.BytesIO(image.read_bytes())) as reference:
             if reference.format != 'PNG':
                 raise ValueError('Prepared PNG required')
             reference.verify()
@@ -94,9 +95,12 @@ def generate_multiview_part(directory: Path, images: list[Path], client: httpx.C
         urls.append('data:image/png;base64,'+base64.b64encode(image.read_bytes()).decode('ascii'))
     payload = {'image_urls': urls, 'ai_model': 'meshy-7', 'should_texture': True, 'enable_pbr': True,
                'should_remesh': True, 'target_polycount': 10000, 'image_enhancement': False, 'target_formats': ['glb']}
+    if not isolated_part:
+        payload.update(target_polycount=30000, pose_mode='a-pose')
     endpoint = '/openapi/v1/multi-image-to-3d'
     value = {'stage': 'generation', 'status': 'submission_uncertain', 'profile': 'meshy-7',
-             'generation_endpoint': endpoint, 'sources': sources, 'isolated_part': True,
+             'generation_endpoint': endpoint, 'sources': sources, 'isolated_part': isolated_part,
+             'height_meters': height, 'body_type': 'humanoid',
              'generation_settings': {k: v for k, v in payload.items() if k != 'image_urls'}}
     return _submit(directory, value, endpoint, payload, client)
 

@@ -3,7 +3,7 @@
 from functools import lru_cache
 
 from fastapi import APIRouter, Depends, Header, Query
-from fastapi.responses import FileResponse
+from src.services.object_storage import artifact_response as FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.auth import UserContext, get_current_user

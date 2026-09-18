@@ -111,6 +111,44 @@ def test_selected_walk_uses_exact_library_action_and_reuses_download(setup):
     assert (directory/'meshy/actions/77/clip.glb').is_file()
 
 
+def test_photo_character_automatically_assembles_after_native_rig_and_preserves_provider_completion(setup, monkeypatch):
+    from src.services import avatar_native_parts
+    service, jid, directory, calls, _ = setup
+    job = read_json(directory/'job.json')
+    job.update(production_mode='character_parts', auto_assemble=True)
+    _write_json(directory/'job.json', job)
+    events = []
+    monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'start', lambda self, owner, job: (events.append(('start', job)) or {}, True))
+    monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'execute', lambda self, owner, job: events.append(('execute', job)))
+    monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'get', lambda self, owner, job: {'status': 'review_required'})
+    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
+    assert events == [('start', jid), ('execute', jid)]
+    assert read_json(directory/'output/progress.json')['stage'] == 'complete'
+    assert read_json(directory/'meshy/worker.json')['status'] == 'complete'
+    assert len(calls) == 1
+
+
+def test_local_assembly_failure_continues_without_resubmitting_rig(setup, monkeypatch):
+    from src.services import avatar_native_parts
+    from src.services.avatar_character_flow import continue_character
+    service, jid, directory, calls, _ = setup
+    job = read_json(directory/'job.json')
+    job.update(production_mode='character_parts', auto_assemble=True)
+    _write_json(directory/'job.json', job)
+    def failed(*args):
+        raise RuntimeError('private local path')
+    monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'start', failed)
+    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
+    assert read_json(directory/'meshy/worker.json')['status'] == 'complete'
+    assert 'private' not in read_json(directory/'job.json')['error']
+    assert read_json(directory/'job.json')['error']
+    monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'start', lambda *args: ({}, False))
+    monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'get', lambda *args: {'status': 'review_required'})
+    continue_character(service.factory, 1, jid)
+    assert read_json(directory/'job.json')['error'] is None
+    assert len(calls) == 1
+
+
 def test_uncertain_animation_is_not_reposted_and_changed_source_blocks(setup, monkeypatch):
     service, jid, directory, calls, transport = setup
     service.start(1, jid); service.execute(1, jid, poll_seconds=0)

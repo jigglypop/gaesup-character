@@ -1,13 +1,6 @@
 import hashlib
-import importlib.util
 import json
-from pathlib import Path
-
-
-SCRIPT = Path(__file__).resolve().parents[2] / ".codex/skills/meshy-character-wardrobe/scripts/audit_batch.py"
-SPEC = importlib.util.spec_from_file_location("character_batch_audit", SCRIPT)
-AUDIT = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(AUDIT)
+from src.services import character_audit as AUDIT
 
 
 def write_json(path, value):

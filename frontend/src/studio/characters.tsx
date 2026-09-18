@@ -1,33 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, type Character } from '../api';
+import { useEffect, useRef, useState } from 'react';
+import type { Character } from '../api';
+export { useLiveCharacters } from '../use-live-characters';
 import type { ModelViewer } from '../viewer';
 import { StudioIcon } from './icons';
 
 export const pipelineNames: Record<string, string> = { ready: '준비됨', blocked: '작업 대기', in_progress: '작업 중', review_required: '검수 대기', approved: '승인됨' };
-
-export function useLiveCharacters() {
-  const [characters, setCharacters] = useState<Character[]>([]);
-  const [failure, setFailure] = useState('');
-  const [loading, setLoading] = useState(true);
-  const active = useRef(true), running = useRef(false);
-  const refresh = useCallback(async () => {
-    if (running.current) return;
-    running.current = true;
-    try {
-      const result = await api.list();
-      if (active.current) { setCharacters(result.characters); setFailure(''); }
-    } catch (error) { if (active.current) setFailure((error as Error).message); }
-    finally { running.current = false; if (active.current) setLoading(false); }
-  }, []);
-  useEffect(() => {
-    active.current = true; void refresh();
-    const interval = setInterval(() => { if (!document.hidden) void refresh(); }, 5000);
-    const reconnect = () => { if (!document.hidden) void refresh(); };
-    window.addEventListener('online', reconnect); document.addEventListener('visibilitychange', reconnect);
-    return () => { active.current = false; clearInterval(interval); window.removeEventListener('online', reconnect); document.removeEventListener('visibilitychange', reconnect); };
-  }, [refresh]);
-  return { characters, loading, failure, refresh };
-}
 
 export function CharacterPreview({ character }: { character: Character }) {
   const mount = useRef<HTMLDivElement>(null), viewer = useRef<ModelViewer | null>(null);

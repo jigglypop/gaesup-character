@@ -2,15 +2,18 @@ from functools import lru_cache
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header
-from fastapi.responses import FileResponse
+from src.services.object_storage import artifact_response as FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.auth import UserContext, get_current_user
 from src.paths import data_root
-from src.services.avatar_factory import AvatarFactory, PROFILE
+from src.services.avatar_factory import AvatarFactory, PROFILE, _LOCK
 from src.services.avatar_image_pipeline import AvatarImagePipeline, capabilities
 from src.services.avatar_equipment import ImageSlot
 from src.services.avatar_meshy import AvatarMeshy
+from src.services.avatar_native_parts import AvatarNativeParts
+from src.services.avatar_native_outfits import AvatarNativeOutfits
+from src.services.avatar_stage_resume import AvatarStageResume, ensure_stage_idle
 
 router = APIRouter(prefix='/avatar-factory', tags=['avatar-factory'])
 
@@ -41,6 +44,8 @@ class ImageProductionInput(BaseModel):
     source_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     blueprint_revision: str = Field(min_length=1, max_length=100)
     production_mode: Literal['legacy', 'character_parts'] = 'legacy'
+    view_mode: Literal['single', 'front_side'] = 'single'
+    hair_length: Literal['source', 'short', 'long'] | None = None
     image_mode: Literal['generate', 'prepared'] = 'generate'
     slots: list[ImageSlot] = Field(default_factory=list, max_length=13)
     rig_with_meshy: bool = False
@@ -53,6 +58,18 @@ class RecoverPartInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     slot: ImageSlot
     task_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,100}$')
+
+
+class RetryImageInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    slot: ImageSlot
+    view: Literal['front', 'side']
+    failure_id: str = Field(pattern=r'^[a-f0-9]{12}$')
+
+
+class RetryImagesInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    images: list[RetryImageInput] = Field(min_length=1, max_length=14)
 
 
 class MotionDefaultsInput(BaseModel):
@@ -70,6 +87,12 @@ class MeshyRecoverInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     task_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,100}$')
     action_id: int | None = Field(default=None, ge=0, strict=True)
+
+
+class NativeOutfitInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    body_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    slots: list[str] = Field(max_length=32)
 
 
 @router.get('/motion-library')
@@ -92,10 +115,46 @@ def meshy_state(job_id: str, user: UserContext = Depends(get_current_user), fact
     return AvatarMeshy(factory).get(user.user_id, job_id)
 
 
+@router.get('/jobs/{job_id}/native-parts')
+def native_parts(job_id: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarNativeParts(factory).get(user.user_id, job_id)
+
+
+@router.post('/jobs/{job_id}/native-parts', status_code=202)
+def fit_native_parts(job_id: str, background: BackgroundTasks, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    service = AvatarNativeParts(factory)
+    with _LOCK:
+        ensure_stage_idle(factory, user.user_id, job_id)
+        state, created = service.start(user.user_id, job_id)
+    if created:
+        background.add_task(service.execute, user.user_id, job_id)
+    return state
+
+
+@router.get('/jobs/{job_id}/native-parts/{version}/{name}')
+def native_parts_artifact(job_id: str, version: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return FileResponse(AvatarNativeParts(factory).artifact(user.user_id, job_id, version, name))
+
+
+@router.get('/jobs/{job_id}/native-outfits/{version}')
+def native_outfit(job_id: str, version: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarNativeOutfits(AvatarNativeParts(factory)).get(user.user_id, job_id, version)
+
+
+@router.put('/jobs/{job_id}/native-outfits/{version}')
+def save_native_outfit(job_id: str, version: str, body: NativeOutfitInput,
+                      if_match: str = Header(alias='If-Match'), idempotency_key: str = Header(alias='Idempotency-Key'),
+                      user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarNativeOutfits(AvatarNativeParts(factory)).put(
+        user.user_id, job_id, version, body.model_dump(), if_match, idempotency_key)
+
+
 @router.post('/jobs/{job_id}/meshy/rig', status_code=202)
 def meshy_rig(job_id: str, background: BackgroundTasks, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     service = AvatarMeshy(factory)
-    state = service.start(user.user_id, job_id)
+    with _LOCK:
+        ensure_stage_idle(factory, user.user_id, job_id)
+        state = service.start(user.user_id, job_id)
     background.add_task(service.execute, user.user_id, job_id)
     return state
 
@@ -104,7 +163,9 @@ def meshy_rig(job_id: str, background: BackgroundTasks, user: UserContext = Depe
 def meshy_action(job_id: str, body: MeshyMotionInput, background: BackgroundTasks,
                  user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     service = AvatarMeshy(factory)
-    state = service.request_action(user.user_id, job_id, body.slot, body.action_id)
+    with _LOCK:
+        ensure_stage_idle(factory, user.user_id, job_id)
+        state = service.request_action(user.user_id, job_id, body.slot, body.action_id)
     background.add_task(service.execute, user.user_id, job_id)
     return state
 
@@ -146,9 +207,55 @@ def create_images(body: ImageProductionInput, background: BackgroundTasks, idemp
 
 @router.post('/jobs/{job_id}/resume', status_code=202)
 def resume_images(job_id: str, background: BackgroundTasks, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    ensure_stage_idle(factory, user.user_id, job_id)
+    current = factory.get(user.user_id, job_id)
+    if current.get('production_mode') == 'character_parts' and current['status'] == 'review_required':
+        from src.services.avatar_character_flow import continue_character
+        background.add_task(continue_character, factory, user.user_id, job_id)
+        return current
     service = AvatarImagePipeline(factory)
     job = service.resume(user.user_id, job_id)
     background.add_task(service.execute, user.user_id, job_id)
+    return job
+
+
+@router.get('/jobs/{job_id}/stages')
+def factory_stages(job_id: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarStageResume(factory).get(user.user_id, job_id)
+
+
+@router.post('/jobs/{job_id}/stages/{stage}/resume', status_code=202)
+def resume_factory_stage(job_id: str, stage: Literal['images', 'models', 'rig', 'assemble'],
+                         background: BackgroundTasks, idempotency_key: str = Header(alias='Idempotency-Key'),
+                         user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    service = AvatarStageResume(factory)
+    state, request_id = service.start(user.user_id, job_id, stage, idempotency_key)
+    if request_id:
+        background.add_task(service.execute, user.user_id, job_id, request_id)
+    return state
+
+
+@router.post('/jobs/{job_id}/retry-image', status_code=202)
+def retry_image(job_id: str, body: RetryImageInput, background: BackgroundTasks,
+                user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    ensure_stage_idle(factory, user.user_id, job_id)
+    from src.services.avatar_image_recovery import retry_view
+    service = AvatarImagePipeline(factory)
+    job, created = retry_view(service, user.user_id, job_id, body.slot, body.view, body.failure_id)
+    if created:
+        background.add_task(service.execute, user.user_id, job_id)
+    return job
+
+
+@router.post('/jobs/{job_id}/retry-images', status_code=202)
+def retry_images(job_id: str, body: RetryImagesInput, background: BackgroundTasks,
+                 user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    ensure_stage_idle(factory, user.user_id, job_id)
+    from src.services.avatar_image_recovery import retry_views
+    service = AvatarImagePipeline(factory)
+    job, created = retry_views(service, user.user_id, job_id, [image.model_dump() for image in body.images])
+    if created:
+        background.add_task(service.execute, user.user_id, job_id)
     return job
 
 
@@ -159,6 +266,7 @@ def profiles(user: UserContext = Depends(get_current_user)):
 
 @router.post('/jobs/{job_id}/rebuild', status_code=202)
 def rebuild_images(job_id: str, background: BackgroundTasks, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    ensure_stage_idle(factory, user.user_id, job_id)
     service = AvatarImagePipeline(factory)
     job = service.rebuild(user.user_id, job_id)
     background.add_task(service.execute, user.user_id, job['id'])

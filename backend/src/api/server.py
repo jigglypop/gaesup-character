@@ -33,9 +33,11 @@ from src.api.avatar_standard import router as standard_router
 from src.api.avatar_blueprints import router as blueprint_router
 from src.services.character_pipeline import PipelineError
 from src.auth import is_public_path
+from src.runtime_identity import runtime_identity
 
 
 logger = logging.getLogger(__name__)
+_RUNTIME = runtime_identity()
 
 
 def _cors_origins() -> list[str]:
@@ -88,7 +90,7 @@ def health() -> dict:
     status = "healthy"
     if database.get("configured") and not database.get("ok"):
         status = "degraded"
-    return {"status": status, "connections": {"database": database}}
+    return {"status": status, "connections": {"database": database}, "runtime": _RUNTIME}
 
 
 @app.get("/health")

@@ -8,7 +8,8 @@ import json
 import re
 import uuid
 from contextlib import contextmanager
-from pathlib import Path
+from src.services.object_storage import StoredPath as Path
+from src.services.object_storage import sha256
 
 import httpx
 
@@ -20,8 +21,7 @@ from src.services.glb import parse_glb
 
 
 def _digest(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+    return sha256(path)
 
 
 def download_glb(client: httpx.Client, url: str, output: Path) -> dict:

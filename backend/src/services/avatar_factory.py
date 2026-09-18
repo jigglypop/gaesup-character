@@ -1,10 +1,11 @@
 """Owner-scoped, resumable local avatar production. No provider submissions."""
 from copy import deepcopy
 import hashlib
+import io
 import json
 import logging
 import os
-from pathlib import Path
+from src.services.object_storage import StoredPath as Path
 import re
 import subprocess
 from threading import RLock, Semaphore
@@ -20,6 +21,7 @@ from src.services.character_pipeline import CharacterPipeline, PipelineError, re
 from src.services.character_segmentation import PART_ROLES, triangle_indices
 from src.services.glb import parse_glb
 from src.services.process_identity import identity, state as process_state
+from src.services.object_storage import local_workspace, sha256
 
 LOGGER = logging.getLogger(__name__)
 _QUEUE = Semaphore(1)
@@ -34,7 +36,7 @@ IMAGE_PROFILE = {**PROFILE, 'id': 'maple-chibi-v3', 'name': '대두 SD · 짧은
 
 
 def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return sha256(path)
 
 
 class AvatarFactory:
@@ -100,6 +102,10 @@ class AvatarFactory:
             return self.get(owner, job_id), True
 
     def execute(self, owner, job_id):
+        with local_workspace(self.directory(owner, job_id)):
+            return self._execute_local(owner, job_id)
+
+    def _execute_local(self, owner, job_id):
         directory = self.directory(owner, job_id); output = directory/'output'
         with _QUEUE:
             job = read_json(directory/'job.json')
@@ -111,6 +117,7 @@ class AvatarFactory:
                            '--python', str(Path(__file__).with_name('avatar_factory_blender.py')), '--', str(output/'input.json')]
                 with (output/'blender.log').open('wb') as log:
                     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                               env={**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'},
                                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
                     _write_json(output/'runner.json', {'process': identity(process.pid)})
                     try:
@@ -141,7 +148,7 @@ class AvatarFactory:
         for filename in ('body.png', 'rest.png', 'side.png', 'pose.png'):
             if filename not in seal['files']:
                 continue
-            with Image.open(output/filename) as render:
+            with Image.open(io.BytesIO((output/filename).read_bytes())) as render:
                 if render.mode != 'RGBA' or render.getchannel('A').getbbox() is None:
                     raise PipelineError('empty_review_render', f'{filename} 검수 이미지가 비어 있습니다. 기존 파츠로 다시 조립해 주세요.')
         result = read_json(output/'compilation.json'); records = []; qualities = {}
@@ -212,6 +219,9 @@ class AvatarFactory:
             blocked = any(p['image']['status'] not in ('pending', 'received', 'succeeded') and
                           not (p['image']['status'] == 'submitting' and (directory/'output'/f'{p["slot"]}-provider.response.json').is_file())
                           for p in state.get('parts', []))
+            if state.get('production_spec'):
+                from src.services.avatar_multiview_images import can_resume
+                blocked = not can_resume(directory, state)
             runner = read_json(directory/'output/runner.json')
             if job['status'] in ('failed', 'recovery_required') and runner and process_state(runner.get('process')) != 'exited':
                 blocked = True
@@ -220,6 +230,14 @@ class AvatarFactory:
                 blocked = blocked or bool(task and (not task.get('task_id') or task.get('status') in ('FAILED', 'CANCELED')))
             public['next_actions'] = [{'id': 'resume', 'enabled': not blocked,
                                        'reason': '이미 시도한 요청의 결과 확인이 필요합니다. 자동 재제출하지 않습니다.' if blocked else None}]
+        if job.get('production_mode') == 'character_parts':
+            from src.services.avatar_character_flow import character_flow
+            public['character_flow'] = character_flow(directory, public)
+            public['progress'] = {key: public['character_flow'][key] for key in ('stage', 'message')}
+            from src.services.avatar_image_recovery import decorate_job
+            decorate_job(directory, public)
+            from src.services.avatar_production_progress import production_progress
+            public['production_progress'] = production_progress(directory, public)
         return public
 
     def listing(self, owner):

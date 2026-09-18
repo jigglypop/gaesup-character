@@ -1,7 +1,7 @@
 """Additive Maple SD equipment contract; old eight-layer designs remain readable."""
 from typing import Literal
 
-ImageSlot = Literal['body', 'face', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes',
+ImageSlot = Literal['body', 'hair', 'head', 'face', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes',
                     'weapon', 'shield', 'back', 'faceAccessory', 'neckAccessory']
 EQUIPMENT = {
     'weapon': {'label': '무기', 'slot': 'hand', 'bone': 'handR', 'size': .9,

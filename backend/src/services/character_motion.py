@@ -4,7 +4,7 @@ import base64
 import json
 import re
 import time
-from pathlib import Path
+from src.services.object_storage import StoredPath as Path
 
 import httpx
 

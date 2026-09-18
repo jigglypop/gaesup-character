@@ -349,6 +349,7 @@ def test_character_parts_produces_exact_source_set_and_native_body_handoff(setup
     submitted = {**payload, 'production_mode': 'character_parts', 'slots': []}
     job, _ = service.create(1, 'character-parts-set', submitted)
     assert [p['slot'] for p in job['parts']] == module.CHARACTER_PART_SLOTS
+    assert job['auto_assemble'] is True
     assert job['limits']['image_tasks'] == job['limits']['meshy_tasks'] == 7
     service.execute(1, job['id'], poll_seconds=0)
     assert len(calls['images']) == len(calls['posts']) == 7

@@ -38,6 +38,9 @@ def _retry_file_io(operation: Callable[[], _T]) -> _T:
 
 
 def _write_json(path: Path, value: dict) -> None:
+    from src.services.object_storage import write_json
+    if write_json(path, value):
+        return
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")

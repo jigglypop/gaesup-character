@@ -2,7 +2,8 @@ from functools import lru_cache
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
+from src.services.object_storage import artifact_response as FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.auth import UserContext, get_current_user

@@ -28,6 +28,8 @@ function disposeEntry(entry: Entry) {
  */
 export class NativeWardrobe {
   private bones = new Map<string, RestBone>();
+  private baseMeshes: SkinnedMesh[] = [];
+  private baseMaterials = new Map<Material, boolean>();
   private baseInverse: Matrix4;
   private active = new Map<string, Entry>();
   private loaded = new Map<string, Entry>();
@@ -39,7 +41,15 @@ export class NativeWardrobe {
   constructor(private body: Object3D) {
     body.updateMatrixWorld(true); this.baseInverse = body.matrixWorld.clone().invert();
     const rigs = new Set<Skeleton>();
-    body.traverse(object => { const mesh = object as SkinnedMesh; if (mesh.isSkinnedMesh) rigs.add(mesh.skeleton); });
+    body.traverse(object => {
+      const mesh = object as SkinnedMesh;
+      if (mesh.isSkinnedMesh) {
+        rigs.add(mesh.skeleton); this.baseMeshes.push(mesh);
+        for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+          this.baseMaterials.set(material, material.visible);
+        }
+      }
+    });
     for (const rig of rigs) for (const bone of rig.bones) {
       const prior = this.bones.get(bone.name);
       if (!bone.name || (prior && prior.bone !== bone)) throw new Error('기준 몸의 본 이름이 중복되어 의상을 연결할 수 없습니다.');
@@ -120,6 +130,11 @@ export class NativeWardrobe {
       this.active.forEach(entry => entry.group.removeFromParent());
       this.active = new Map(entries.map(entry => [entry.spec.slot, entry]));
       entries.forEach(entry => { entry.touched = performance.now(); this.body.add(entry.group); });
+      this.baseMaterials.forEach((visible, material) => {
+        const value: unknown = material.userData.hidden_by_slots;
+        const slots = typeof value === 'string' ? value.split('+') : Array.isArray(value) ? value : [];
+        material.visible = visible && !slots.some(slot => this.active.has(slot));
+      });
       this.body.updateMatrixWorld(true); return true;
     } finally {
       parts.forEach(part => { const count = (this.references.get(part.id) || 1)-1; if (count) this.references.set(part.id, count); else this.references.delete(part.id); });
@@ -130,20 +145,32 @@ export class NativeWardrobe {
   }
 
   diagnostics() {
-    const sample: number[] = []; let shared = true;
+    const sample: number[] = [], bodySample: number[] = [], partSamples: Record<string, number[]> = {}; let shared = true;
     this.body.updateMatrixWorld(true);
-    this.active.forEach(entry => entry.group.traverse(object => {
+    for (const mesh of this.baseMeshes) {
+      mesh.skeleton.update();
+      const count = mesh.geometry.attributes.position.count;
+      for (let i = 0; i < count; i += Math.max(1, Math.floor(count/8))) {
+        const point = new Vector3().fromBufferAttribute(mesh.geometry.attributes.position, i);
+        mesh.applyBoneTransform(i, point).applyMatrix4(mesh.matrixWorld); bodySample.push(point.x, point.y, point.z);
+      }
+    }
+    this.active.forEach(entry => { const points: number[] = []; partSamples[entry.spec.slot] = points; entry.group.traverse(object => {
       const mesh = object as SkinnedMesh; if (!mesh.isSkinnedMesh) return;
       shared &&= mesh.skeleton.bones.every(bone => this.bones.get(bone.name)?.bone === bone);
       mesh.skeleton.update();
       const count = mesh.geometry.attributes.position.count;
       for (let i = 0; i < count; i += Math.max(1, Math.floor(count/8))) {
         const point = new Vector3().fromBufferAttribute(mesh.geometry.attributes.position, i);
-        mesh.applyBoneTransform(i, point).applyMatrix4(mesh.matrixWorld); sample.push(point.x, point.y, point.z);
+        mesh.applyBoneTransform(i, point).applyMatrix4(mesh.matrixWorld); sample.push(point.x, point.y, point.z); points.push(point.x, point.y, point.z);
       }
-    }));
-    return { partIds: Array.from(this.active.values(), entry => entry.spec.id), boneCount: this.bones.size, shared, sample };
+    }); });
+    return { partIds: Array.from(this.active.values(), entry => entry.spec.id), boneCount: this.bones.size, shared, sample, bodySample, partSamples };
   }
 
-  dispose() { this.disposed = true; this.generation++; this.loaded.forEach(disposeEntry); this.loaded.clear(); this.active.clear(); }
+  dispose() {
+    this.disposed = true; this.generation++;
+    this.baseMaterials.forEach((visible, material) => { material.visible = visible; }); this.baseMaterials.clear();
+    this.loaded.forEach(disposeEntry); this.loaded.clear(); this.active.clear();
+  }
 }

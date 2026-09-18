@@ -1,14 +1,22 @@
 import {test, expect} from '@playwright/test';
 
-test('Meshy originals render and chosen defaults persist through a lost response and reconnect', async ({page,request}) => {
+test('Meshy motion component renders originals and restores defaults through response loss and reconnect', async ({page,request}) => {
   test.skip(process.env.WORKSPACE_TEST_MESHY !== '1', 'Requires isolated Meshy fixture.');
   const jobId = 'c'.repeat(24);
-  const listing = await request.get('/api/avatar-factory/jobs').then(r => r.json());
-  const job = listing.jobs.find((j: {id:string}) => j.id === jobId);
   const errors: string[] = [], paid: string[] = [];
   page.on('pageerror',e => errors.push(e.message));
   page.on('request',r => {if(r.method()==='POST' && r.url().includes('/meshy/')) paid.push(r.url());});
-  await page.goto(`/avatar.html?stage=glb&character=${job.character_id}&job=${jobId}&tab=result`);
+  // The product now opens the assembled character at every old screen URL.
+  // Mount the retained motion-settings component separately for its API contract.
+  await page.route('**/meshy-motion-test', route => route.fulfill({ contentType: 'text/html', body: `
+    <html><body><div id="root"></div><script type="module">
+      import RefreshRuntime from '/@react-refresh';
+      RefreshRuntime.injectIntoGlobalHook(window);
+      window.$RefreshReg$ = () => {}; window.$RefreshSig$ = () => type => type;
+      window.__vite_plugin_react_preamble_installed__ = true;
+      await import('/tests/fixtures/meshy-motion.tsx');
+    </script></body></html>` }));
+  await page.goto('/meshy-motion-test');
   await expect(page.locator('[data-meshy-ready]')).toHaveAttribute('data-meshy-ready', /^[a-f0-9]{24}$/);
   await expect(page.locator('.meshy-scene')).toHaveAttribute('data-renderer', /webgpu|webgl-fallback/);
   await expect(page.locator('.factory-result')).toHaveCount(0);

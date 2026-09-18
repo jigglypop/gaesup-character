@@ -1,10 +1,14 @@
 # gaesup-character
 
+현재 사용자 화면은 **[사진 → 파츠 → 조립 캐릭터](docs/photo-character-flow.md)** 하나입니다. `./start-local.ps1`로 실행하고 **http://127.0.0.1:5273/** 에서 사진을 올린 뒤 **캐릭터 만들기**를 누릅니다. 파츠 생성·몸 리깅·자동 조립을 거쳐 같은 화면에서 전체 캐릭터의 동작과 파츠 조합을 확인합니다. 기본 API 포트는 8013입니다. 아래 이전 개별 작업 도구 설명과 달리 단계별 페이지 이동은 사용하지 않습니다.
+
 Meshy 캐릭터의 소스 등록, 기본 리깅, Blender 재질 경계 분리, 3D 미리보기와 버전별 검수를 관리합니다.
 
 코드는 `backend/`(FastAPI·CLI·테스트·migration)와 `frontend/`(TypeScript·Vite·Three.js)로 나뉩니다. 운영 지침은 [AGENTS.md](AGENTS.md), 상태·복구·지원 범위는 [제어 계약](docs/character-control-plane.md)에 있습니다.
 
 Ally 기준 의상 교체와 기존 리깅 재사용은 [의상 파이프라인](docs/wardrobe-pipeline.md)을 참고하세요.
+
+신규 파츠 생산의 선행 계약은 [AI 캐릭터 파츠 이미지 공장 명세 v1](docs/ai-character-parts-image-factory-spec.md)입니다. 기준 몸·좌표·슬롯·투명 PNG·크롭·QC·Meshy 전달 조건과 [첨부 레퍼런스의 blueprint 예시](docs/examples/modular-image-factory/blueprint.example.json)를 정의합니다. 구현 완료 상태는 명세의 현재 코드 비교와 구별합니다.
 
 기존 `/api/world/*`의 생성·GLB 후처리·애니메이션 병합·저장·프록시 API도 유지합니다.
 
@@ -67,6 +71,7 @@ Swagger UI는 `/docs`, OpenAPI 문서는 `/openapi.json`에서 확인할 수 있
 
 ## 선택 구성
 
+- 캐릭터 공장 저장소: `ASSET_S3_BUCKET`, `ASSET_S3_REGION=ap-northeast-2`, `ASSET_S3_PREFIX=assets`, 선택 `ASSET_AWS_PROFILE`. 원본·파츠·생성 응답·작업 기록·GLB는 비공개 S3에 저장한다. 다운로드는 기존 인증 API가 소유권을 확인한 뒤 15분 서명 URL로 전달한다. 생성 입력은 1시간 서명 URL이며 이미지 바이너리를 생성 POST에 다시 싣지 않는다. 기존 `data/` 자료는 읽기 호환용으로 보존하고, Blender 실행 중 필요한 새 작업 파일은 S3 업로드가 모두 성공한 뒤 제거한다.
 - `WORLD_3D_PROVIDER=meshy`와 `MESHY_API_KEY`: Meshy 3D 생성. 설정하지 않으면 구조화된 월드 계획만 반환합니다.
 - `DATABASE_URL` 또는 PostgreSQL용 `DB_HOST` 계열 변수: job, asset, placement 영속화. 없으면 프로세스 메모리를 사용합니다.
 - AWS S3 변수: 생성 모델과 참조 이미지의 안정적인 저장 URL을 제공합니다.

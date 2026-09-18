@@ -159,8 +159,15 @@ def weight_surface(meshes, rig):
     return BVHTree.FromPolygons(points, triangles, all_triangles=True), points, triangles, weights
 
 
-def bind(meshes, body, rig, contract):
-    transform, report = fit_matrix(contract['anchors'], contract['max_anchor_error_m'])
+def bind(meshes, body, rig, contract, *, transform=None):
+    if transform is None:
+        transform, report = fit_matrix(contract['anchors'], contract['max_anchor_error_m'])
+        fitting = 'uniform_anchor_alignment'
+    else:
+        # Factory fitting already resolved width, depth, height and position.
+        # Solving uniform anchors again would discard the depth correction.
+        report = {'transform_blender': [list(row) for row in transform]}
+        fitting = 'shared_frame_axis_alignment'
     tree, points, triangles, weights = weight_surface(body, rig)
     distances, inside = [], 0
     for obj in meshes:
@@ -169,7 +176,7 @@ def bind(meshes, body, rig, contract):
             raise ValueError('Part is already rigged; supply the unrigged generated shape')
         world = transform @ obj.matrix_world
         obj.parent = None; obj.matrix_world = Matrix.Identity(4)
-        obj.data.transform(world)
+        obj.data.transform(world, shape_keys=True)
         obj.vertex_groups.clear()
         groups = {b.name: obj.vertex_groups.new(name=b.name) for b in rig.data.bones}
         for vertex in obj.data.vertices:
@@ -181,7 +188,8 @@ def bind(meshes, body, rig, contract):
             if contract['binding'] == 'rigid':
                 row = {contract['bone']: 1.}
             else:
-                if distance > contract['max_transfer_distance_m']:
+                maximum_distance = contract.get('max_transfer_distance_m')
+                if maximum_distance is not None and distance > maximum_distance:
                     raise ValueError('Part is too far from the body for a reliable weight transfer')
                 ids = triangles[index]
                 bary = barycentric_transform(hit, *(points[i] for i in ids), Vector((1, 0, 0)), Vector((0, 1, 0)), Vector((0, 0, 1)))
@@ -201,7 +209,7 @@ def bind(meshes, body, rig, contract):
         obj['standard_slot'] = contract['slot']
     report.update(binding=contract['binding'], max_surface_distance_m=max(distances),
                   possible_inside_vertices=inside, visual_review='required',
-                  fitting='uniform_anchor_alignment', weights='body_surface_barycentric' if contract['binding'] == 'transfer' else 'single_canonical_bone')
+                  fitting=fitting, weights='body_surface_barycentric' if contract['binding'] == 'transfer' else 'single_canonical_bone')
     return report
 
 

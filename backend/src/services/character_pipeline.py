@@ -6,7 +6,7 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from src.services.object_storage import StoredPath as Path
 import re
 import uuid
 
@@ -26,6 +26,7 @@ class PipelineError(Exception):
 
 
 def read_json(path: Path, default=None):
+    path = Path(path)
     try:
         contents = _retry_file_io(lambda: path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -39,7 +40,7 @@ def now() -> str:
 
 class CharacterPipeline:
     def __init__(self, root: Path, port: int = 9878, owner: int = 1):
-        self.root = root.resolve()
+        self.root = Path(root).resolve()
         self.manifest = self.root / "characters/batch.json"
         self.port, self.owner = port, owner
         self.instance = uuid.uuid4().hex

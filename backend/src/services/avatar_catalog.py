@@ -7,7 +7,7 @@ Provider files and character journals are never modified here.
 from copy import deepcopy
 import hashlib
 import json
-from pathlib import Path
+from src.services.object_storage import StoredPath as Path
 import re
 from threading import RLock
 import uuid

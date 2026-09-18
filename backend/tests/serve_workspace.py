@@ -43,6 +43,9 @@ if __name__ == "__main__":
         pipeline = CharacterPipeline(Path(directory), port=62129)
         value = pipeline.create("Browser Fixture", 1.7, 1)
         pipeline.upload(value["id"], 1, rigged_glb(), "model", value["revision"])
+        if os.getenv('WORKSPACE_TEST_NATIVE') == '1':
+            from native_assembly_fixture import seed_native_assembly
+            seed_native_assembly(Path(directory), value['id'], os.getenv('WORKSPACE_TEST_NATIVE_SOURCE'))
         if os.getenv('WORKSPACE_TEST_MESHY') == '1':
             import time
             from services.test_character_preparation import animated_fixture

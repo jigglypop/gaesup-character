@@ -105,6 +105,9 @@ class AvatarMeshy:
                     contract.update(motion_actions=accepted_actions,
                                     max_animation_tasks=max_animation_tasks)
                     _write_json(run/'input.json', contract)
+            worker = read_json(run/'worker.json')
+            if worker.get('status') not in ('accepted', 'running') or process_state(worker.get('process')) == 'exited':
+                _write_json(run/'worker.json', {'status': 'accepted', 'process': identity(), 'error': None})
         return self.get(owner, job_id)
 
     def _verify_source(self, run):
@@ -118,7 +121,7 @@ class AvatarMeshy:
         task = read_json(run/'character.json')
         receipt = read_json(run/'delivery.json')
         worker = read_json(run/'worker.json')
-        busy = worker.get('status') == 'running' and process_state(worker.get('process')) != 'exited'
+        busy = worker.get('status') in ('accepted', 'running') and process_state(worker.get('process')) != 'exited'
         tasks = []
         for path in sorted((run/'actions').glob('*/motion-pack.json')):
             pack = read_json(path)
@@ -272,6 +275,9 @@ class AvatarMeshy:
                         self._publish(run)
                         if not pending:
                             _write_json(run/'worker.json', {'status': 'complete', 'error': None})
+                            if self.factory.get(owner, job_id).get('auto_assemble'):
+                                from src.services.avatar_character_flow import assemble_character
+                                assemble_character(self.factory, owner, job_id)
                             return
                     if time.monotonic() >= deadline:
                         _write_json(run/'worker.json', {'status': 'paused', 'error': 'Meshy 작업을 조회해 이어갈 수 있습니다.'})

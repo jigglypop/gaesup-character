@@ -6,7 +6,7 @@ import io
 import json
 import math
 import os
-from pathlib import Path
+from src.services.object_storage import StoredPath as Path
 import re
 from threading import RLock
 import uuid
