@@ -13,7 +13,7 @@ from src.services.avatar_standard_blender import (
 )
 from src.services.glb import parse_glb
 from src.services.avatar_fit_geometry import measured_fit, normalize_body, body_targets, fit_shoes, clearance, place, slim_base_body, bind_body_head, fit_equipment
-from src.services.avatar_equipment import EQUIPMENT
+from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT
 from src.services.avatar_body_layers import (
     mark_body_coverage, hide_covered_materials, restore_covered_materials, strip_covered_primitives,
 )
@@ -120,6 +120,7 @@ def run(payload):
     base_shape = {'preserved': True} if frozen else slim_base_body(body, rig, spec)
     base_shape['head_binding'] = head_binding
     base_shape['appearance'] = {'preserved': True} if frozen else whiten_base_body(body, spec)
+    body_budget = ({'preserved': True} if frozen and not payload.get('canonical_pose') else optimize_part(body, 'body'))
     rest_pose = ({'preserved': True} if frozen and not payload.get('canonical_pose')
                  else t_rest_pose(rig, [*body, *fitted]))
     if frozen and payload.get('canonical_pose'):
@@ -198,7 +199,7 @@ def run(payload):
     render(output/'motion.png', camera, view_center, (0, -1, 0), 800)
     bpy.ops.wm.save_as_mainfile(filepath=str(output/'master.blend'))
     doc, _ = parse_glb((output/'model.glb').read_bytes(), strict=True)
-    parts = [{'slot': 'body', 'objects': body_names}, *reports]
+    parts = [{'slot': 'body', 'objects': body_names, 'runtime_budget': body_budget}, *reports]
     for part in parts:
         part['nodes'] = [i for i, n in enumerate(doc['nodes']) if n.get('name') in part['objects'] and 'mesh' in n]
         if not part['nodes'] or any('skin' not in doc['nodes'][i] for i in part['nodes']):

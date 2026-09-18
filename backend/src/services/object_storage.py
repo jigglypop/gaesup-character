@@ -306,6 +306,13 @@ def copy_file(source, target):
     return target
 
 
+def publish_checkpoint(path):
+    """Expose running process receipts while Blender's artifacts remain scratch."""
+    path = StoredPath(path)
+    if _location(path) and _is_working(path):
+        _put(path, LocalPath(path).read_bytes())
+
+
 def sha256(path):
     path = StoredPath(path)
     head = _head(path) if not _is_working(path) else None

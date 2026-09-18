@@ -11,12 +11,12 @@ from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_image_pipeline import AvatarImagePipeline, capabilities
 from src.services.avatar_native_parts import AvatarNativeParts
 from src.services.avatar_production_spec import production_spec
-from src.services.avatar_equipment import EQUIPMENT, equipment_spec
+from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec
 from src.services.glb import parse_glb
 from src.services.character_parts import blender_executable
 from src.services.character_pipeline import PipelineError, now, read_json
-from src.services.object_storage import StoredPath as Path, copy_file, copy_tree, local_workspace
-from src.services.process_identity import identity
+from src.services.object_storage import StoredPath as Path, copy_file, copy_tree, local_workspace, publish_checkpoint
+from src.services.process_identity import identity, state as process_state
 
 VARIANT_SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes', *EQUIPMENT)
 
@@ -143,6 +143,9 @@ def prepare_body(service, owner, job_id, state):
     body = directory/'meshy/versions'/body_hash[:24]/'model.glb'
     output = directory/'body-reference'
     output.mkdir(exist_ok=True)
+    runner = read_json(output/'runner.json')
+    if runner and process_state(runner.get('process')) != 'exited':
+        raise PipelineError('body_render_running', '기존 기본 몸 렌더가 실행 중입니다.', 409)
     _write_json(output/'input.json', {'source': str(body), 'sha256': body_hash,
                                      'output': str(output), 'spec': state['production_spec']})
     with local_workspace(output, inputs=[body]):
@@ -152,6 +155,7 @@ def prepare_body(service, owner, job_id, state):
                 stdout=log, stderr=subprocess.STDOUT, env={**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'},
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             _write_json(output/'runner.json', {'process': identity(process.pid)})
+            publish_checkpoint(output/'runner.json')
             try:
                 code = process.wait(timeout=240)
             except subprocess.TimeoutExpired:

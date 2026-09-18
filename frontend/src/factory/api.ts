@@ -29,6 +29,7 @@ export type FactoryCapabilities = { character_pipeline?: string; ready: boolean;
 export type ProductionInput = { character_id: string; source_sha256: string; selections: FaceSelection[] };
 export type MeshyAction = { action_id: number; name: string; key: string; category: string; sub_category: string; preview_url?: string };
 export type MeshyState = { provider: 'meshy'; status: string; rig_task_id?: string; progress: number; busy: boolean; error?: string;
+  origin?: string; can_request_action?: boolean;
   version?: string; model_sha256?: string; bone_count?: number; can_resume: boolean; artifacts: {name: string; url: string}[];
   clips: {slot: string; source: string; action_id: number | null}[]; selected: Record<string, number>;
   actions: {action_id: number; task_id?: string; status?: string; progress?: number}[] };
@@ -61,7 +62,7 @@ export const factoryApi = {
   motionLibrary: () => request<{items: MeshyAction[]}>('/api/avatar-factory/motion-library'),
   motionDefaults: (jobId?: string) => request<{selections: Record<string, number>}>(jobId ? `/api/avatar-factory/jobs/${jobId}/motion-defaults` : '/api/avatar-factory/motion-defaults'),
   saveMotionDefaults: (selections: Record<string, number>, jobId?: string) => request<{selections: Record<string, number>}>(jobId ? `/api/avatar-factory/jobs/${jobId}/motion-defaults` : '/api/avatar-factory/motion-defaults', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({selections})}),
-  meshy: (id: string) => request<MeshyState>(`/api/avatar-factory/jobs/${id}/meshy`),
+  meshy: (id: string, signal?: AbortSignal) => request<MeshyState>(`/api/avatar-factory/jobs/${id}/meshy`, {signal}),
   meshyRig: (id: string) => request<MeshyState>(`/api/avatar-factory/jobs/${id}/meshy/rig`, {method:'POST'}),
   meshyRecover: (id: string, task_id: string, action_id?: number) => request<MeshyState>(`/api/avatar-factory/jobs/${id}/meshy/recover`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id,action_id})}),
   meshyAction: (id: string, slot: string, action_id: number) => request<MeshyState>(`/api/avatar-factory/jobs/${id}/meshy/actions`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slot,action_id})}),

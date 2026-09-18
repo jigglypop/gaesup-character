@@ -47,6 +47,8 @@ export class TextureExpressions {
         const group = g.groups.find(group => i >= group.start && i < group.start+group.count);
         const material = materials[group?.materialIndex ?? 0];
         if (!(material instanceof THREE.MeshStandardMaterial) || !material.map) continue;
+        const mappedUv = g.getAttribute(material.map.channel ? `uv${material.map.channel}` : 'uv');
+        if (!mappedUv) continue;
         const index = gltf.parser.associations.get(material)?.materials;
         if (index === undefined) continue;
         let surface = this.surfaces.get(material);
@@ -60,7 +62,10 @@ export class TextureExpressions {
         }
         this.faces.push({ surface,
           xy: points.flatMap(p => [(p.x-this.box.min.x)/size.x*512, (this.box.max.y-p.y)/size.y*512]),
-          uv: ids.flatMap(j => [uv.getX(j)*surface!.canvas.width, uv.getY(j)*surface!.canvas.height]),
+          uv: ids.flatMap(j => {
+            const point = material.map!.transformUv(new THREE.Vector2(mappedUv.getX(j), mappedUv.getY(j)));
+            return [point.x*surface!.canvas.width, point.y*surface!.canvas.height];
+          }),
         });
       }
     }
@@ -98,10 +103,8 @@ export class TextureExpressions {
     }
     if (this.disposed || sequence !== this.sequence) return [];
     return [...this.surfaces.values()].map(s => {
-      const texture = new THREE.CanvasTexture(s.canvas);
-      texture.flipY = false; texture.colorSpace = THREE.SRGBColorSpace;
-      texture.wrapS = s.original.wrapS; texture.wrapT = s.original.wrapT;
-      texture.channel = s.original.channel; texture.generateMipmaps = true;
+      const texture = s.original.clone(); texture.image = s.canvas; texture.needsUpdate = true;
+      texture.generateMipmaps = true;
       s.material.map = texture; s.material.needsUpdate = true; this.replacements.push(texture);
       return { material: s.index, png: s.canvas.toDataURL('image/png').split(',')[1] };
     });

@@ -32,7 +32,7 @@ export function Expressions({ job, version, bodySha, viewer, ready }: {
       setName(record.name);setLayout(record.layout);setMaps([]);
     } catch(e) {setError((e as Error).message);} finally {setBusy(false);}
   }
-  const adjust=(field:keyof FaceLayout,value:number)=>setLayout(current=>({...current,[field]:value}));
+  const adjust=(field:keyof FaceLayout,value:number)=>{setLayout(current=>({...current,[field]:value}));setMaps([]);};
   return <fieldset className="expression-controls" disabled={!ready||busy}><legend>표정</legend>
     <div className="meshy-buttons">{Object.entries(expressionNames).map(([key,label])=><button key={key} aria-pressed={name===key} onClick={()=>void apply(key as ExpressionName)}>{label}</button>)}</div>
     <details><summary>얼굴 위치</summary><div className="expression-layout">

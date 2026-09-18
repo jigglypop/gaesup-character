@@ -9,7 +9,7 @@ from src.services.avatar_factory import _LOCK, _QUEUE, digest
 from src.services.character_parts import blender_executable
 from src.services.character_pipeline import PipelineError, read_json, now
 from src.services.glb import parse_glb
-from src.services.object_storage import StoredPath as Path, local_workspace
+from src.services.object_storage import StoredPath as Path, local_workspace, publish_checkpoint
 from src.services.process_identity import identity, state as process_state
 
 
@@ -95,6 +95,7 @@ class AnimalRig:
                             stdout=log, stderr=subprocess.STDOUT, env={**os.environ,'ASSET_STORAGE_WORKER_LOCAL':'1'},
                             creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
                         _write_json(output/'runner.json', {'process':identity(process.pid)})
+                        publish_checkpoint(output/'runner.json')
                         try: code=process.wait(timeout=600)
                         except subprocess.TimeoutExpired:
                             process.terminate(); process.wait(timeout=10); raise

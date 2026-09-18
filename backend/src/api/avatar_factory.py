@@ -66,7 +66,7 @@ class VariantInput(BaseModel):
     base_version: str = Field(pattern=r'^[a-f0-9]{24}$')
     slots: list[Literal['hair', 'hat', 'top', 'bottom', 'shoes', 'weapon', 'tool', 'glasses']] = Field(min_length=1, max_length=8)
     hair_length: Literal['source', 'short', 'long'] = 'source'
-    descriptions: dict[str, str] = Field(default_factory=dict, max_length=5)
+    descriptions: dict[str, str] = Field(default_factory=dict, max_length=8)
 
 
 @router.post('/variants', status_code=202)

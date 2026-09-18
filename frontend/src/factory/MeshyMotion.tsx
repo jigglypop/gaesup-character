@@ -1,16 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ModelViewer } from '../viewer';
 import { factoryApi, type MeshyAction, type MeshyState } from './api';
 import './meshy-motion.css';
-import { standardApi } from './standard-api';
+import { usePolling } from '../use-polling';
 
 const slots: Record<string, string> = { idle: '대기', walk: '걷기', run: '달리기', jump: '점프', fall: '낙하', sit: '앉기', armsUp: '팔 들기', crouch: '웅크리기' };
 
 export function MeshyMotion({ jobId }: { jobId: string }) {
-  const [state, setState] = useState<MeshyState>(), [library, setLibrary] = useState<MeshyAction[]>([]);
+  const read = useCallback((signal:AbortSignal) => factoryApi.meshy(jobId,signal),[jobId]);
+  const polling = usePolling<MeshyState>(read,2500), state = polling.value, setState = polling.setValue;
+  const [library, setLibrary] = useState<MeshyAction[]>([]);
   const [defaults, setDefaults] = useState<Record<string, number>>({}), [slot, setSlot] = useState('walk');
   const [actionId, setActionId] = useState<number>(), [search, setSearch] = useState(''), [category, setCategory] = useState('');
-  const [error, setError] = useState(''), [catalogError, setCatalogError] = useState(''), [notice, setNotice] = useState('');
+  const error = polling.error;
+  const [catalogError, setCatalogError] = useState(''), [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false), busyRef = useRef(false);
   const [clips, setClips] = useState<{name: string; index: number}[]>([]), [motion, setMotion] = useState(-1);
   const [ready, setReady] = useState(false), [previewError, setPreviewError] = useState('');
@@ -20,12 +23,6 @@ export function MeshyMotion({ jobId }: { jobId: string }) {
   const url = state?.artifacts.find(a => a.name === 'model.glb')?.url;
   const filtered = library.filter(a => (!category || a.category === category) && (!search || `${a.name} ${a.key} ${a.action_id}`.toLowerCase().includes(search.toLowerCase())));
 
-  useEffect(() => {
-    let alive = true;
-    const refresh = () => void factoryApi.meshy(jobId).then(value => { if (alive) { setState(value); setError(''); } }).catch(e => { if (alive) setError(e.message); });
-    refresh(); const timer = setInterval(refresh, 2500); window.addEventListener('online', refresh);
-    return () => { alive = false; clearInterval(timer); window.removeEventListener('online', refresh); };
-  }, [jobId]);
   async function loadLibrary() {
     try {
       const [catalog, saved] = await Promise.all([factoryApi.motionLibrary(), factoryApi.motionDefaults(jobId)]);
@@ -61,13 +58,8 @@ export function MeshyMotion({ jobId }: { jobId: string }) {
     <div className="meshy-scene" ref={mount} />
     {previewError && <p role="alert">{previewError}</p>}
     {ready && <div className="meshy-clips"><button aria-pressed={motion === -1} onClick={() => { viewer.current?.play(-1); setMotion(-1); }}>기본 자세</button>{clips.map(c => <button key={c.index} aria-pressed={motion === c.index} onClick={() => { viewer.current?.play(c.index); setMotion(c.index); }}>{c.name}</button>)}</div>}
-    {state?.clips.map(c => <p className="meshy-provenance" key={c.slot}>{slots[c.slot] || c.slot}: {c.source === 'rigging_basic' ? 'Meshy 리깅에 포함된 기본 동작' : `Meshy 선택 동작 #${c.action_id}`}</p>)}
+    {state?.clips.map(c => <p className="meshy-provenance" key={c.slot}>{slots[c.slot] || c.slot}: {c.source === 'frozen_body' ? '저장된 기본 몸의 동작' : c.source === 'rigging_basic' ? 'Meshy 리깅에 포함된 기본 동작' : `Meshy 선택 동작 #${c.action_id}`}</p>)}
     {state?.artifacts.map(a => <a className="meshy-download" key={a.name} href={a.url} download>{a.name === 'model.glb' ? 'Meshy 골격·동작 통합 GLB' : `Meshy 원본 ${a.name}`}</a>)}
-    {state?.version && state.model_sha256 && <button disabled={running} onClick={() => void perform(async () => {
-      const base = await standardApi.create('bases', { factory_job_id: jobId, factory_version: state.version,
-        source_sha256: state.model_sha256, name: 'Meshy 전신 의상 규격 후보', height_m: 1.2 });
-      location.href = `/avatar.html?stage=standard&item=${base.id}`;
-    }, '의상 생산 기준 버전을 준비합니다.')}>이 몸·골격으로 의상 일괄 생산 준비</button>}
     {(state?.status === 'submission_uncertain' || state?.actions.some(a => a.status === 'submission_uncertain')) && <form onSubmit={e => {e.preventDefault(); void perform(() => factoryApi.meshyRecover(jobId, recoveryId, state.actions.find(a => a.status === 'submission_uncertain')?.action_id), '작업 ID를 복구했습니다. 기존 작업 이어가기를 누르세요.');}}><label>Meshy에서 확인한 기존 작업 ID<input aria-label="Meshy 기존 작업 ID" value={recoveryId} onChange={e => setRecoveryId(e.target.value)} required pattern="[a-zA-Z0-9_-]+" /></label><button disabled={running}>기존 작업 ID 복구</button></form>}
     <fieldset disabled={busy} className="meshy-picker"><legend>Meshy 동작을 하나씩 기본값으로 지정</legend>
       <p>공식 목록 {library.length}개 · 기본값 저장은 생성 요청을 보내지 않습니다. 선택한 동작만 이 캐릭터로 가져올 수 있습니다.</p>
@@ -80,7 +72,7 @@ export function MeshyMotion({ jobId }: { jobId: string }) {
         <div className="meshy-action-preview">{chosen ? <><strong>{chosen.name} · #{chosen.action_id}</strong>{chosen.preview_url && <img src={chosen.preview_url} alt={`${chosen.name} Meshy 동작 미리보기`} />}<small>{chosen.category} / {chosen.sub_category}</small></> : <p>목록에서 고르면 Meshy 미리보기가 표시됩니다.</p>}</div>
       </div>
       <div className="meshy-buttons"><button disabled={!chosen} onClick={() => void perform(async () => { const saved = await factoryApi.saveMotionDefaults({...defaults, [slot]: actionId!}, jobId); setDefaults(saved.selections); }, `${slots[slot]} 기본 동작을 저장했습니다.`)}>이 동작을 {slots[slot]} 기본값으로 저장</button>
-        <button disabled={!chosen || !url || running} onClick={() => void perform(() => factoryApi.meshyAction(jobId, slot, actionId!), '선택한 Meshy 동작을 가져오고 있습니다.')}>{pending ? '이 동작 조회·적용' : '이 캐릭터에 동작 가져오기 · 유료 최대 1회'}</button></div>
+        <button disabled={!chosen || !state?.can_request_action || running} onClick={() => void perform(() => factoryApi.meshyAction(jobId, slot, actionId!), '선택한 Meshy 동작을 가져오고 있습니다.')}>{pending ? '이 동작 조회·적용' : '이 캐릭터에 동작 가져오기 · 유료 최대 1회'}</button></div>
       {pending && <p>선택 동작 상태: {pending.status || '대기'}{pending.task_id ? ` · ${pending.task_id}` : ''}</p>}
       <p>저장한 기본값: {Object.entries(defaults).map(([key, id]) => `${slots[key]}: ${library.find(a => a.action_id === id)?.name || '#'+id}`).join(' / ') || '아직 지정하지 않음'}</p>
       {notice && <p role="status">{notice}</p>}

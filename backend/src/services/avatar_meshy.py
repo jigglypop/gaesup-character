@@ -74,6 +74,8 @@ class AvatarMeshy:
             job = run.parent
             contract = read_json(run/'input.json')
             pipeline = read_json(job/'pipeline.json')
+            if pipeline.get('base_body'):
+                raise PipelineError('frozen_body', '저장된 기본 몸의 리깅은 다시 제출하지 않습니다.', 422)
             if 'motion_actions' in contract:
                 accepted_actions = contract['motion_actions']
                 max_animation_tasks = contract.get('max_animation_tasks', 0)
@@ -136,14 +138,22 @@ class AvatarMeshy:
         artifacts.extend({'name': name+'.glb', 'url': f'/api/avatar-factory/jobs/{job_id}/meshy/provider/{name}.glb'}
                          for name in read_json(run/'rigging-artifacts.json') if name in ('rigged', 'walking', 'running'))
         blocked = ('submission_uncertain', 'submission_rejected', 'FAILED', 'CANCELED')
+        frozen = receipt.get('origin') == 'frozen_body'
+        clips = receipt.get('clips', [])
+        if frozen and not clips and version:
+            document, _ = parse_glb((run/'versions'/version/'model.glb').read_bytes(), strict=True)
+            clips = [{'slot': a.get('name', f'clip_{i}'), 'source': 'frozen_body', 'action_id': None}
+                     for i, a in enumerate(document.get('animations', []))]
         return {'provider': 'meshy', 'status': 'ready' if version else task.get('status', 'not_started'),
                 'rig_task_id': task.get('task_id') if task.get('stage') == 'rigging' else None,
                 'progress': task.get('progress', 0) if task.get('status') == 'IN_PROGRESS' else 0,
                 'busy': busy, 'error': worker.get('error'), 'artifacts': artifacts,
-                'version': version, 'clips': receipt.get('clips', []), 'bone_count': receipt.get('bone_count'),
+                'version': version, 'clips': clips, 'bone_count': receipt.get('bone_count'),
+                'can_request_action': not frozen and task.get('stage') == 'rigging' and task.get('status') == 'SUCCEEDED' and not busy,
+                'origin': receipt.get('origin', 'meshy'),
                 'model_sha256': receipt.get('files', {}).get('model.glb'),
                 'source_sha256': receipt.get('source_sha256'), 'actions': tasks,
-                'can_resume': not busy and task.get('status') not in blocked and not any(t['status'] in blocked for t in tasks),
+                'can_resume': not frozen and not busy and task.get('status') not in blocked and not any(t['status'] in blocked for t in tasks),
                 'selected': read_json(run/'selected.json')}
 
     def _publish(self, run):

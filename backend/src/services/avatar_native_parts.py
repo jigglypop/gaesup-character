@@ -12,9 +12,9 @@ from src.services.avatar_meshy import AvatarMeshy
 from src.services.character_parts import blender_executable
 from src.services.character_pipeline import PipelineError, read_json
 from src.services.process_identity import identity, state as process_state
-from src.services.object_storage import local_workspace
+from src.services.object_storage import local_workspace, publish_checkpoint
 from src.services.avatar_production_spec import production_spec
-from src.services.avatar_equipment import EQUIPMENT
+from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT
 
 SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes')
 LEGACY_SLOTS = ('hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes')
@@ -129,6 +129,7 @@ class AvatarNativeParts:
                 return
             record.update(status='running', process=identity())
             _write_json(directory/'record.json', record)
+            publish_checkpoint(directory/'record.json')
             try:
                 command = [blender_executable(), '--background', '--factory-startup', '--disable-autoexec',
                            '--python-exit-code', '1', '--python', str(Path(__file__).with_name('avatar_native_parts_blender.py')),
@@ -138,6 +139,7 @@ class AvatarNativeParts:
                         env={**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'},
                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
                     _write_json(directory/'runner.json', {'process': identity(process.pid)})
+                    publish_checkpoint(directory/'runner.json')
                     try:
                         code = process.wait(timeout=1800)
                     except subprocess.TimeoutExpired:

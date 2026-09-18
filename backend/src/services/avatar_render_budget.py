@@ -2,7 +2,7 @@
 import bpy
 import bmesh
 
-PART_TRIANGLES = {'hair': 3500, 'hat': 1600, 'top': 2000, 'bottom': 1600, 'shoes': 1600,
+PART_TRIANGLES = {'body': 8000, 'hair': 3500, 'hat': 1600, 'top': 2000, 'bottom': 1600, 'shoes': 1600,
                   'weapon': 1200, 'tool': 1000, 'glasses': 500}
 TEXTURE_EDGE = 1024
 
@@ -13,6 +13,7 @@ def optimize_part(meshes, slot):
     before = sum(triangles(obj) for obj in meshes)
     target = PART_TRIANGLES.get(slot, 2000)
     texture_count = 0
+    resized = {}
     # Each object receives its share of the slot budget. Simplify BEFORE skin
     # transfer, so new vertices receive weights on the exact final geometry.
     for obj in meshes:
@@ -43,12 +44,15 @@ def optimize_part(meshes, slot):
                 image = node.image
                 width, height = image.size
                 if max(width, height) > TEXTURE_EDGE:
-                    derivative = image.copy()
-                    scale = TEXTURE_EDGE/max(width, height)
-                    derivative.scale(max(1, round(width*scale)), max(1, round(height*scale)))
-                    derivative.pack()
+                    derivative = resized.get(image.as_pointer())
+                    if derivative is None:
+                        derivative = image.copy()
+                        scale = TEXTURE_EDGE/max(width, height)
+                        derivative.scale(max(1, round(width*scale)), max(1, round(height*scale)))
+                        derivative.pack()
+                        resized[image.as_pointer()] = derivative
+                        texture_count += 1
                     node.image = derivative
-                    texture_count += 1
     after = sum(triangles(obj) for obj in meshes)
     return {'source_triangles': before, 'runtime_triangles': after, 'target_triangles': target,
             'texture_max_edge': TEXTURE_EDGE, 'resized_textures': texture_count,

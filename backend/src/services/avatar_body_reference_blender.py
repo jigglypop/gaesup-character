@@ -60,6 +60,8 @@ def run(payload):
     spec.pop('sha256', None)
     spec['sha256'] = hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     (output/'spec.json').write_text(json.dumps(spec), encoding='utf8')
+    (output/'complete.json').write_text(json.dumps({'input_sha256': sha(output/'input.json'),
+        'files': {name: sha(output/name) for name in ('spec.json', 'body-front.png', 'body-side.png')}}), encoding='utf8')
 
 
 if __name__ == '__main__':
