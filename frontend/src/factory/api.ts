@@ -53,14 +53,14 @@ const definitiveRejection = (error: unknown) => typeof error === 'object' && err
 
 export const factoryApi = {
   nativeParts: (id: string, signal?: AbortSignal) => request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts`, { signal }),
-  assemble: (id: string) => request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts`, { method: 'POST' }),
+  assemble: (id: string, canonicalPose = false) => request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts?canonical_pose=${canonicalPose}`, { method: 'POST' }),
   nativeOutfit: (id: string, version: string) => request<NativeOutfit>(`/api/avatar-factory/jobs/${id}/native-outfits/${version}`),
   saveNativeOutfit: (id: string, version: string, input: Pick<NativeOutfit, 'body_sha256' | 'slots'>, revision: string, key: string) =>
     request<NativeOutfit>(`/api/avatar-factory/jobs/${id}/native-outfits/${version}`, { method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'If-Match': revision, 'Idempotency-Key': key }, body: JSON.stringify(input) }),
   motionLibrary: () => request<{items: MeshyAction[]}>('/api/avatar-factory/motion-library'),
-  motionDefaults: () => request<{selections: Record<string, number>}>('/api/avatar-factory/motion-defaults'),
-  saveMotionDefaults: (selections: Record<string, number>) => request<{selections: Record<string, number>}>('/api/avatar-factory/motion-defaults', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({selections})}),
+  motionDefaults: (jobId?: string) => request<{selections: Record<string, number>}>(jobId ? `/api/avatar-factory/jobs/${jobId}/motion-defaults` : '/api/avatar-factory/motion-defaults'),
+  saveMotionDefaults: (selections: Record<string, number>, jobId?: string) => request<{selections: Record<string, number>}>(jobId ? `/api/avatar-factory/jobs/${jobId}/motion-defaults` : '/api/avatar-factory/motion-defaults', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({selections})}),
   meshy: (id: string) => request<MeshyState>(`/api/avatar-factory/jobs/${id}/meshy`),
   meshyRig: (id: string) => request<MeshyState>(`/api/avatar-factory/jobs/${id}/meshy/rig`, {method:'POST'}),
   meshyRecover: (id: string, task_id: string, action_id?: number) => request<MeshyState>(`/api/avatar-factory/jobs/${id}/meshy/recover`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id,action_id})}),

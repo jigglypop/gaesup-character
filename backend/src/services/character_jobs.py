@@ -52,7 +52,7 @@ def generate(directory: Path, image: Path, height: float, client: httpx.Client, 
     mime = "image/png" if image.suffix.lower() == ".png" else "image/jpeg"
     payload = {"image_url": f"data:{mime};base64," + base64.b64encode(image.read_bytes()).decode(),
                "ai_model": "meshy-7", "model_type": "standard", "should_texture": True, "enable_pbr": True,
-               "should_remesh": True, "target_polycount": 30000, "pose_mode": "a-pose",
+               "should_remesh": True, "target_polycount": 8000, "pose_mode": "t-pose",
                "image_enhancement": False, "target_formats": ["glb"]}
     if profile == "smart-topology":
         payload.update(model_type="smart-topology", ai_model="meshy-t2", target_polycount=15000)
@@ -60,7 +60,7 @@ def generate(directory: Path, image: Path, height: float, client: httpx.Client, 
         payload.pop("image_enhancement")  # Documented only for Meshy 6/7; do not send unsupported controls.
     if isolated_part:
         payload.pop('pose_mode', None)  # A hat or shoe is not a humanoid to pose/auto-rig.
-        payload['target_polycount'] = 10000  # Seven pieces plus the shared body stay within the assembly triangle budget.
+        payload['target_polycount'] = 2000
     if body_type == "quadruped":
         payload.pop("pose_mode", None)
     value["generation_settings"] = {k: v for k, v in payload.items() if k != "image_url"}
@@ -94,9 +94,10 @@ def generate_multiview_part(directory: Path, images: list[Path], client: httpx.C
         sources.append({'image_sha256': _digest(image)})
         urls.append('data:image/png;base64,'+base64.b64encode(image.read_bytes()).decode('ascii'))
     payload = {'image_urls': urls, 'ai_model': 'meshy-7', 'should_texture': True, 'enable_pbr': True,
-               'should_remesh': True, 'target_polycount': 10000, 'image_enhancement': False, 'target_formats': ['glb']}
+               'should_remesh': True, 'target_polycount': 2000, 'image_enhancement': False,
+               'remove_lighting': True, 'target_formats': ['glb']}
     if not isolated_part:
-        payload.update(target_polycount=30000, pose_mode='a-pose')
+        payload.update(target_polycount=8000, pose_mode='t-pose')
     endpoint = '/openapi/v1/multi-image-to-3d'
     value = {'stage': 'generation', 'status': 'submission_uncertain', 'profile': 'meshy-7',
              'generation_endpoint': endpoint, 'sources': sources, 'isolated_part': isolated_part,

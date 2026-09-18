@@ -60,6 +60,28 @@ class RecoverPartInput(BaseModel):
     task_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,100}$')
 
 
+class VariantInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    base_job_id: str = Field(pattern=r'^[a-f0-9]{24}$')
+    base_version: str = Field(pattern=r'^[a-f0-9]{24}$')
+    slots: list[Literal['hair', 'hat', 'top', 'bottom', 'shoes', 'weapon', 'tool', 'glasses']] = Field(min_length=1, max_length=8)
+    hair_length: Literal['source', 'short', 'long'] = 'source'
+    descriptions: dict[str, str] = Field(default_factory=dict, max_length=5)
+
+
+@router.post('/variants', status_code=202)
+def create_variant(body: VariantInput, background: BackgroundTasks, idempotency_key: str = Header(),
+                   user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    from src.services.avatar_variants import AvatarVariants
+    if any(len(value) > 2000 for value in body.descriptions.values()):
+        from src.services.character_pipeline import PipelineError
+        raise PipelineError('description_too_long', '파츠 설명은 2000자 이내로 입력하세요.', 422)
+    job, created = AvatarVariants(factory).create(user.user_id, idempotency_key, body.model_dump())
+    if created:
+        background.add_task(AvatarImagePipeline(factory).execute, user.user_id, job['id'])
+    return job
+
+
 class RetryImageInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     slot: ImageSlot
@@ -115,17 +137,29 @@ def meshy_state(job_id: str, user: UserContext = Depends(get_current_user), fact
     return AvatarMeshy(factory).get(user.user_id, job_id)
 
 
+@router.get('/jobs/{job_id}/motion-defaults')
+def body_motion_defaults(job_id: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarMeshy(factory).defaults(user.user_id, job_id=job_id)
+
+
+@router.put('/jobs/{job_id}/motion-defaults')
+def save_body_motion_defaults(job_id: str, body: MotionDefaultsInput,
+                              user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return AvatarMeshy(factory).defaults(user.user_id, body.selections, job_id=job_id)
+
+
 @router.get('/jobs/{job_id}/native-parts')
 def native_parts(job_id: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return AvatarNativeParts(factory).get(user.user_id, job_id)
 
 
 @router.post('/jobs/{job_id}/native-parts', status_code=202)
-def fit_native_parts(job_id: str, background: BackgroundTasks, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+def fit_native_parts(job_id: str, background: BackgroundTasks, canonical_pose: bool = False,
+                     user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     service = AvatarNativeParts(factory)
     with _LOCK:
         ensure_stage_idle(factory, user.user_id, job_id)
-        state, created = service.start(user.user_id, job_id)
+        state, created = service.start(user.user_id, job_id, canonical_pose=canonical_pose)
     if created:
         background.add_task(service.execute, user.user_id, job_id)
     return state

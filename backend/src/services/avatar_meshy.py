@@ -54,8 +54,11 @@ class AvatarMeshy:
         _write_json(path, {'fetched_at': time.time(), 'items': items})
         return items
 
-    def defaults(self, owner, selections=None):
-        path = self.factory.root/str(int(owner))/'motion-defaults.json'
+    def defaults(self, owner, selections=None, job_id=None):
+        if job_id:
+            self.factory.get(owner, job_id)
+        path = ((self.factory.directory(owner, job_id) if job_id else self.factory.root/str(int(owner)))
+                /'motion-defaults.json')
         if selections is not None:
             available = {item['action_id'] for item in self.library(owner)}
             if not set(selections) <= set(SLOTS) or any(type(v) is not int or v not in available for v in selections.values()):

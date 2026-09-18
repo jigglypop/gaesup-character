@@ -28,7 +28,7 @@ export function MeshyMotion({ jobId }: { jobId: string }) {
   }, [jobId]);
   async function loadLibrary() {
     try {
-      const [catalog, saved] = await Promise.all([factoryApi.motionLibrary(), factoryApi.motionDefaults()]);
+      const [catalog, saved] = await Promise.all([factoryApi.motionLibrary(), factoryApi.motionDefaults(jobId)]);
       setLibrary(catalog.items); setDefaults(saved.selections); setActionId(saved.selections[slot]); setCatalogError('');
     } catch (e) { setCatalogError((e as Error).message); }
   }
@@ -79,7 +79,7 @@ export function MeshyMotion({ jobId }: { jobId: string }) {
       <div className="meshy-options"><label>실제 Meshy 동작<select size={8} aria-label="Meshy 동작 목록" value={actionId ?? ''} onChange={e => setActionId(Number(e.target.value))}>{!chosen && <option value="" disabled>동작을 선택하세요</option>}{chosen && !filtered.includes(chosen) && <option value={chosen.action_id}>{chosen.name} · #{chosen.action_id}</option>}{filtered.map(a => <option key={a.action_id} value={a.action_id}>{a.name} · #{a.action_id}</option>)}</select></label>
         <div className="meshy-action-preview">{chosen ? <><strong>{chosen.name} · #{chosen.action_id}</strong>{chosen.preview_url && <img src={chosen.preview_url} alt={`${chosen.name} Meshy 동작 미리보기`} />}<small>{chosen.category} / {chosen.sub_category}</small></> : <p>목록에서 고르면 Meshy 미리보기가 표시됩니다.</p>}</div>
       </div>
-      <div className="meshy-buttons"><button disabled={!chosen} onClick={() => void perform(async () => { const saved = await factoryApi.saveMotionDefaults({...defaults, [slot]: actionId!}); setDefaults(saved.selections); }, `${slots[slot]} 기본 동작을 저장했습니다.`)}>이 동작을 {slots[slot]} 기본값으로 저장</button>
+      <div className="meshy-buttons"><button disabled={!chosen} onClick={() => void perform(async () => { const saved = await factoryApi.saveMotionDefaults({...defaults, [slot]: actionId!}, jobId); setDefaults(saved.selections); }, `${slots[slot]} 기본 동작을 저장했습니다.`)}>이 동작을 {slots[slot]} 기본값으로 저장</button>
         <button disabled={!chosen || !url || running} onClick={() => void perform(() => factoryApi.meshyAction(jobId, slot, actionId!), '선택한 Meshy 동작을 가져오고 있습니다.')}>{pending ? '이 동작 조회·적용' : '이 캐릭터에 동작 가져오기 · 유료 최대 1회'}</button></div>
       {pending && <p>선택 동작 상태: {pending.status || '대기'}{pending.task_id ? ` · ${pending.task_id}` : ''}</p>}
       <p>저장한 기본값: {Object.entries(defaults).map(([key, id]) => `${slots[key]}: ${library.find(a => a.action_id === id)?.name || '#'+id}`).join(' / ') || '아직 지정하지 않음'}</p>

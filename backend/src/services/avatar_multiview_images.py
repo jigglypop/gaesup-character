@@ -129,7 +129,8 @@ def _generate_part(service, owner, job_id, state, part, body, publish, reserve, 
             # A previously submitted attempt keeps its exact prompt and inputs.
             revision = recorded.get('revision', PROMPT_REVISION)
             template = output/f'guide-{slot}-{view}-{revision}.png'
-            template_bytes = guide(view, spec, slot)
+            template_bytes = ((output/body['views'][view]['file']).read_bytes()
+                              if spec.get('frozen_body') else guide(view, spec, slot))
             if template.is_file() and template.read_bytes() != template_bytes:
                 raise PipelineError('guide_changed', '생산 기준 이미지가 변경되었습니다.', 409)
             template.write_bytes(template_bytes)
@@ -191,7 +192,7 @@ def _generate_part(service, owner, job_id, state, part, body, publish, reserve, 
                     image['failure'].update(http_status=exc.response.status_code,
                                             provider_code=exc.provider_error.get('code'))
                 publish(part)
-                label = {'body': '몸', 'hair': '머리카락', 'head': '기존 머리 파츠', 'hairBack': '뒷머리', 'hairFront': '앞머리', 'hat': '모자', 'top': '상의', 'bottom': '하의', 'shoes': '신발'}[slot]
+                label = {'body': '몸', 'hair': '머리카락', 'head': '기존 머리 파츠', 'hairBack': '뒷머리', 'hairFront': '앞머리', 'hat': '모자', 'top': '상의', 'bottom': '하의', 'shoes': '신발', 'weapon': '무기', 'tool': '도구', 'glasses': '안경'}.get(slot, slot)
                 raise PipelineError('view_response_missing', f'{label} {"정면" if view == "front" else "측면"}: {message}', 409) from None
         image.pop('failure', None)
         saving_started = time.monotonic()

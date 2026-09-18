@@ -4,10 +4,11 @@ import { factoryApi, type FactoryJob, type NativeOutfit, type NativePartsState }
 import { usePolling } from '../use-polling';
 import { MeshyMotion } from './MeshyMotion';
 import './meshy-motion.css';
+import { Expressions } from '../studio/Expressions';
 
-const labels: Record<string, string> = { hair: '머리카락', head: '기존 머리 파츠', hairBack: '뒷머리', hairFront: '앞머리', hat: '모자', top: '상의', bottom: '하의', shoes: '신발' };
+const labels: Record<string, string> = { hair: '머리카락', head: '기존 머리 파츠', hairBack: '뒷머리', hairFront: '앞머리', hat: '모자', top: '상의', bottom: '하의', shoes: '신발', weapon: '무기', tool: '도구', glasses: '안경' };
 const views = [['front', '정면'], ['side', '왼쪽'], ['back', '후면'], ['opposite', '오른쪽']] as const;
-const reviewGroups = [['', '전체'], ['body', '기본몸'], ['head', '머리 착용 모습'], ['hair', '머리카락'], ['hairFront', '앞머리'], ['hairBack', '뒷머리'], ['hat', '모자']] as const;
+const reviewGroups = [['', '전체'], ['body', '기본몸'], ['wardrobe', '의상'], ['head', '머리 착용 모습'], ['hair', '머리카락'], ['hairFront', '앞머리'], ['hairBack', '뒷머리'], ['hat', '모자']] as const;
 const equal = (a: string[], b: string[]) => a.length === b.length && a.every(slot => b.includes(slot));
 type Pending = { key: string; revision: string; input: Pick<NativeOutfit, 'body_sha256' | 'slots'> };
 function readPending(key: string): Pending | null {
@@ -152,6 +153,7 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
     })}</div>
     {mode === 'world' && <p>W·A·S·D 이동 · Shift 달리기</p>}
     {mode === 'studio' && <div className="meshy-clips"><button disabled={!ready} aria-pressed={motion === -1} onClick={() => { viewer.current?.play(-1); setMotion(-1); }}>기본 자세</button>{clips.map(c => <button disabled={!ready} key={c.index} aria-pressed={motion === c.index} onClick={() => { viewer.current?.play(c.index); setMotion(c.index); }}>{c.name}</button>)}</div>}
+    {body && <Expressions key={`${jobId}:${version}:${mode}`} job={jobId} version={version} bodySha={body.sha256} viewer={viewer} ready={ready} />}
     <fieldset className="assembly-parts" disabled={!ready || !restored || busy || pending}><legend>착용 파츠</legend>
       <span>기본 몸 · 항상 포함</span>
       {parts.map(part => <label key={part.slot}><input type="checkbox" checked={selected.includes(part.slot)} onChange={e => { const checked = e.target.checked; setWearError(''); setSelected(current => checked ? [...current, part.slot] : current.filter(slot => slot !== part.slot)); }} />{labels[part.slot] || part.slot}</label>)}

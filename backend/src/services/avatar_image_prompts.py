@@ -3,8 +3,26 @@ import json
 
 from src.services.avatar_production_spec import bounds_pixels, envelope_pixels, project
 
-PROMPT_REVISION = 'measured-views-v14-t-pose-slender-joints'
+PROMPT_REVISION = 'measured-views-v16-body-equipment'
+AXIS_LOCK = (
+    'MANDATORY ZERO-TILT REST POSE: object roll=0 degrees, pitch=0 degrees, yaw=0 degrees in world coordinates. '
+    'Torso centerline, sternum, navel and crotch lie on world X=0; shoulders and pelvis are level. '
+    'Both upper arms and forearms are straight along world +X/-X: shoulder abduction exactly 90 degrees, '
+    'elbow flexion 0 degrees, wrist bend 0 degrees. Shoulder, elbow, wrist and cuff centerlines share exactly '
+    'the same Y and Z coordinates; front-image sleeve centerline slope is 0, not a shallow A-pose. '
+    'Both legs are straight along -Y: knee flexion 0 degrees, no hip lean, no contrapposto. '
+    'Both ankle centers have the same Y and Z; both soles lie flat on Y=0. '
+    'Foot longitudinal axes are parallel to +Z: toe-out=0 degrees, toe-in=0 degrees, heel lift=0 degrees. '
+    'The collar center, zipper/button centerline and trouser fly are vertical; waistband, shirt hem, '
+    'paired cuffs and paired trouser hems are level, with left/right corresponding landmarks on identical pixel rows. '
+    'Do not tilt the top, trousers, skirt or shoe pair to imitate the source pose or make a pleasing product display. '
+    'Only the camera rotates for the side view; the body, clothing and feet remain fixed. '
+    'Intentional asymmetric decoration does not change these structural angles. '
+)
 PART_CONTENT = {
+    'weapon': 'Only one stylized weapon matching the requested design. Complete the grip, guard and blade or head. Exclude the hand, person, stand and effects.',
+    'tool': 'Only one requested handheld tool with its complete handle and working end. Exclude the hand, person, stand and spare objects.',
+    'glasses': 'Only one pair of wearable glasses: connected lenses, bridge and two complete temples. Exclude face, eyes, hair and hat. Keep the eye openings clear.',
     'hair': 'ONE complete voluminous hairstyle: front bangs, both side locks, full crown, rear hair and nape form one continuous hair-only component. Reconstruct the complete hair hidden under the original hat. Exclude ALL headwear, hats, caps, brims, rabbit ears, ear flaps, hoods, headbands and hat-colored patches. Exclude face, scalp skin, anatomical ears, neck, body and clothes. Leave the face opening and a generous hollow cavity for the shared head.',
     'hairBack': 'One separate sculpted rear-hair component for a stylized game figurine, covering the crown, back and nape. Output hair strands and their hair-colored scalp backing only. Remove ALL headwear from the reference: no hat, cap, brim, rabbit ears, ear flaps, hood, headband or hat-colored patches. Reconstruct the hair that was hidden beneath the hat. Exclude the figurine, bangs and clothing.',
     'hairFront': 'One separate sculpted front-hair and bangs component for the same game figurine. Preserve the face opening; output hair only, without the figurine, rear hair, hat, cap, rabbit ears, ear flaps or headband.',
@@ -15,6 +33,9 @@ PART_CONTENT = {
 }
 
 PART_FIT = {
+    'weapon': 'The grip center is at the right wrist socket in equipment. Long axis points +Y, with no roll or yaw; the grip center is 20 percent up from the lowest point. Preserve the requested silhouette and thickness. No wrist geometry.',
+    'tool': 'The handle grip is at the left wrist socket in equipment. Long axis points +Y; the grip center is 20 percent up from the lowest point. Preserve the requested silhouette and thickness. No wrist geometry.',
+    'glasses': 'The bridge is centered on the facial centerline at the specified eye height. Both lens centers are level. Temples extend backward along -Z around the head with open ends. No solid face plate or opaque lens fill.',
     'hair': (
         'Build the hairstyle as one continuous volume around the entire head, not separate front and back panels. '
         'Keep generous volume at the temples, sides, crown and rear, with detailed overlapping locks in every view. '
@@ -75,6 +96,7 @@ def layout_contract(spec, slot, view):
         'hair_length_mode': spec['fitting'].get('hair_length', 'source'),
         'hair_length_in_head_heights': spec['fitting'].get('hair_length_head_ratio'),
         'base_body_cross_sections_m': spec.get('base_body', {}),
+        'equipment': spec.get('equipment', {}).get(slot),
         'canvas_px': [c['width'], c['height']],
         'pixel_coordinates': 'origin top-left, x right, y down; bounds [left, top, right, bottom]',
         'camera': spec['views'][view]['camera'],
@@ -158,7 +180,8 @@ def build_prompt(spec, slot, view, *, previous_qc=None, accepted_front_qc=None, 
         )
     else:
         content = (
-            PART_CONTENT[slot] + ' Reproduce the visible design in the original art. '
+            PART_CONTENT[slot] + (' The requested design replaces the old part; original art supplies the character style only. '
+                                 if spec.get('frozen_body') and notes else ' Reproduce the visible design in the original art. ') +
             'Fit the object onto the frozen body at its current WORN POSITION, then hide the body without moving the object. '
             'Keep its full-character canvas position even when most of the output canvas is empty. ' +
             ('Use target_part_bounds_m for hair width and crown position. Preserve the original rounded silhouette and proportional depth. '
@@ -185,6 +208,7 @@ def build_prompt(spec, slot, view, *, previous_qc=None, accepted_front_qc=None, 
         'The allowed bounds are maximum limits, not a target size. Keep intentional empty canvas space. '
         'Every generation in this factory shares the same body, origin, units, camera magnification and attachment anchors.',
         camera,
+        AXIS_LOCK,
         'EXACT PIXEL LAYOUT (same values used by the assembly fitter):\n'+json.dumps(layout, ensure_ascii=True, indent=2),
         content,
         'ASSEMBLY RULES: skin/body is the innermost layer; clothes and hair are outside it; the hat is outside the worn hair. '
@@ -215,5 +239,5 @@ def build_prompt(spec, slot, view, *, previous_qc=None, accepted_front_qc=None, 
             'required_body_top_bottom_px': [c['scalp_y'], c['sole_y']] if slot == 'body' else None,
         }, ensure_ascii=True)+'. Re-render using the specified template placement and empty margins. Do not repeat the rejected framing.')
     if notes:
-        prompt += '\n\nOptional appearance detail only (never changes view, scale, pose or canvas): '+notes
+        prompt += '\n\nREQUESTED PART DESIGN (overrides original part design; never changes the saved body, view, metric attachment, pose or canvas): '+notes
     return prompt

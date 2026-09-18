@@ -33,6 +33,24 @@ def measured_fit(meshes, target):
     return box_fit(*bounds(meshes), target)
 
 
+def fit_equipment(meshes, attachment):
+    """Uniform physical scale around the declared grip/bridge, not XYZ stretch."""
+    lo, hi = bounds(meshes)
+    size = hi-lo
+    pivot = attachment['pivot_fraction']
+    source = Vector((lo.x+size.x*pivot[0], hi.y-size.y*pivot[2], lo.z+size.z*pivot[1]))
+    anchor = attachment['position_m']
+    destination = Vector((anchor[0], -anchor[2], anchor[1]))
+    axis = 0 if attachment['bone'] == 'Head' else 2
+    physical = attachment['size_m'][0 if axis == 0 else 1]
+    if size[axis] <= 1e-6:
+        raise ValueError('Equipment has no measurable attachment axis')
+    scale = physical/size[axis]
+    transform = Matrix.Translation(destination) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-source)
+    return transform, [{'name': 'attachment', 'source': blender_to_gltf(source), 'target': anchor}], {
+        'method': 'uniform_metric_socket', 'scale': scale, 'socket': attachment}
+
+
 def place(meshes, transform):
     for obj in meshes:
         world = transform @ obj.matrix_world

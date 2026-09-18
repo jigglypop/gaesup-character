@@ -1,0 +1,80 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private gaesup asset studio with S3 durability and SSM administrative access
+Parameters:
+  VpcId: {Type: 'AWS::EC2::VPC::Id'}
+  SubnetId: {Type: 'AWS::EC2::Subnet::Id'}
+  AssetBucket: {Type: String}
+  ReleaseKey: {Type: String}
+  ProviderSecretArn: {Type: String, AllowedPattern: 'arn:aws:secretsmanager:.*'}
+  InstanceType: {Type: String, Default: t3.large, AllowedValues: [t3.large, t3.xlarge, c7i.large, c7i.xlarge]}
+  ImageId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{Effect: Allow, Principal: {Service: ec2.amazonaws.com}, Action: 'sts:AssumeRole'}]
+      ManagedPolicyArns: ['arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore']
+      Policies:
+        - PolicyName: StudioStorage
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:ListBucket']
+                Resource: !Sub 'arn:aws:s3:::${AssetBucket}'
+                Condition: {StringLike: {'s3:prefix': ['assets/*', 'releases/*']}}
+              - Effect: Allow
+                Action: ['s3:GetObject', 's3:PutObject']
+                Resource: !Sub 'arn:aws:s3:::${AssetBucket}/assets/*'
+              - Effect: Allow
+                Action: ['s3:GetObject']
+                Resource: !Sub 'arn:aws:s3:::${AssetBucket}/${ReleaseKey}'
+              - Effect: Allow
+                Action: ['secretsmanager:GetSecretValue']
+                Resource: !Ref ProviderSecretArn
+  Profile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: {Roles: [!Ref InstanceRole]}
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSM only - no inbound ports
+      VpcId: !Ref VpcId
+      SecurityGroupEgress: [{IpProtocol: '-1', CidrIp: 0.0.0.0/0}]
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref Profile
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 1}
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref SecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: {VolumeSize: 60, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      Tags: [{Key: Name, Value: gaesup-asset-studio}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+          install -d -m 700 /opt/asset-studio
+          cd /opt/asset-studio
+          aws s3 cp 's3://${AssetBucket}/${ReleaseKey}' release.tar.gz --region '${AWS::Region}'
+          tar -xzf release.tar.gz
+          aws secretsmanager get-secret-value --secret-id '${ProviderSecretArn}' --query SecretString --output text --region '${AWS::Region}' > provider.json
+          chmod 600 provider.json
+          docker build -t gaesup-asset-studio -f infra/Dockerfile .
+          docker run -d --restart unless-stopped --name gaesup-asset-studio --network host -e ASSET_S3_BUCKET='${AssetBucket}' -e ASSET_S3_REGION='${AWS::Region}' -e AWS_REGION='${AWS::Region}' -v /opt/asset-studio/provider.json:/run/studio-secrets.json:ro -v studio-scratch:/app/data gaesup-asset-studio
+Outputs:
+  InstanceId: {Value: !Ref Instance}
+  Access: {Value: !Sub 'aws ssm start-session --target ${Instance} --document-name AWS-StartPortForwardingSession --parameters portNumber=8080,localPortNumber=8080'}

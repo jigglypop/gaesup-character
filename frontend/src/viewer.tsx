@@ -11,6 +11,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FaceEditor, type PaintSettings } from './face-editor';
 import { captureRestPose } from './model-pose';
 import { NativeWardrobe, type Wearable } from './native-wardrobe';
+import { TextureExpressions, type ExpressionName, type FaceLayout } from './texture-expressions';
 
 type Model = { gltf: GLTF; url: string; rigged: boolean; restorePose(): void };
 type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; studio?: boolean; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
@@ -106,7 +107,7 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
 }
 
 function EditingScene({ model, animation, editing, studio, hidden, onEditor, onPaint, onReady }: ViewProps) {
-  const { camera, gl } = useThree();
+  const { camera, gl, invalidate } = useThree();
   const controls = useRef<OrbitControls | null>(null);
   const group = useRef<THREE.Group>(null!);
   const mixer = useMemo(() => new THREE.AnimationMixer(model.gltf.scene), [model]);
@@ -129,8 +130,11 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
     camera.position.copy(center).add(new THREE.Vector3(0, height * .1, height * 2.4)); camera.lookAt(center);
     const orbit = new OrbitControls(camera, gl.domElement); orbit.target.copy(center); orbit.enableDamping = true;
     orbit.mouseButtons = { LEFT: studio && !editing ? THREE.MOUSE.ROTATE : -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }; orbit.update(); controls.current = orbit;
+    const changed = () => invalidate();
+    orbit.addEventListener('change', changed);
     const editor = editing ? new FaceEditor(model.gltf, gl.domElement, camera, onPaint, `atelier.faces:${model.url}`) : null; onEditor(editor); onReady();
-    return () => { editor?.dispose(); orbit.dispose(); controls.current = null; onEditor(null); };
+    invalidate();
+    return () => { editor?.dispose(); orbit.removeEventListener('change', changed); orbit.dispose(); controls.current = null; onEditor(null); };
   }, [model, editing, studio, camera, gl, onEditor, onPaint, onReady]);
   useEffect(() => {
     mixer.stopAllAction();
@@ -138,7 +142,10 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
     else model.restorePose();
     return () => { mixer.stopAllAction(); mixer.uncacheRoot(model.gltf.scene); };
   }, [studio, animation, model, mixer]);
-  useFrame((_, delta) => { controls.current?.update(); if (studio) mixer.update(Math.min(delta, .1)); });
+  useFrame((_, delta) => {
+    controls.current?.update();
+    if (studio && animation >= 0) { mixer.update(Math.min(delta, .1)); invalidate(); }
+  });
   return <group ref={group}><primitive object={model.gltf.scene} dispose={null} /></group>;
 }
 
@@ -192,6 +199,8 @@ function CharacterViewport(props: ViewProps) {
 
 /** DOM workspace bridge; React/R3F own the canvas, render loop, camera and model scene. */
 export class ModelViewer {
+  private expressions?: TextureExpressions;
+  private expressionError = '';
   private wardrobe?: NativeWardrobe;
   private root?: ReturnType<typeof createRoot>;
   private mount = document.createElement('div');
@@ -231,13 +240,14 @@ export class ModelViewer {
       if (this.disposed) { renderer.dispose(); return; }
       this.renderers.add(renderer);
       renderer.outputColorSpace = THREE.SRGBColorSpace;
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMapping = THREE.NeutralToneMapping;
       renderer.setClearColor(0x000000, 0);
       const backend = renderer.backend as { isWebGPUBackend?: boolean };
       this.onBackend(backend.isWebGPUBackend ? 'webgpu' : 'webgl-fallback');
       // Initialize before creating an R3F root so a removed panel cannot finish an async Canvas mount.
       this.root = createRoot(this.canvas);
-      await this.root.configure({ gl: renderer, size: this.size(), dpr: Math.min(devicePixelRatio, 2),
+      await this.root.configure({ gl: renderer, size: this.size(), dpr: Math.min(devicePixelRatio, 1.5),
+        frameloop: this.presentation === 'studio' ? 'demand' : 'always',
         camera: { fov: 42, position: [0, 3, 7] }, events,
         onCreated: state => state.events.connect?.(this.canvas) });
       if (this.disposed) this.root.unmount();
@@ -284,6 +294,11 @@ export class ModelViewer {
       catch (error) { release(gltf.scene); throw error; }
     }
     if (this.model) this.retired.push(this.model.gltf.scene);
+    this.expressions?.dispose(); this.expressions = undefined; this.expressionError = '';
+    if (options.wardrobe) {
+      try { this.expressions = new TextureExpressions(gltf); }
+      catch (e) { this.expressionError = (e as Error).message; }
+    }
     this.wardrobe?.dispose(); this.wardrobe = wardrobe;
     let rigged = false; gltf.scene.traverse(object => { if (object instanceof THREE.SkinnedMesh) rigged = true; });
     this.model = { gltf, rigged, restorePose: captureRestPose(gltf.scene), url: `${url}${url.includes('?') ? '&' : '?'}sha256=${digest}` }; this.animation = -1; this.hidden = new Set();
@@ -294,9 +309,17 @@ export class ModelViewer {
     return gltf.animations.map((clip, index) => ({ index, name: clip.name || `Animation ${index + 1}` }));
   }
   play(index: number) { this.animation = index; this.render(); }
+  async expression(name: ExpressionName, layout: FaceLayout) {
+    if (!this.expressions) throw new Error(this.expressionError || '표정 텍스쳐가 준비되지 않았습니다.');
+    const maps = await this.expressions.apply(name, layout); this.render(); return maps;
+  }
+  async savedExpression(maps: { material: number; url: string; sha256: string }[]) {
+    if (!this.expressions) throw new Error(this.expressionError || '표정 텍스쳐가 준비되지 않았습니다.');
+    await this.expressions.saved(maps); this.render();
+  }
   wear(parts: Wearable[]) {
     if (!this.wardrobe) return Promise.reject(new Error('공용 골격 옷장이 준비되지 않았습니다.'));
-    return this.wardrobe.equip(parts);
+    return this.wardrobe.equip(parts).then(applied => { if (applied) this.render(); return applied; });
   }
   wardrobeDiagnostics() { return this.wardrobe?.diagnostics(); }
   setEditing(enabled: boolean, onCount: (count: number) => void) { this.editing = enabled; this.paintCount = onCount; this.render(); }
@@ -310,6 +333,7 @@ export class ModelViewer {
     this.render();
   }
   dispose() {
+    this.expressions?.dispose(); this.expressions = undefined;
     this.wardrobe?.dispose(); this.wardrobe = undefined;
     this.disposed = true; this.generation++; this.request?.abort(); this.finish?.();
     this.observer.disconnect(); this.root?.unmount();

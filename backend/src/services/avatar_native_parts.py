@@ -14,6 +14,7 @@ from src.services.character_pipeline import PipelineError, read_json
 from src.services.process_identity import identity, state as process_state
 from src.services.object_storage import local_workspace
 from src.services.avatar_production_spec import production_spec
+from src.services.avatar_equipment import EQUIPMENT
 
 SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes')
 LEGACY_SLOTS = ('hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes')
@@ -47,7 +48,7 @@ class AvatarNativeParts:
                     'url': f'/api/avatar-factory/jobs/{job}/native-parts/{version}/{name}'}
                     for name, value in record.get('files', {}).items()]}
 
-    def start(self, owner, job):
+    def start(self, owner, job, *, canonical_pose=False):
         job_state = self.factory.get(owner, job)
         if job_state.get('production_mode') != 'character_parts':
             raise PipelineError('parts_required', '몸과 의상을 개별 생성한 파츠 작업이 필요합니다.', 422)
@@ -57,22 +58,27 @@ class AvatarNativeParts:
         body = provider.artifact(owner, job, state['version'], 'model.glb')
         pipeline = read_json(self.factory.directory(owner, job)/'pipeline.json')
         source_slots = tuple(part['slot'] for part in pipeline.get('parts', []) if part['slot'] != 'body')
-        if set(source_slots) not in (set(SLOTS), set(LEGACY_SLOTS), {'head', 'top', 'bottom', 'shoes'}):
+        clothing_slots = set(source_slots)-set(EQUIPMENT)
+        if clothing_slots not in (set(SLOTS), set(LEGACY_SLOTS), {'head', 'top', 'bottom', 'shoes'}):
             raise PipelineError('parts_required', '저장된 캐릭터 파츠 구성을 확인하세요.', 422)
         parts = []
         for slot in source_slots:
             path = self.factory.artifact(owner, job, f'generated-{slot}.glb')
             parts.append({'slot': slot, 'path': str(path), 'sha256': digest(path)})
         contract = {'recipe': RECIPE, 'worker_sha256': digest(Path(__file__).with_name('avatar_native_parts_blender.py')),
+                    'canonical_pose': canonical_pose,
                     'binding_worker_sha256': digest(Path(__file__).with_name('avatar_standard_blender.py')),
                     'body_layers_sha256': digest(Path(__file__).with_name('avatar_body_layers.py')),
                     'head_geometry_sha256': digest(Path(__file__).with_name('avatar_head_geometry.py')),
                     'arm_geometry_sha256': digest(Path(__file__).with_name('avatar_arm_geometry.py')),
+                    'render_budget_sha256': digest(Path(__file__).with_name('avatar_render_budget.py')),
+                    'equipment_sha256': digest(Path(__file__).with_name('avatar_equipment.py')),
                     'body': digest(body), 'parts': [(p['slot'], p['sha256']) for p in parts]}
         pipeline = read_json(self.factory.directory(owner, job)/'pipeline.json')
         # Image receipts remain frozen. Local reassembly uses the current sizing
         # contract even for old single-view jobs and oversized image measurements.
-        fit_spec = production_spec(pipeline.get('hair_length', 'source'))
+        fit_spec = (pipeline['production_spec'] if pipeline.get('base_body')
+                    else production_spec(pipeline.get('hair_length', 'source')))
         measurements = {p['slot']: p.get('target_bounds_m') for p in pipeline.get('parts', [])}
         contract.update(production_spec_sha256=fit_spec['sha256'],
                         source_spec_sha256=(pipeline.get('production_spec') or {}).get('sha256'),
@@ -97,7 +103,8 @@ class AvatarNativeParts:
             directory.mkdir(parents=True, exist_ok=True)
             _write_json(directory/'input.json', {'source': str(body), 'source_sha256': digest(body),
                         'parts': parts, 'output': str(directory), 'contract': contract,
-                        'production_spec': fit_spec, 'source_measurements': measurements})
+                        'production_spec': fit_spec, 'source_measurements': measurements,
+                        'canonical_pose': canonical_pose})
             _write_json(directory/'record.json', {'status': 'accepted', 'process': identity(), 'files': {}})
             _write_json(root/'current.json', {'version': version})
         return self.get(owner, job), True

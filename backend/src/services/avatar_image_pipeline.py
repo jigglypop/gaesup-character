@@ -31,7 +31,7 @@ from src.services.character_parts import blender_executable
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity, state as process_state
 from src.services.avatar_production_spec import production_spec, public_spec, IMAGE_INTAKE_POLICY
-from src.services.avatar_image_prompts import PART_FIT, hair_length_prompt
+from src.services.avatar_image_prompts import PART_FIT, hair_length_prompt, AXIS_LOCK
 
 PARTS = SLOTS[1:] + ['body', 'hair']
 CHARACTER_PART_SLOTS = ['body', 'hair', 'hat', 'top', 'bottom', 'shoes']
@@ -41,8 +41,8 @@ WHOLE_BODY_PROMPT = (
     'Include the entire head with face and hair, neck, torso, both arms and hands, both legs and feet. '
     'Dress the character in an opaque short-sleeved T-shirt, shorts and simple shoes. '
     'Preserve the reference identity, face, colors, oversized head and tiny limbs. '
-    'One intact character from the top of the head to the soles, front orthographic A-pose, '
-    'arms slightly away from the torso, both hands visible, feet separated. '
+    'One intact character from the top of the head to the soles, front orthographic straight horizontal T-pose, '
+    'both hands visible, feet parallel and separated. '
     'Keep the entire silhouette inside the frame with margin on a plain white background. '
     'No cropped head, isolated face, floating parts, disassembly, extra characters, text or cast shadows.'
 )
@@ -57,11 +57,13 @@ WARDROBE_BODY_PROMPT = (
     'No sweater, baggy trousers, padding, inflated shoulders, folds, cuffs or thick waistband. '
     'Use plain matte fabric and clean unadorned shapes, with the original large head, hands and bare feet unchanged. '
     'Show a full bald head without hair, hats, bunny ears or ornaments. '
-    'Front orthographic neutral A-pose, arms 35 degrees away from the torso, hands open and separate, '
-    'feet shoulder-width apart. Both shoulders, elbows, wrists, hips, knees and ankles must be unambiguous. '
+    'Front orthographic horizontal T-pose, arms exactly 90 degrees away from the torso, hands open and separate, '
+    'feet parallel and shoulder-width apart. Both shoulders, elbows, wrists, hips, knees and ankles must be unambiguous. '
     'One intact fully visible, fully clothed figure on a plain white background with margin; no text, shadows or extra parts. '
     'This is the reusable neutral clothed base for separately generated interchangeable garments.'
 )
+WHOLE_BODY_PROMPT += AXIS_LOCK
+WARDROBE_BODY_PROMPT += AXIS_LOCK
 _RUN_LOCKS = {}
 DESCRIPTIONS = {
     'hair': 'one complete voluminous hairstyle including bangs, both sides, full crown, rear hair and nape; reconstruct hair hidden under the hat; hair only, no hat, headwear, face, scalp skin or body',
@@ -302,7 +304,8 @@ class AvatarImagePipeline:
                                    for view, value in p.get('views', {}).items()}} for p in state['parts']]
         if state.get('production_spec'):
             job['production_spec'] = public_spec(state['production_spec'])
-            views = [image for p in state['parts'] for image in p['views'].values()]
+            reused = state.get('reuse', {}).get('slots', [])
+            views = [image for p in state['parts'] if p['slot'] not in reused for image in p['views'].values()]
             # Accepted replacements survive a restart between pipeline and job writes.
             job['limits']['image_tasks'] = max(job['limits']['image_tasks'], len(views) + sum(len(image.get('previous_attempts', [])) for image in views))
         job['image_failures'] = [{'slot': p['slot'], **p['image']['failure']}
@@ -467,6 +470,8 @@ class AvatarImagePipeline:
 
     def _prepare_images(self, owner, job_id, state, job):
         directory = self.factory.directory(owner, job_id); output = directory/'output'
+        from src.services.avatar_variants import prepare_body
+        prepare_body(self, owner, job_id, state)
         if digest(directory/'source.png') != job['source_sha256']:
             raise PipelineError('source_changed', '보존한 원본 이미지가 변경되었습니다.')
         if state.get('production_spec'):
@@ -606,7 +611,8 @@ class AvatarImagePipeline:
                             continue
                         task = read_json(run/'character.json')
                         if not task:
-                            attempts = sum((directory/'parts'/p['slot']/'character.json').is_file() for p in state['parts'])
+                            attempts = sum((directory/'parts'/p['slot']/'character.json').is_file()
+                                           for p in state['parts'] if p['slot'] not in state.get('reuse', {}).get('slots', []))
                             if attempts >= job['limits']['meshy_tasks']:
                                 raise PipelineError('meshy_budget_exhausted', '허용된 Meshy 생성 횟수를 모두 사용했습니다.')
                             _write_json(output/'progress.json', {'stage': 'models', 'message': f'{part["slot"]} 개별 3D 생성 제출 중'})
