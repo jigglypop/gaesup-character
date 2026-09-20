@@ -80,7 +80,7 @@ class AvatarVariants:
             variant['view_mode'] = payload['view_mode']
         if 'meshy_options' in payload:
             variant['meshy_options'] = payload['meshy_options']
-        for field in ('uploaded_views', 'part_name'):
+        for field in ('uploaded_views', 'uploaded_model', 'part_name'):
             if payload.get(field):
                 variant[field] = payload[field]
         return self.create(owner, key, variant, frozen_context=frozen_context)
@@ -122,10 +122,21 @@ class AvatarVariants:
                              {slot: freeze_options(self.factory, owner, (photo_input or payload).get('meshy_options'),
                                                    slot, prompt_snapshot['meshy_texture']) for slot in slots})
             uploaded_views = payload.get('uploaded_views')
+            uploaded_model = payload.get('uploaded_model')
             if uploaded_views and (not payload.get('single_part') or set(uploaded_views) != {'front', 'side', 'back'}):
                 raise PipelineError('invalid_views', '단일 파츠의 정면·측면·후면 원본이 필요합니다.', 422)
+            if uploaded_model:
+                if not payload.get('single_part') or uploaded_views or set(uploaded_model) != {'asset_id', 'path', 'sha256'}:
+                    raise PipelineError('invalid_model', '업로드한 단일 GLB 파츠를 다시 선택해 주세요.', 422)
+                model_path = Path(uploaded_model['path'])
+                if (not re.fullmatch(r'[a-f0-9]{64}', uploaded_model['asset_id'])
+                        or uploaded_model['sha256'] != uploaded_model['asset_id']
+                        or not model_path.is_file() or digest(model_path) != uploaded_model['sha256']):
+                    raise PipelineError('source_changed', '등록한 GLB 원본을 확인할 수 없습니다.', 409)
             available = capabilities()
-            if not (available['meshy_configured'] and available['blender_available']
+            if not available['blender_available']:
+                raise PipelineError('provider_unavailable', 'Blender 연결 설정을 확인해 주세요.', 503)
+            if not uploaded_model and not (available['meshy_configured']
                     and (bool(uploaded_views) or available['image_configured'])):
                 raise PipelineError('provider_unavailable', '생성 서비스 연결을 확인하세요.', 503)
             base_id = payload['base_job_id']
@@ -314,11 +325,18 @@ class AvatarVariants:
             for part in state['parts']:
                 slot = part['slot']
                 if slot in slots:
-                    part['meshy_options'] = meshy_options[slot]
-                    part.update(description=payload.get('descriptions', {}).get(slot) or prompt_snapshot['parts'][slot],
-                                views={v: {'status': 'pending'} for v in generated_views},
-                                image={'status': 'pending'}, model={'status': 'pending'},
-                                provenance={'origin': 'generated_for_frozen_body', 'source_job_id': base_id})
+                    if uploaded_model:
+                        part.update(description=payload.get('part_name') or prompt_snapshot['parts'][slot],
+                                    views={}, image={'status': 'not_required'},
+                                    model={'status': 'ready', 'task_id': None, 'origin': 'uploaded_glb'},
+                                    preserve_generated_detail=True,
+                                    provenance={'origin': 'uploaded_glb', 'asset_id': uploaded_model['asset_id']})
+                    else:
+                        part['meshy_options'] = meshy_options[slot]
+                        part.update(description=payload.get('descriptions', {}).get(slot) or prompt_snapshot['parts'][slot],
+                                    views={v: {'status': 'pending'} for v in generated_views},
+                                    image={'status': 'pending'}, model={'status': 'pending'},
+                                    provenance={'origin': 'generated_for_frozen_body', 'source_job_id': base_id})
                     if photo_input is not None:
                         part['design_prompt'] = state['design_prompts'][slot]
                     else:
@@ -333,7 +351,14 @@ class AvatarVariants:
                     if slot in fit_profiles:
                         part['fit_profile'] = deepcopy(fit_profiles[slot])
                     part.pop('target_bounds_m', None)
-                    if uploaded_views:
+                    if uploaded_model:
+                        model_path = target/'parts'/slot/'generated.glb'
+                        model_path.parent.mkdir(parents=True, exist_ok=True)
+                        copy_file(Path(uploaded_model['path']), model_path)
+                        _write_json(model_path.parent/'generation-artifacts.json', {'generated': {
+                            'path': str(model_path), 'sha256': uploaded_model['sha256'],
+                            'origin': 'uploaded_glb', 'asset_id': uploaded_model['asset_id']}})
+                    elif uploaded_views:
                         from src.services.avatar_blueprints import AvatarBlueprints
                         assets = AvatarBlueprints(self.factory.data)
                         for view, asset_id in uploaded_views.items():
@@ -417,12 +442,14 @@ class AvatarVariants:
                 'production_mode': 'character_parts', 'auto_assemble': True, 'profile': base['profile'],
                 'status': 'pipeline_queued', 'created_at': now(), 'updated_at': now(), 'error': None,
                 'base_job_id': base_id, 'base_version': native['version'], 'requested_slots': slots,
-                'meshy_options': {slot: frozen['options'] for slot, frozen in meshy_options.items()},
-                **({'resume_stage': 'models', 'part_name': payload.get('part_name', '')} if uploaded_views else {}),
-                'limits': {'image_tasks': (0 if uploaded_views else len(generated_views)*len(slots)) + (2 if photo_input is not None and state.get('reference_preparation') else 0),
+                'meshy_options': ({} if uploaded_model else
+                                  {slot: frozen['options'] for slot, frozen in meshy_options.items()}),
+                **({'resume_stage': 'models', 'part_name': payload.get('part_name', '')}
+                   if uploaded_views or uploaded_model else {}),
+                'limits': {'image_tasks': (0 if uploaded_views or uploaded_model else len(generated_views)*len(slots)) + (2 if photo_input is not None and state.get('reference_preparation') else 0),
                            'reference_tasks': 2 if photo_input is not None and state.get('reference_preparation') else 0,
                            'expression_tasks': (0 if payload.get('single_part') else 5 if state.get('default_expressions') else 0),
-                           'meshy_tasks': len(slots),
+                           'meshy_tasks': 0 if uploaded_model else len(slots),
                            'meshy_rig_tasks': 0, 'meshy_animation_tasks': 0},
                 'review': {'decision': 'pending'}, 'files': {}})
             AvatarImagePipeline(self.factory).publish(owner, job_id, state)

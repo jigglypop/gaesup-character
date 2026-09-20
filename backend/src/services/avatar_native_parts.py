@@ -283,7 +283,8 @@ class AvatarNativeParts:
                     if fallback_sha and digest(fallback) == fallback_sha:
                         entry.update(fallback_path=str(fallback), fallback_sha256=fallback_sha,
                             fallback_report=next((p for p in source_record.get('result', {}).get('parts', []) if p['slot'] == slot), {}))
-            entry['preserve_generated_detail'] = bool(part_inputs[slot].get('meshy_options'))
+            entry['preserve_generated_detail'] = bool(
+                part_inputs[slot].get('preserve_generated_detail') or part_inputs[slot].get('meshy_options'))
             parts.append(entry)
         contract = {'recipe': RECIPE, 'worker_sha256': digest(Path(__file__).with_name('avatar_native_parts_blender.py')),
                     'canonical_pose': canonical_pose,

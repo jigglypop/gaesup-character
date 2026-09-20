@@ -14,6 +14,11 @@
 .asset-model-preview-error{position:absolute;z-index:3;inset:auto 8px 8px;display:grid;grid-template-columns:1fr auto;gap:3px 8px;align-items:center;padding:9px;border:1px solid #e5a7b44d;border-radius:10px;background:#171019eb;font-size:11px}
 .asset-model-preview-error small{grid-column:1/-1;overflow:hidden;color:#d8aeb7;text-overflow:ellipsis;white-space:nowrap}
 .asset-model-preview-error button{grid-column:2;grid-row:1;padding:5px 8px;border:1px solid #ffffff20;border-radius:7px;background:#ffffff0d;color:var(--text);font:inherit;cursor:pointer}
+.asset-model-preview.detail{height:520px;border:1px solid var(--line);border-radius:14px}
+.asset-model-preview-models,.asset-model-preview-views{position:absolute;z-index:4;bottom:10px;display:flex;gap:5px;max-width:calc(100% - 20px);padding:4px;border:1px solid #ffffff20;border-radius:10px;background:#0d0e16df;overflow-x:auto}
+.asset-model-preview-models{left:10px;right:10px;bottom:48px}.asset-model-preview-views{right:10px}
+.asset-model-preview-models button,.asset-model-preview-views button{flex:none;padding:6px 9px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:10px;white-space:nowrap;cursor:pointer}
+.asset-model-preview-models button[aria-pressed=true],.asset-model-preview-views button[aria-pressed=true]{border-color:#b7a5ed66;background:#b7a5ed20;color:var(--text)}
 .asset-character-card .asset-model-preview{height:260px;border-radius:12px}
 .asset-gallery-card.compact .asset-model-preview{height:160px}
-@media(max-width:720px){.asset-model-preview{height:190px}.asset-character-card .asset-model-preview{height:220px}.asset-gallery-card.compact .asset-model-preview{height:140px}}
+@media(max-width:720px){.asset-model-preview{height:190px}.asset-model-preview.detail{height:420px}.asset-character-card .asset-model-preview{height:220px}.asset-gallery-card.compact .asset-model-preview{height:140px}.asset-model-preview-models{right:10px;bottom:48px}.asset-model-preview-views{left:10px;right:auto}}

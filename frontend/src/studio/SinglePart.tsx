@@ -9,6 +9,7 @@ import { studioApi } from './api';
 import { MeshyOptionsEditor } from './MeshyOptionsEditor';
 import { useMeshyOptions, meshyOptionsError } from './meshy-options';
 import { HairBatch } from './HairBatch';
+import { GlbAssetLibrary } from './GlbAssetLibrary';
 
 type Props = {
   slot: (typeof variantSlots)[number];
@@ -26,6 +27,7 @@ type Props = {
 };
 
 export function SinglePart({ slot, onSlotChange, bases, base, native, versions, job, name, onBaseChange, onJobChange, onJob, refreshJobs }: Props) {
+  const [inputMode, setInputMode] = useState<'generate' | 'glb'>('generate');
   const [hairLength, setHairLength] = useState<'source' | 'short' | 'long'>('source');
   const [bottomKind, setBottomKind] = useState<'source' | 'pants' | 'skirt'>('source');
   const [sleeve, setSleeve] = useState<'source' | 'none' | 'short' | 'long'>('source');
@@ -83,7 +85,9 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
 
   return <main>
     <section className="character-input single-part-flow">
-      <h1>{partLabels[slot]} 생성</h1>
+      <h1>{partLabels[slot]}</h1>
+      <div className="character-workflow-switch" role="group" aria-label="파츠 입력 방식"><button aria-pressed={inputMode === 'generate' || !!pending} disabled={inputLocked} onClick={() => setInputMode('generate')}>이미지로 생성</button><button aria-pressed={inputMode === 'glb' && !pending} disabled={inputLocked} onClick={() => setInputMode('glb')}>GLB 등록</button></div>
+      {inputMode === 'glb' && !pending ? <GlbAssetLibrary key={slot} slot={slot} bases={bases} defaultBaseId={base?.id} onJob={result => { onBaseChange(result.base_job_id || result.id); onJob(result); void refreshJobs(); }} /> : <>
       {differentPending && <p className="generation-recovery">{partLabels[pending!.input.slot]} 요청 확인이 필요합니다. <button type="button" onClick={() => onSlotChange(pending!.input.slot as (typeof variantSlots)[number])}>해당 파츠 열기</button></p>}
       <label>기준 몸<select value={pending?.input.base_job_id || base?.id || ''} disabled={inputLocked} onChange={event => onBaseChange(event.target.value)}>
         <option value="" disabled>선택</option>
@@ -102,6 +106,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
       {(error || recovery.error) && <p role="alert">{error || recovery.error}</p>}
       <button className="character-create" disabled={busy || meshyUploading || differentPending || !!recovery.error || (!pending && (!base || native?.status !== 'review_required' || !native.version))} onClick={() => void submit()}>{busy ? '접수 중' : pending ? '기존 요청 복구' : `${partLabels[slot]} 하나 생성`}</button>
       <small>{pending && pending.input.view_mode !== 'front_side_back' ? '정면·측면 이미지 2장' : '정면·측면·후면 이미지 3장'} · 3D 1개</small>
+      </>}
       {job && <><label>결과 버전<select value={job.id} onChange={event => onJobChange(event.target.value)}>{versions.map(item => <option key={item.id} value={item.id}>{item.id === base?.id ? `${name(item)} · 기준 캐릭터` : `${name(item)} · ${item.requested_slots?.map(value => partLabels[value] || value).join(', ') || '파츠'}`}</option>)}</select></label><PartProgress job={job} busy={busy} retryImage={async (part, view, failureId) => { await factoryApi.retryImages(job.id, [{ slot: part, view, failure_id: failureId }]); await refreshJobs(); }} /></>}
     </section>
     <section className="character-result">{job ? <><ProductionProgress job={job} offline={false} /><StageRunner jobId={job.id} key={`stage-${job.id}`} onChange={() => void refreshJobs()} /><NativeAssembly key={job.id} jobId={job.id} simple flow={job.character_flow} /></> : <div className="character-empty">저장된 캐릭터 없음</div>}</section>

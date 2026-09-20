@@ -15,7 +15,8 @@ import { TextureExpressions } from './texture-expressions';
 import { disposeObjectResources } from './assets/gpu-resources';
 
 type Model = { gltf: GLTF; url: string; rigged: boolean; restorePose(): void };
-type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; studio?: boolean; card?: boolean; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
+export type CardView = 'front' | 'side' | 'back';
+type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; studio?: boolean; card?: boolean; cardView: CardView; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
 const worldMode = { type: 'character', controller: 'keyboard', control: 'thirdPerson' } as const;
 
 const release = (gltf: GLTF) => disposeObjectResources(gltf.scenes);
@@ -139,7 +140,7 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
   return <group ref={group}><primitive object={model.gltf.scene} dispose={null} /></group>;
 }
 
-function CardScene({ model, hidden, onReady, onError }: ViewProps) {
+function CardScene({ model, hidden, cardView, onReady, onError }: ViewProps) {
   const { camera, gl, invalidate, size: viewport } = useThree();
   const controls = useRef<OrbitControls | null>(null);
   const group = useRef<THREE.Group>(null!);
@@ -169,12 +170,15 @@ function CardScene({ model, hidden, onReady, onError }: ViewProps) {
     perspective.aspect = aspect;
     const verticalFov = THREE.MathUtils.degToRad(perspective.fov);
     const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
+    const depth = cardView === 'side' ? dimensions.x : dimensions.z;
+    const width = cardView === 'side' ? dimensions.z : dimensions.x;
     const distance = Math.max(
-      dimensions.z / 2 + dimensions.y / (2 * Math.tan(verticalFov / 2)),
-      dimensions.z / 2 + dimensions.x / (2 * Math.tan(horizontalFov / 2)),
+      depth / 2 + dimensions.y / (2 * Math.tan(verticalFov / 2)),
+      depth / 2 + width / (2 * Math.tan(horizontalFov / 2)),
       .25,
     ) * 1.18;
-    perspective.position.set(0, 0, distance);
+    if (cardView === 'side') perspective.position.set(distance, 0, 0);
+    else perspective.position.set(0, 0, cardView === 'back' ? -distance : distance);
     perspective.near = Math.max(distance / 100, .001);
     perspective.far = Math.max(distance * 20, dimensions.length() * 10, 10);
     perspective.lookAt(0, 0, 0);
@@ -198,7 +202,7 @@ function CardScene({ model, hidden, onReady, onError }: ViewProps) {
       orbit.dispose();
       controls.current = null;
     };
-  }, [camera, gl, invalidate, model, onError, onReady, viewport.height, viewport.width]);
+  }, [camera, cardView, gl, invalidate, model, onError, onReady, viewport.height, viewport.width]);
   useFrame(() => { if (controls.current?.update()) invalidate(); });
   return <group ref={group}><primitive object={model.gltf.scene} dispose={null} /></group>;
 }
@@ -285,6 +289,7 @@ export class ModelViewer {
   private model: Model | null = null;
   private retired: GLTF[] = [];
   private animation = -1;
+  private cardView: CardView = 'front';
   private editing = false;
   private editor: FaceEditor | null = null;
   private paintSettings: PaintSettings = { role: 'hair', radius: .04, erase: false };
@@ -371,7 +376,7 @@ export class ModelViewer {
   };
   private render() {
     if (!this.model || this.disposed || !this.root) return;
-    const store = this.root.render(<CharacterViewport model={this.model} animation={this.animation} hidden={this.hidden} editing={this.editing} studio={this.presentation === 'studio'} card={this.presentation === 'card'}
+    const store = this.root.render(<CharacterViewport model={this.model} animation={this.animation} hidden={this.hidden} editing={this.editing} studio={this.presentation === 'studio'} card={this.presentation === 'card'} cardView={this.cardView}
       onEditor={this.onEditor} onPaint={this.onPaint}
       onReady={this.onReady} onError={this.onError} onWorld={this.onWorld} />);
     store.getState().invalidate();
@@ -408,6 +413,7 @@ export class ModelViewer {
     return gltf.animations.map((clip, index) => ({ index, name: clip.name || `Animation ${index + 1}` }));
   }
   play(index: number) { this.animation = index; this.render(); }
+  setCardView(view: CardView) { if (this.presentation === 'card') { this.cardView = view; this.render(); } }
   async clearExpression() {
     this.expressions?.clear(); this.render();
     return !this.disposed;

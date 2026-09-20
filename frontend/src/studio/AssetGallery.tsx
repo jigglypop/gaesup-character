@@ -22,6 +22,7 @@ function categoryOf(slot: string) {
 
 type Props = {
   jobs: FactoryJob[];
+  loading?: boolean;
   catalog?: Catalog;
   nativeJobId?: string;
   nativeState?: NativePartsState;
@@ -31,7 +32,7 @@ type Props = {
   onRefresh: () => Promise<void>;
 };
 
-export function AssetGallery({ jobs, catalog, nativeJobId, nativeState, onOpen, onCompose, onCatalogChange, onRefresh }: Props) {
+export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState, onOpen, onCompose, onCatalogChange, onRefresh }: Props) {
   const [view, setView] = useState<'characters' | 'parts'>('characters');
   const [filter, setFilter] = useState<(typeof partCategories)[number][0]>('all');
   const [characterFilter, setCharacterFilter] = useState('all');
@@ -61,7 +62,7 @@ export function AssetGallery({ jobs, catalog, nativeJobId, nativeState, onOpen, 
         ? nativeState.artifacts.find(artifact => artifact.name === `${slot}.glb`) : undefined);
     if (!image && !generatedModel && !nativeModel && !job.parts?.some(part => part.slot === slot)) return [];
     const key = `${job.id}:${slot}`, metadata = catalog?.parts?.[key], label = partLabels[slot] || slot;
-    const name = metadata?.name || `${catalog?.items[job.id]?.name || job.character_name} · ${label}`;
+    const name = metadata?.name || catalog?.items[job.id]?.name || job.part_name || `${job.character_name} · ${label}`;
     return [{ key, job, rootId: characterKey(job), slot, category: categoryOf(slot), label, name,
       deleted: !!metadata?.deleted || jobDeleted(job), image, generatedModel, nativeModel }];
   }));
@@ -84,15 +85,14 @@ export function AssetGallery({ jobs, catalog, nativeJobId, nativeState, onOpen, 
     const preview = ['front.png', 'canonical-reference.png', 'reference.png', 'body-front.png']
       .map(name => root.artifacts.find(artifact => artifact.name === name)).find(Boolean)
       || parts.find(item => item.slot === 'body')?.image || parts[0]?.image;
-    const assembly = root.assembly_artifacts?.find(artifact => artifact.name === 'model.glb')
-      || (nativeJobId === root.id && nativeState?.status === 'review_required' && nativeState.version === root.assembly_version
+    const assembledVersion = versions.find(version => version.assembly_artifacts?.some(artifact => artifact.name === 'model.glb')) || root;
+    const assembly = assembledVersion.assembly_artifacts?.find(artifact => artifact.name === 'model.glb')
+      || (nativeJobId === assembledVersion.id && nativeState?.status === 'review_required' && nativeState.version === assembledVersion.assembly_version
         ? nativeState.artifacts.find(artifact => artifact.name === 'model.glb') : undefined);
-    const generated = root.artifacts.find(artifact => artifact.name === 'generated-body.glb')
-      || root.artifacts.find(artifact => /^generated-.+\.glb$/.test(artifact.name));
-    const generatedSlot = generated?.name.replace(/^generated-/, '').replace(/\.glb$/, '');
+    const generated = root.artifacts.find(artifact => artifact.name === 'generated-body.glb');
     const model = assembly ? { ...assembly, label: '조립 저장본' }
-      : generated ? { ...generated, label: `${partLabels[generatedSlot || ''] || '파츠'} 생성본 · 조립 전` } : undefined;
-    return [{ root, parts, versions, preview, assembly, model }];
+      : generated ? { ...generated, label: '기본몸 생성본 · 조립 전' } : undefined;
+    return [{ root, parts, versions, preview, assembly, assembledVersion, model }];
   });
 
   async function save(jobId: string, slot: string, changes: PartMetadata, revision = catalog?.revision) {
@@ -129,7 +129,7 @@ export function AssetGallery({ jobs, catalog, nativeJobId, nativeState, onOpen, 
     const { key, job, slot, label, name, image, generatedModel, nativeModel } = item;
     return <article className={`asset-gallery-card ${compact ? 'compact' : ''}`} key={key}>
       <AssetModelPreview model={nativeModel ? { ...nativeModel, label: slot === 'body' ? '기본몸 저장본' : '피팅 저장본' }
-        : generatedModel ? { ...generatedModel, label: '파츠 생성본 · 조립 전' } : undefined}
+        : generatedModel ? { ...generatedModel, label: job.input_kind === 'glb' ? '등록한 GLB 원본' : '파츠 생성본 · 조립 전' } : undefined}
         image={image} name={name} emptyLabel={image ? '3D 생성 전' : '아직 저장된 결과 없음'} />
       <AssetProductionStatus job={job} slot={slot} hasModel={!!(nativeModel || generatedModel)} hasAssembly={!!nativeModel} />
       <div className="asset-gallery-info"><strong title={name}>{name}</strong><span>{label} · {characterName(job)}</span><small>{new Date(job.created_at).toLocaleString()} · {job.id.slice(0, 8)}</small></div>
@@ -156,12 +156,12 @@ export function AssetGallery({ jobs, catalog, nativeJobId, nativeState, onOpen, 
     </div>
     {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
     {fitting && <PartFitting key={fitting.key} jobId={fitting.jobId} slot={fitting.slot} label={fitting.label} rawUrl={fitting.rawUrl} onClose={() => setFitting(undefined)} onPendingSlot={pendingSlot => openFitting(fitting.jobId, pendingSlot)} />}
-    {!catalog ? <p className="asset-gallery-empty">관리 목록 불러오는 중…</p> : view === 'characters' ? characterGroups.length ? <div className="asset-character-grid">{characterGroups.map(({ root, parts, versions, preview, assembly, model }) => <article className="asset-character-card" key={root.id}>
+    {(!catalog || loading) ? <p className="asset-gallery-empty">관리 목록 불러오는 중…</p> : view === 'characters' ? characterGroups.length ? <div className="asset-character-grid">{characterGroups.map(({ root, parts, versions, preview, assembly, assembledVersion, model }) => <article className="asset-character-card" key={root.id}>
       <AssetModelPreview model={model} image={preview} name={characterName(root)} emptyLabel="아직 저장된 결과 없음" />
-      <AssetProductionStatus job={root} hasModel={!!model} hasAssembly={!!assembly} />
-      <div className="asset-character-heading"><div><strong>{characterName(root)}</strong><small>{versions.length}개 버전 · {parts.length}개 파츠</small></div><button onClick={() => onOpen(root)}>캐릭터 열기</button></div>
-      <div className="asset-character-actions">{!trash && assembly && <button onClick={() => onCompose(root)}>조합·표정 편집</button>}{(!trash || characterDeleted(root)) && <button className={trash ? '' : 'asset-delete'} disabled={busy} onClick={() => void setVisibility(root, 'character', !trash)}>{trash ? '캐릭터 전체 복원' : '캐릭터 전체 삭제'}</button>}</div>
-      <div className="asset-character-versions">{versions.map(version => <div className="asset-character-version" key={version.id}><button onClick={() => onOpen(version)}>{version.base_job_id ? version.requested_slots?.map(slot => partLabels[slot] || slot).join(', ') || '파츠 조합' : '기본몸 조합'}<small>{new Date(version.created_at).toLocaleString()}</small></button>{!trash && version.assembly_version && <button onClick={() => onCompose(version)}>조합 편집·저장</button>}{!characterDeleted(version) && <button className={trash ? '' : 'asset-delete'} disabled={busy} onClick={() => void setVisibility(version, 'version', !trash)}>{trash ? '조합 복원' : '조합 삭제'}</button>}</div>)}</div>
+      <AssetProductionStatus job={assembly ? assembledVersion : root} hasModel={!!model} hasAssembly={!!assembly} />
+      <div className="asset-character-heading"><div><strong>{characterName(root)}</strong><small>{versions.length}개 버전 · {parts.length}개 파츠</small></div><button onClick={() => onOpen(assembly ? assembledVersion : root)}>캐릭터 열기</button></div>
+      <div className="asset-character-actions">{!trash && assembly && <button onClick={() => onCompose(assembledVersion)}>조합·표정 편집</button>}{(!trash || characterDeleted(root)) && <button className={trash ? '' : 'asset-delete'} disabled={busy} onClick={() => void setVisibility(root, 'character', !trash)}>{trash ? '캐릭터 전체 복원' : '캐릭터 전체 삭제'}</button>}</div>
+      <div className="asset-character-versions">{versions.map(version => <div className="asset-character-version" key={version.id}><button onClick={() => onOpen(version)}>{version.base_job_id ? version.requested_slots?.map(slot => partLabels[slot] || slot).join(', ') || '파츠 조합' : '기본몸 조합'}<small>{version.assembly_version ? `저장본 ${version.assembly_version.slice(0, 8)} · ` : ''}{new Date(version.created_at).toLocaleString()}</small></button>{!trash && version.assembly_version && <button onClick={() => onCompose(version)}>조합 편집·저장</button>}{!characterDeleted(version) && <button className={trash ? '' : 'asset-delete'} disabled={busy} onClick={() => void setVisibility(version, 'version', !trash)}>{trash ? '조합 복원' : '조합 삭제'}</button>}</div>)}</div>
       <details><summary>연결 파츠 · {parts.length}</summary><div className="asset-character-parts">{parts.map(item => assetCard(item, true))}</div></details>
     </article>)}</div> : <p className="asset-gallery-empty">{query ? '검색 결과가 없습니다.' : trash ? '삭제한 에셋이 없습니다.' : '저장된 캐릭터가 없습니다.'}</p>
       : filtered.length ? <><div className="asset-gallery-grid">{shown.map(item => assetCard(item))}</div>{visible < filtered.length && <button className="asset-gallery-more" onClick={() => setVisible(count => count + 24)}>더 보기 · {filtered.length-visible}개</button>}</>

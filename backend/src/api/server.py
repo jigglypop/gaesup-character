@@ -32,6 +32,7 @@ from src.api.avatar_part_batches import router as part_batch_router
 from src.api.avatar_standard import router as standard_router
 from src.api.avatar_blueprints import router as blueprint_router
 from src.api.studio import router as studio_router
+from src.api.studio_glb_assets import router as studio_glb_assets_router
 from src.services.character_pipeline import PipelineError
 from src.auth import is_public_path
 from src.runtime_identity import runtime_identity
@@ -53,6 +54,7 @@ app = FastAPI(
     version="1.0.0",
 )
 app.include_router(studio_router, prefix='/api')
+app.include_router(studio_glb_assets_router, prefix='/api')
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),

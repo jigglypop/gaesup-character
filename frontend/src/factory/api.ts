@@ -19,7 +19,7 @@ export type FactoryJob = {
   meshy_options?: Record<string, MeshyOptions>;
   id: string; character_id: string; character_name: string; source_sha256: string;
   status: string; created_at: string; error?: string; model_sha256?: string;
-  base_job_id?: string; base_version?: string; requested_slots?: string[];
+  base_job_id?: string; base_version?: string; requested_slots?: string[]; part_name?: string;
   base_body?: { body_type: 'male' | 'female'; import_mode?: 'register' | 'rig'; views?: Partial<Record<'front' | 'side' | 'back', string>>; rig_source?: { job_id: string; version: string } | null };
   assembly_version?: string | null;
   assembly_artifacts?: { name: string; url: string; sha256: string }[];
@@ -89,7 +89,7 @@ export type PendingNativePartsSelection = { key: string; input: { version: strin
 export const factoryApi = {
   nativeParts: (id: string, signal?: AbortSignal) => request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts`, { signal }),
   assemble: (id: string, canonicalPose = false) => request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts?canonical_pose=${canonicalPose}`, { method: 'POST' }),
-  nativeOutfit: (id: string, version: string) => request<NativeOutfit>(`/api/avatar-factory/jobs/${id}/native-outfits/${version}`),
+  nativeOutfit: (id: string, version: string, signal?: AbortSignal) => request<NativeOutfit>(`/api/avatar-factory/jobs/${id}/native-outfits/${version}`, { signal }),
   saveNativeOutfit: (id: string, version: string, input: Pick<NativeOutfit, 'body_sha256' | 'slots' | 'hair_color'>, revision: string, key: string) =>
     request<NativeOutfit>(`/api/avatar-factory/jobs/${id}/native-outfits/${version}`, { method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'If-Match': revision, 'Idempotency-Key': key }, body: JSON.stringify(input) }),
