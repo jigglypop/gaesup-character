@@ -27,6 +27,24 @@ EQUIPMENT = {
                 'description': 'one pair of glasses with complete rims, bridge and temples, no face or hair'},
 }
 NATIVE_EQUIPMENT = {'weapon': 'RightHand', 'tool': 'LeftHand', 'glasses': 'Head'}
+NATIVE_BODY_SLOTS = frozenset(('body', 'hair', 'head', 'hairBack', 'hairFront',
+                               'hat', 'top', 'bottom', 'shoes'))
+
+
+def is_native_part_set(slots):
+    slots = list(slots)
+    selected = set(slots)
+    if len(slots) != len(selected) or 'body' not in selected:
+        return False
+    if selected-set(NATIVE_EQUIPMENT)-NATIVE_BODY_SLOTS:
+        return False
+    # ``head`` is a legacy combined replacement. Likewise ``hair`` is the
+    # combined hairstyle and cannot be mixed with split front/back assets.
+    if 'head' in selected and selected & {'hair', 'hairBack', 'hairFront', 'hat'}:
+        return False
+    if 'hair' in selected and selected & {'hairBack', 'hairFront'}:
+        return False
+    return True
 
 
 def equipment_layer(slot, order):

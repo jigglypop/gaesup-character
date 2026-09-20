@@ -4,15 +4,16 @@ import bpy
 from mathutils import Vector
 
 from src.services.avatar_fit_geometry import bounds
-from src.services.avatar_standard_blender import blender_to_gltf
+from src.services.avatar_standard_blender import blender_to_gltf, gltf_to_blender
 from src.services.glb import parse_glb, build_glb
 
 
-def crop_regions(garments, rig, spec):
+def crop_regions(garments, rig, spec, coverage_profiles=None):
     settings = spec['fitting'].get('body_crop', {})
     inset = settings.get('opening_inset_m', .008)
     wrist_inset = settings.get('wrist_inset_m', .006)
     regions, lines = {}, []
+    coverage_profiles = coverage_profiles or {}
 
     def joint(name):
         bone = rig.data.bones.get(name)
@@ -21,19 +22,17 @@ def crop_regions(garments, rig, spec):
     def horizontal(name, height):
         lines.append((name, Vector((0, 0, height)), Vector((0, 0, 1))))
 
-    for slot in ('hair', 'head'):
-        if garments.get(slot):
-            regions[slot] = {'scalp': spec['body_height_m']*.90}
-            horizontal('scalp_under_'+slot, regions[slot]['scalp'])
     if garments.get('top'):
         lo, hi = bounds(garments['top'])
+        garment_coverage = coverage_profiles.get('top') or {}
         neck = joint('neck') or joint('Neck')
         shoulders = [p for p in (joint('LeftArm'), joint('RightArm')) if p is not None]
         collar = neck.z if neck is not None else spec['anchors']['neck'][1]
         if shoulders:
             collar = max(collar, sum(p.z for p in shoulders)/len(shoulders)
                          + (spec['anchors']['neck'][1]-spec['anchors']['shoulder_left'][1])*.5)
-        regions['top'] = {'hem': lo.z+inset, 'collar': min(hi.z-inset, collar), 'wrists': {}}
+        actual_hem = garment_coverage.get('hem_m', lo.z)
+        regions['top'] = {'hem': actual_hem+inset, 'collar': min(hi.z-inset, collar), 'wrists': {}}
         regions['top']['fabric_collar'] = hi.z-inset
         horizontal('top_hem', regions['top']['hem'])
         horizontal('collar', regions['top']['collar'])
@@ -42,12 +41,16 @@ def crop_regions(garments, rig, spec):
             wrist, elbow = joint(side+'Hand'), joint(side+'ForeArm')
             if wrist is not None and elbow is not None and (elbow-wrist).length > 1e-6:
                 inward = (elbow-wrist).normalized()
-                cut = wrist+inward*wrist_inset
+                reported = garment_coverage.get(f'cuff_{side.lower()}_m')
+                opening = gltf_to_blender(reported) if reported is not None else wrist
+                cut = opening+inward*wrist_inset
                 regions['top']['wrists'][side] = (cut, inward, elbow.x)
                 lines.append((side.lower()+'_cuff', cut, inward))
     if garments.get('bottom'):
         lo, hi = bounds(garments['bottom'])
-        regions['bottom'] = {'waist': hi.z-inset, 'hem': lo.z+inset, 'ankles': {}}
+        garment_coverage = coverage_profiles.get('bottom') or {}
+        actual_hem = garment_coverage.get('hem_m', lo.z)
+        regions['bottom'] = {'waist': hi.z-inset, 'hem': actual_hem+inset, 'ankles': {}}
         horizontal('waist', regions['bottom']['waist'])
         horizontal('bottom_hem', regions['bottom']['hem'])
         for side in ('Left', 'Right'):
@@ -88,10 +91,6 @@ def cropped_slots(point, bone, regions, *, is_fabric=False):
     # These are anatomical cut regions, independent of the garment's ray hits
     # or width. A protruding blue shoulder must be cropped as well.
     slots = set()
-    for slot in ('hair', 'head'):
-        region = regions.get(slot)
-        if region and point.z >= region['scalp']:
-            slots.add(slot)
     if not is_fabric and any(name in bone for name in ('head', 'neck')):
         return slots
     hand = any(name in bone for name in ('hand', 'finger', 'thumb', 'index', 'middle', 'ring', 'pinky'))
@@ -103,8 +102,11 @@ def cropped_slots(point, bone, regions, *, is_fabric=False):
     if top and not foot and top['hem'] <= point.z <= top['fabric_collar' if is_fabric else 'collar']:
         inside_cuff = True
         for side, (cut, inward, elbow_x) in top['wrists'].items():
-            lateral = point.x > elbow_x if side == 'Left' else point.x < elbow_x
-            if lateral and (point-cut).dot(inward) < 0:
+            # Apply the actual cuff plane to the whole matching arm chain.
+            # Comparing against the elbow coordinate leaves a short-sleeve gap:
+            # upper-arm faces beyond an inboard cuff otherwise remain hidden.
+            matching_arm = arm and side.lower() in bone
+            if matching_arm and (point-cut).dot(inward) < 0:
                 inside_cuff = False
         if inside_cuff:
             slots.add('top')
@@ -119,11 +121,18 @@ def cropped_slots(point, bone, regions, *, is_fabric=False):
     return slots
 
 
-def mark_body_coverage(body, garments, rig, spec):
+def mark_body_coverage(body, garments, rig, spec, coverage_profiles=None):
     from src.services.avatar_head_geometry import underlayer_faces
-    regions, lines = crop_regions(garments, rig, spec)
+    regions, lines = crop_regions(garments, rig, spec, coverage_profiles)
     materials, face_counts = [], {}
     for obj in body:
+        # A frozen body can be assembled repeatedly from a previously exported
+        # body.glb. Coverage metadata belongs to the current outfit only; carrying
+        # it forward hides skin for parts that are no longer present and creates
+        # names such as ``*_under_hair_under_hair`` on every pass.
+        for material in obj.data.materials:
+            if material is not None and 'hidden_by_slots' in material:
+                del material['hidden_by_slots']
         split_crop_lines(obj, lines)
         fabric = underlayer_faces([obj]).get(obj, set())
         if not obj.data.materials:
@@ -150,7 +159,8 @@ def mark_body_coverage(body, garments, rig, spec):
                     original.use_nodes = True
                     obj.data.materials[polygon.material_index] = original
                 material = original.copy()
-                material.name = f'{original.name}_under_{"_".join(slots)}'
+                base_name = original.name.split('_under_', 1)[0]
+                material.name = f'{base_name}_under_{"_".join(slots)}'
                 material['hidden_by_slots'] = '+'.join(slots)
                 obj.data.materials.append(material)
                 variants[key] = len(obj.data.materials)-1

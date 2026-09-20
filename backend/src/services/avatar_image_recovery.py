@@ -32,8 +32,11 @@ def has_dependents(state, part, view):
     model = part.get('model', {})
     if model.get('task_id') or model.get('status', 'pending') != 'pending':
         return True
-    if view == 'front' and part['views'].get('side', {}).get('status', 'pending') != 'pending':
-        return True
+    generated = state.get('production_spec', {}).get('generated_views', list(part['views']))
+    if view in generated:
+        later = generated[generated.index(view)+1:]
+        if any(part['views'].get(next_view, {}).get('status', 'pending') != 'pending' for next_view in later):
+            return True
     # All parts reference the common body. Other parts do not reference each other.
     return part['slot'] == 'body' and any(
         image['status'] != 'pending' for other in state['parts'] if other['slot'] != 'body'
@@ -70,9 +73,10 @@ def decorate_job(directory, public):
                 failure.setdefault('message', '생성 서버 연결 끊김 · 수신된 응답 없음')
             part['image_status'] = image['status']
             part['image_failure'] = deepcopy(failure)
-            label = {'body': '몸', 'hair': '머리카락', 'head': '기존 머리 파츠', 'hairBack': '뒷머리', 'hairFront': '앞머리', 'hat': '모자', 'top': '상의', 'bottom': '하의', 'shoes': '신발'}.get(part['slot'], part['slot'])
+            label = {'body': '몸', 'hair': '머리카락', 'head': '기존 머리 파츠', 'hairBack': '뒷머리', 'hairFront': '앞머리', 'hat': '머리 장식', 'top': '상의', 'bottom': '하의', 'shoes': '신발'}.get(part['slot'], part['slot'])
             if failure.get('message'):
-                failure_message = f'{label} {"정면" if view == "front" else "측면"}: {failure["message"]}'
+                view_label = {'front': '정면', 'side': '측면', 'back': '후면'}.get(view, view)
+                failure_message = f'{label} {view_label}: {failure["message"]}'
                 failure_count += 1
             if paused and failure.get('id') and (image['status'] == 'qc_failed' or not receipt.with_suffix('.response.json').is_file()):
                 from src.services.avatar_production_spec import can_reuse_image

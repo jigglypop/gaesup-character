@@ -4,7 +4,6 @@ import json
 import math
 import os
 import re
-from pathlib import Path
 
 import httpx
 from PIL import Image, ImageOps

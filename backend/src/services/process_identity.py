@@ -31,6 +31,8 @@ def state(value: dict | None) -> str:
 @contextmanager
 def lease_guard(directory: Path):
     """A short OS lock serializes lease changes and is released on process exit."""
+    # StoredPath may represent S3 assets, but OS byte locks require a local file.
+    directory = Path(directory)
     path = directory.with_name(directory.name + ".lock.guard")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:

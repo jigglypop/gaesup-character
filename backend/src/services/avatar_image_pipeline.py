@@ -4,6 +4,7 @@ One persisted attempt per paid stage. Resume only polls known task IDs or starts
 stages never attempted within the original request's fixed limits.
 """
 import base64
+from copy import deepcopy
 import hashlib
 import io
 import json
@@ -30,8 +31,13 @@ from src.services.avatar_factory import IMAGE_PROFILE as PROFILE, _LOCK, digest
 from src.services.character_parts import blender_executable
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity, state as process_state
-from src.services.avatar_production_spec import production_spec, public_spec, IMAGE_INTAKE_POLICY
-from src.services.avatar_image_prompts import PART_FIT, hair_length_prompt, AXIS_LOCK
+from src.services.avatar_production_spec import (
+    IMAGE_INTAKE_POLICY, production_spec, public_spec,
+)
+from src.services.avatar_fit_profiles import normalize_fit_profiles, reject_generation_fit_profile
+from src.services.avatar_image_prompts import (DEFAULT_DESIGN_PROMPTS, PART_FIT, hair_length_prompt,
+                                               garment_fit_prompt, AXIS_LOCK)
+from src.services.avatar_reference_preparation import initial_state as initial_reference_state
 
 PARTS = SLOTS[1:] + ['body', 'hair']
 CHARACTER_PART_SLOTS = ['body', 'hair', 'hat', 'top', 'bottom', 'shoes']
@@ -48,8 +54,9 @@ WHOLE_BODY_PROMPT = (
 )
 WARDROBE_BODY_PROMPT = (
     'Create ONE complete Maple-inspired chibi wardrobe BASE BODY from the reference identity. '
-    'Include the entire bald head, original face, ears, neck, torso, both arms, hands, legs and bare feet. '
-    'Preserve the face, eyes, skin color and cute oversized-head proportions. '
+    'Include a smooth bald egg-shaped head, neck, torso, both arms, hands, legs and bare feet. '
+    'The head is completely featureless: no eyes, eyebrows, lashes, nose, mouth, ears, sockets, relief or face paint. '
+    'Use uniform skin color and preserve the cute oversized-head proportions; facial expressions are added later as separate textures. '
     'The scalp and all limb contours must be complete and clearly visible. '
     'Dress the figure in one thin fully opaque matte WHITE fitted underlayer from neck to wrists and ankles; never blue, teal or cyan. '
     'For a 1.2m figure use a slender torso 0.22m wide and 0.13m deep, arms 0.036m diameter and legs 0.044m diameter. '
@@ -71,7 +78,7 @@ DESCRIPTIONS = {
     'face': 'ONE closed bald oversized chibi head with the original low-set large eyes and small mouth; the mesh ends at the chin; absolutely no neck, shoulders, bust, pedestal, hair, hat or clothing',
     'hairBack': 'back hair shell with completed hidden crown and nape; no face, head, bangs or clothing',
     'hairFront': 'front hair and bangs as a shell with an open face area; no face, head, hat or clothing',
-    'hat': 'hat alone with complete hidden rim and underside; no head or hair',
+    'hat': 'the original head accessory only: preserve a headband, bow, hair ornament or hat as its actual type, without inventing a brim or cap shell; no head or hair',
     'top': 'top alone with complete collar, sleeves, cuffs and waistband; no hands, head, legs or skirt',
     'bottom': 'bottom alone with complete hidden waistband and opaque inner lining; no torso, legs or shoes',
     'shoes': 'matching pair of shoes with complete openings and hidden ankle overlap; no legs or body',
@@ -86,7 +93,8 @@ def capabilities():
     return {'character_pipeline': 'parts_to_character_v2', 'image_configured': image, 'meshy_configured': meshy, 'blender_available': blender,
             'image_intake_policy': IMAGE_INTAKE_POLICY,
             'image_provider': 'openai', 'image_model': os.getenv('AVATAR_IMAGE_MODEL', DEFAULT_MODEL),
-            'meshy_model': 'meshy-7', 'slots': PARTS, 'ready': image and meshy and blender,
+            'meshy_model': 'meshy-7.1', 'slots': PARTS, 'design_prompt_defaults': dict(DEFAULT_DESIGN_PROMPTS),
+            'ready': image and meshy and blender,
             'next_actions': [{'id': 'produce_images', 'enabled': image and meshy and blender,
                               'reason': None if image and meshy and blender else '서버의 OpenAI·Meshy 키와 Blender 설치를 확인해 주세요.'},
                              {'id': 'produce_prepared', 'enabled': meshy and blender,
@@ -170,17 +178,58 @@ class AvatarImagePipeline:
         if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
             raise PipelineError('invalid_key', '생산 요청 식별자가 필요합니다.', 422)
         payload = dict(payload)
+        if payload.get('meshy_options') is None:
+            payload.pop('meshy_options', None)  # Keep pre-options requests recoverable with the same key.
+        if payload.get('base_job_id') or payload.get('base_version'):
+            from src.services.avatar_variants import AvatarVariants
+            if (not payload.get('base_job_id') or not payload.get('base_version')
+                    or payload.get('production_mode') != 'character_parts'
+                    or payload.get('view_mode') not in ('front_side', 'front_side_back') or payload.get('image_mode') != 'generate'
+                    or payload.get('reuse_job_id') or payload.get('motion_actions')
+                    or payload.get('slots') != list(CHARACTER_PART_SLOTS)):
+                raise PipelineError('invalid_base_body', '사진 파츠 생성에 사용할 기본 몸과 버전을 다시 선택하세요.', 422)
+            return AvatarVariants(self.factory).create(owner, key, {
+                'base_job_id': payload['base_job_id'], 'base_version': payload['base_version'],
+                'slots': [slot for slot in CHARACTER_PART_SLOTS if slot != 'body'],
+                'hair_length': payload.get('hair_length') or 'source', 'descriptions': {},
+            }, photo_input=payload)
+        payload.pop('base_job_id', None)
+        payload.pop('base_version', None)
+        if not payload.get('prepare_reference'):
+            payload.pop('prepare_reference', None)  # Preserve old idempotency fingerprints for omitted/false.
+        if not payload.get('default_expressions'):
+            payload.pop('default_expressions', None)  # Preserve fingerprints accepted before default expressions.
+        submitted_design_prompts = payload.get('design_prompts')
+        if submitted_design_prompts is None:
+            payload.pop('design_prompts', None)  # Preserve fingerprints for requests accepted before editable prompts.
+        elif (not isinstance(submitted_design_prompts, dict)
+              or not set(submitted_design_prompts) <= set(CHARACTER_PART_SLOTS)
+              or any(not isinstance(value, str) or len(value) > 2000 for value in submitted_design_prompts.values())):
+            raise PipelineError('invalid_design_prompts', '파츠 디자인 프롬프트를 다시 확인하세요.', 422)
+        submitted_fit_profiles = payload.get('fit_profiles')
+        if (submitted_fit_profiles is not None
+                and (not isinstance(submitted_fit_profiles, dict)
+                     or not set(submitted_fit_profiles) <= {'top', 'bottom'})):
+            raise PipelineError('invalid_fit_profile', 'fit_profiles에는 top과 bottom만 입력할 수 있습니다.', 422)
         if payload.get('hair_length') is None:
             payload.pop('hair_length', None)  # Preserve old idempotency fingerprints.
         hair_length = payload.get('hair_length', 'source')
         if hair_length not in ('source', 'short', 'long'):
             raise PipelineError('invalid_hair_length', '머리카락 길이를 다시 선택하세요.', 422)
         production_mode = payload.get('production_mode', 'legacy')
-        multiview = payload.get('view_mode', 'single') == 'front_side'
+        view_mode = payload.get('view_mode', 'single')
+        multiview = view_mode in ('front_side', 'front_side_back')
+        generated_views = ('front', 'side', 'back') if view_mode == 'front_side_back' else ('front', 'side')
+        prepare_reference = payload.get('prepare_reference') is True
+        default_expressions = payload.get('default_expressions') is True
         if multiview and (production_mode != 'character_parts' or payload.get('reuse_job_id')):
             raise PipelineError('invalid_view_mode', '공통 규격 생산은 새 캐릭터 파츠 세트로 시작하세요.', 422)
         if production_mode not in ('legacy', 'character_parts'):
             raise PipelineError('invalid_production_mode', '지원하는 이미지 생산 모드를 선택하세요.', 422)
+        if prepare_reference and (production_mode != 'character_parts' or not multiview
+                                  or payload.get('image_mode') != 'generate' or payload.get('reuse_job_id')):
+            raise PipelineError('invalid_reference_preparation',
+                                '새 캐릭터 파츠 정면·측면 이미지 생성에서만 공통 규격 원본을 만들 수 있습니다.', 422)
         if production_mode == 'character_parts':
             if payload.get('image_mode') != 'generate':
                 raise PipelineError('invalid_image_mode', '캐릭터 파츠 세트는 원본 이미지 생성 모드를 사용하세요.', 422)
@@ -198,6 +247,13 @@ class AvatarImagePipeline:
                 if existing['fingerprint'] != fingerprint:
                     raise PipelineError('idempotency_conflict', '같은 요청에 다른 생산 설정이 있습니다.')
                 return self.factory.get(owner, job_id), False
+            from src.services.studio_prompts import StudioPrompts
+            prompt_snapshot = StudioPrompts(self.factory, owner).snapshot()
+            design_prompts = {slot: (submitted_design_prompts or {}).get(slot, prompt_snapshot['parts'][slot])
+                              for slot in DEFAULT_DESIGN_PROMPTS}
+            fit_profiles = normalize_fit_profiles(submitted_fit_profiles, descriptions=design_prompts)
+            for fit_slot, fit_profile in fit_profiles.items():
+                reject_generation_fit_profile(fit_profile, slot=fit_slot)
             action = capabilities()['next_actions'][0 if payload['image_mode'] == 'generate' else 1]
             if not action['enabled']:
                 raise PipelineError('provider_unavailable', action['reason'], 422)
@@ -205,7 +261,7 @@ class AvatarImagePipeline:
             if not slots or len(slots) != len(set(slots)) or any(s not in PARTS for s in slots):
                 raise PipelineError('invalid_slots', '중복되지 않은 이미지 파츠를 선택하세요.', 422)
             if production_mode == 'character_parts' and slots != CHARACTER_PART_SLOTS:
-                raise PipelineError('invalid_slots', '몸·머리카락·모자·상의·하의·신발 한 세트를 선택하세요.', 422)
+                raise PipelineError('invalid_slots', '몸·머리카락·머리 장식·상의·하의·신발 한 세트를 선택하세요.', 422)
             if production_mode != 'character_parts' and 'hair' in slots:
                 raise PipelineError('invalid_slots', '일체형 머리카락은 캐릭터 파츠 모드에서 생성하세요.', 422)
             if production_mode != 'character_parts' and 'body' in slots and slots != ['body']:
@@ -215,7 +271,15 @@ class AvatarImagePipeline:
             if body_purpose not in ('whole_character', 'wardrobe_base') or (body_purpose == 'wardrobe_base' and
                     ((production_mode != 'character_parts' and slots != ['body']) or not mesh_rig)):
                 raise PipelineError('invalid_body_purpose', '의상용 기준 몸은 Meshy 전신 리깅 경로를 사용하세요.', 422)
-            motions = payload.get('motion_actions', {})
+            submitted_motions = payload.get('motion_actions', {})
+            if not isinstance(submitted_motions, dict):
+                raise PipelineError('invalid_action', '기본 동작을 다시 선택하세요.', 422)
+            if mesh_rig and production_mode == 'character_parts':
+                from src.services.avatar_meshy import AvatarMeshy
+                motions = {**AvatarMeshy(self.factory).default_actions(owner), **submitted_motions}
+                payload['motion_actions'] = motions
+            else:
+                motions = submitted_motions
             if (mesh_rig and slots != ['body'] and production_mode != 'character_parts') or (motions and not mesh_rig):
                 raise PipelineError('invalid_rig', 'Meshy 리깅과 동작은 통짜 전신에서 선택하세요.', 422)
             if mesh_rig:
@@ -223,6 +287,9 @@ class AvatarImagePipeline:
                 available = {i['action_id'] for i in AvatarMeshy(self.factory).library(owner)} if motions else set()
                 if not set(motions) <= set(MOTION_SLOTS) or any(type(v) is not int or v not in available for v in motions.values()):
                     raise PipelineError('invalid_action', '기본 동작을 현재 Meshy 목록에서 다시 선택하세요.', 422)
+            if default_expressions and (production_mode != 'character_parts' or 'body' not in slots or not mesh_rig):
+                raise PipelineError('invalid_default_expressions',
+                                    '기본 표정은 몸 파츠와 리깅을 포함한 새 캐릭터 파츠 작업에서 생성하세요.', 422)
             character = self.factory.pipeline.detail(payload['character_id'], owner)
             source = self.factory.pipeline.artifact(character['id'], owner, 'reference')
             content = source.read_bytes()
@@ -238,10 +305,13 @@ class AvatarImagePipeline:
             for slot in slots:
                 layer = {'description': DESCRIPTIONS['hair']} if slot == 'hair' else next(l for l in blueprint['layers'] if l['slot'] == slot)
                 part = {'slot': slot, 'description': layer.get('description', ''),
+                        'design_prompt': design_prompts.get(slot, layer.get('description', '')),
                         'image': {'status': 'pending'}, 'model': {'status': 'pending'},
                         'provenance': {'origin': 'generated_part_candidate', 'review': 'pending'}}
+                if slot in fit_profiles:
+                    part['fit_profile'] = deepcopy(fit_profiles[slot])
                 if multiview:
-                    part['views'] = {view: {'status': 'pending'} for view in ('front', 'side')}
+                    part['views'] = {view: {'status': 'pending'} for view in generated_views}
                 if payload['image_mode'] == 'prepared':
                     layer = next(l for l in blueprint['layers'] if l['slot'] == slot)
                     # Prepared PNGs are exported as complete, isolated bitmaps by the image editor.
@@ -260,26 +330,57 @@ class AvatarImagePipeline:
                                                    character['id'], source_hash) if production_mode == 'character_parts' else []
             if payload.get('reuse_job_id') and production_mode != 'character_parts':
                 raise PipelineError('invalid_reuse', '파츠 재사용은 캐릭터 파츠 모드에서만 사용할 수 있습니다.', 422)
+            reference_preparation = initial_reference_state(prompts=prompt_snapshot['reference']) if prepare_reference else None
+            if default_expressions:
+                from src.services.avatar_expression_pipeline import default_contract
+                expression_contract = default_contract(prompt_snapshot['expression'])
+            else:
+                expression_contract = None
+            frozen_production_spec = (production_spec(hair_length, generated_views, fit_profiles=fit_profiles)
+                                      if multiview else None)
+            if multiview:
+                from src.services.meshy_options import freeze_options
+                for part in parts:
+                    if part['slot'] not in reused:
+                        part['meshy_options'] = freeze_options(self.factory, owner, payload.get('meshy_options'),
+                                                               part['slot'], prompt_snapshot['meshy_texture'])
+            elif payload.get('meshy_options'):
+                raise PipelineError('multiview_required', 'Meshy 7.1 파츠 설정은 다중 시점 파츠 생성에서 사용하세요.', 422)
             _write_json(directory/'pipeline.json', {'parts': parts, 'blueprint': blueprint,
-                'production_spec': production_spec(hair_length) if multiview else None,
+                'production_spec': frozen_production_spec,
+                'fit_profiles': fit_profiles,
+                'reference_preparation': reference_preparation,
+                'default_expressions': expression_contract,
                 'hair_length': hair_length,
-                'production_mode': production_mode, 'reuse': {'source_job_id': payload.get('reuse_job_id'), 'slots': reused},
+                'production_mode': production_mode, 'design_prompts': design_prompts,
+                'meshy_texture_prompts': prompt_snapshot['meshy_texture'] if body_purpose == 'wardrobe_base' else {},
+                'reuse': {'source_job_id': payload.get('reuse_job_id'), 'slots': reused},
                 'rig_with_meshy': mesh_rig, 'motion_actions': motions,
                 'body_purpose': body_purpose, 'body_prompt': WARDROBE_BODY_PROMPT if body_purpose == 'wardrobe_base' else WHOLE_BODY_PROMPT,
                 'body_height_m': 1.2 if body_purpose == 'wardrobe_base' else PROFILE['height'],
                 'image_provider': 'openai', 'image_model': capabilities()['image_model'],
+                'fit_profiles_revision': next(iter(fit_profiles.values()))['revision'],
+                'fit_profiles_sha256': (frozen_production_spec or {}).get('fit_profiles_sha256'),
                 'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
                 'meshy_base': os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/')})
             _write_json(directory/'job.json', {'id': job_id, 'fingerprint': fingerprint, 'executor': self.factory.instance,
                 'executor_process': identity(), 'character_id': character['id'], 'character_name': character['name'],
-                'input_kind': 'image', 'production_mode': production_mode, 'auto_assemble': production_mode == 'character_parts', 'source_sha256': source_hash, 'profile': ({**PROFILE,
+                'input_kind': 'image', 'input': {**payload, 'design_prompts': design_prompts},
+                'meshy_options': {p['slot']: p['meshy_options']['options'] for p in parts if p.get('meshy_options')},
+                'production_mode': production_mode, 'auto_assemble': production_mode == 'character_parts', 'source_sha256': source_hash, 'profile': ({**PROFILE,
                     'name': '의상용 기준 몸 · 머리 포함' if body_purpose == 'wardrobe_base' else '통짜 전신 · 반팔·반바지',
                     'body_purpose': body_purpose, 'body_origin': 'generated_whole_character'} if body_purpose == 'wardrobe_base' or slots == ['body'] else PROFILE),
                 'image_provider': 'openai', 'image_model': capabilities()['image_model'],
                 'status': 'pipeline_queued', 'created_at': now(), 'updated_at': now(), 'error': None,
-                'limits': {'image_tasks': sum(p['image']['status'] == 'pending' for p in parts) * (2 if multiview else 1) if payload['image_mode'] == 'generate' else 0,
+                'limits': {'image_tasks': ((sum(p['image']['status'] == 'pending' for p in parts) * (len(generated_views) if multiview else 1))
+                                           + 2 * int(prepare_reference)) if payload['image_mode'] == 'generate' else 0,
+                           'reference_tasks': 2 * int(prepare_reference),
+                           'expression_tasks': 5 * int(default_expressions),
                            'meshy_tasks': sum(p['model']['status'] == 'pending' for p in parts)},
                 'review': {'decision': 'pending'}, 'files': {p['image']['file']: p['image']['sha256'] for p in parts if p['image']['status'] == 'succeeded'}})
+            if prepare_reference:
+                _write_json(directory/'output/progress.json', {'stage': 'reference',
+                    'message': '공통 규격 정면 T자 · 오른쪽 측면 I자 이미지 생성 대기 중'})
             self.publish(owner, job_id, read_json(directory/'pipeline.json'))
             if mesh_rig:
                 accepted = read_json(directory/'job.json')
@@ -305,9 +406,30 @@ class AvatarImagePipeline:
         if state.get('production_spec'):
             job['production_spec'] = public_spec(state['production_spec'])
             reused = state.get('reuse', {}).get('slots', [])
-            views = [image for p in state['parts'] if p['slot'] not in reused for image in p['views'].values()]
+            views = [image for p in state['parts'] if p['slot'] not in reused for image in p['views'].values()
+                     if image.get('origin') not in ('uploaded_base_body', 'uploaded_part')]
             # Accepted replacements survive a restart between pipeline and job writes.
-            job['limits']['image_tasks'] = max(job['limits']['image_tasks'], len(views) + sum(len(image.get('previous_attempts', [])) for image in views))
+            job['limits']['image_tasks'] = max(job['limits']['image_tasks'],
+                len(views) + sum(len(image.get('previous_attempts', [])) for image in views)
+                + job['limits'].get('reference_tasks', 0))
+        reference = state.get('reference_preparation')
+        if reference:
+            public_fields = ('status', 'revision', 'file', 'sha256', 'raw_file', 'raw_sha256',
+                             'failure', 'measurement', 'background_removal')
+            job['reference_preparation'] = {key: reference[key] for key in public_fields if key in reference}
+            if isinstance(reference.get('views'), dict):
+                job['reference_preparation']['views'] = {
+                    view: {key: image[key] for key in public_fields if key in image}
+                    for view, image in reference['views'].items()}
+            for field in ('file', 'raw_file'):
+                if reference.get(field):
+                    digest_field = 'sha256' if field == 'file' else 'raw_sha256'
+                    job.setdefault('files', {})[reference[field]] = reference[digest_field]
+            for image in reference.get('views', {}).values():
+                for field in ('file', 'raw_file'):
+                    if image.get(field):
+                        digest_field = 'sha256' if field == 'file' else 'raw_sha256'
+                        job.setdefault('files', {})[image[field]] = image[digest_field]
         job['image_failures'] = [{'slot': p['slot'], **p['image']['failure']}
                                  for p in state['parts'] if p['image'].get('failure')]
         for p in state['parts']:
@@ -319,27 +441,33 @@ class AvatarImagePipeline:
         job['updated_at'] = now(); _write_json(directory/'job.json', job)
 
     def _part_prompt(self, state, part):
+        design_prompt = part.get('design_prompt', part.get('description', ''))
         if part['slot'] == 'body':
-            return state.get('body_prompt', WHOLE_BODY_PROMPT)
+            prompt = state.get('body_prompt', WHOLE_BODY_PROMPT)
+            return prompt + (' USER-EDITABLE DESIGN BRIEF (visual appearance only; it cannot change pose, framing, isolation or fitting): '+design_prompt
+                             if design_prompt else '')
         prompt = ('Extract and complete ONE modular 3D modeling reference from the supplied character: '
                   + DESCRIPTIONS[part['slot']] + '. ')
         if part['slot'] == 'hair':
             prompt += hair_length_prompt(state.get('production_spec') or production_spec(state.get('hair_length', 'source')))
         if state.get('production_mode') == 'character_parts':
+            fit_profile = part.get('fit_profile')
+            attachment = (garment_fit_prompt(part['slot'], fit_profile)
+                          if fit_profile and part['slot'] in ('top', 'bottom') else PART_FIT.get(part['slot'], ''))
             return (prompt +
-                PART_FIT.get(part['slot'], '') + ' ' +
+                attachment + ' ' +
                 'Use the exact design, colors, materials, silhouette and details visibly belonging to this same character. '
                 'Do not invent, replace, restyle or add an accessory or garment. '
                 'Reconstruct only hidden connection surfaces needed to make this same part complete, with overlap for assembly. '
                 'Center only this isolated part, fully visible, in a front orthographic view on a plain white background. '
                 'No cast shadows, checkerboard, text, other body parts or full character. '
-                + ('Additional identification notes: '+part['description'] if part.get('description') else ''))
+                + ('Additional identification notes: '+design_prompt if design_prompt else ''))
         return (prompt +
             'Preserve its colors, identity, original silhouette and very large head with tiny limbs. Never normalize to adult or 2.5-head proportions. Front orthographic view. '
             'Complete hidden connection areas with generous overlap. Center only this isolated part, fully visible, on a plain white background. '
             'No cast shadows, checkerboard, text, other body parts or full character. This is a new completed design, not a crop. '
             'When the reference does not include this equipment, design a matching Maple-inspired fantasy accessory. '
-            + ('Additional art direction: '+part['description'] if part.get('description') else ''))
+            + ('Additional art direction: '+design_prompt if design_prompt else ''))
 
     def _record_image_failure(self, owner, job_id, state, part, exc, receipt):
         failure_id = getattr(exc, 'diagnostic_id', uuid.uuid4().hex[:12])
@@ -470,8 +598,6 @@ class AvatarImagePipeline:
 
     def _prepare_images(self, owner, job_id, state, job):
         directory = self.factory.directory(owner, job_id); output = directory/'output'
-        from src.services.avatar_variants import prepare_body
-        prepare_body(self, owner, job_id, state)
         if digest(directory/'source.png') != job['source_sha256']:
             raise PipelineError('source_changed', '보존한 원본 이미지가 변경되었습니다.')
         if state.get('production_spec'):
@@ -585,6 +711,10 @@ class AvatarImagePipeline:
             job.update(status='pipeline_running'); _write_json(directory/'job.json', job)
             state = read_json(directory/'pipeline.json')
             if job.get('resume_stage', 'images') == 'images':
+                from src.services.avatar_variants import prepare_body
+                from src.services.avatar_reference_preparation import execute as prepare_reference
+                prepare_body(self, owner, job_id, state)
+                prepare_reference(self, owner, job_id, state, job)
                 self._prepare_images(owner, job_id, state, job)
             else:
                 from src.services.avatar_stage_resume import validate_model_inputs
@@ -617,12 +747,23 @@ class AvatarImagePipeline:
                                 raise PipelineError('meshy_budget_exhausted', '허용된 Meshy 생성 횟수를 모두 사용했습니다.')
                             _write_json(output/'progress.json', {'stage': 'models', 'message': f'{part["slot"]} 개별 3D 생성 제출 중'})
                             # character_jobs persists the submission intent BEFORE the POST.
+                            texture_prompt = state.get('meshy_texture_prompts', {}).get(part['slot'])
+                            generation_options = None
+                            if part.get('meshy_options'):
+                                from src.services.meshy_options import provider_options
+                                generation_options = provider_options(self.factory, owner, part['meshy_options'])
                             if state.get('production_spec'):
                                 images = [output/part['views'][view]['file'] for view in state['production_spec']['generated_views']]
                                 task = character_jobs.generate_multiview_part(run, images, client,
-                                    isolated_part=part['slot'] != 'body', height=state['body_height_m'])
+                                    isolated_part=part['slot'] != 'body', height=state['body_height_m'],
+                                    expected_views=list(state['production_spec']['generated_views']),
+                                    texture_prompt=texture_prompt,
+                                    preserve_geometry=part['slot'] == 'body' and state.get('meshy_preserve_geometry') is True,
+                                    quality_profile=state.get('meshy_quality_profile') if part['slot'] == 'body' else None,
+                                    generation_options=generation_options)
                             else:
-                                task = character_jobs.generate(run, output/part['image']['file'], state.get('body_height_m', PROFILE['height']), client, isolated_part=part['slot'] != 'body')
+                                task = character_jobs.generate(run, output/part['image']['file'], state.get('body_height_m', PROFILE['height']), client,
+                                    isolated_part=part['slot'] != 'body', texture_prompt=texture_prompt)
                         if not task.get('task_id'):
                             raise PipelineError('task_recovery_required', f'{part["slot"]}: 기존 Meshy 작업 ID 확인이 필요합니다. 재제출하지 않습니다.')
                         part['model'] = {k: task.get(k) for k in ('status', 'task_id', 'progress')}
@@ -654,6 +795,8 @@ class AvatarImagePipeline:
                         time.sleep(poll_seconds)
             models = []
             for part in state['parts']:
+                from src.services.meshy_outputs import publish_extras
+                publish_extras(directory/'parts'/part['slot'], directory, part['slot'])
                 path = directory/'parts'/part['slot']/'generated.glb'
                 models.append({'slot': part['slot'], 'path': str(path), 'sha256': digest(path), 'task_id': part['model']['task_id']})
                 if state.get('production_mode') == 'character_parts' or part['slot'] == 'body':

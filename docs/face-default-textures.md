@@ -1,0 +1,18 @@
+# 남·여 기본 얼굴 텍스처
+
+2026-09-20. 사용자가 첨부한 첫 번째 파란 눈 캐릭터를 남성형, 두 번째 붉은 눈 캐릭터를 여성형으로 지정했다. 내장 image_gen 편집 도구로 눈·눈썹·코·입을 분리했다. 추가 표정 생성, 몸 GLB 수정 및 텍스처 적용은 하지 않았다.
+
+두 파일 모두 1254×1254 RGBA PNG이며 alpha 범위는 0–255다. 소유자 에셋 업로드 API를 통해 S3에 저장했고, 다운로드한 바이트의 SHA-256이 저장 ID와 같은 것을 확인했다. 원본 생성 파일은 도구 기본 경로에 보존했다. 프로젝트의 영구 에셋은 S3 저장본을 사용한다.
+
+| 기본형 | 저장 ID / SHA-256 | 저장 파일 |
+| --- | --- | --- |
+| 남성형 | `2adb09ab2d35bbc868ac462836bcf83308322500223d59887d85415b295787e9` | [PNG](http://127.0.0.1:5273/api/avatar-blueprints/assets/2adb09ab2d35bbc868ac462836bcf83308322500223d59887d85415b295787e9) |
+| 여성형 | `589e85e760c67f6249ead40d163f3a1d36210e7b9415f468c4daa4a3547b8c4f` | [PNG](http://127.0.0.1:5273/api/avatar-blueprints/assets/589e85e760c67f6249ead40d163f3a1d36210e7b9415f468c4daa4a3547b8c4f) |
+
+## 남성형 편집 프롬프트
+
+Use case: background-extraction. Edit target: ONLY the FIRST of the two user-attached character images, the blue-eyed male base character. The second red/pink-eyed female image is NOT the target. Create one standalone reusable facial-feature overlay PNG for this male base. Precisely isolate the two existing blue eyes including white sclera, blue iris gradients, pupil, highlights, dark brown eyelid/eyelash linework and the thin eyebrows immediately above, the tiny existing nose mark, and the small existing gently smiling mouth. Preserve the original shapes, blue colors, expression, relative scale, distances and aligned positions; this is extraction, not a redesigned face. Remove the whole head/skull, all surrounding skin, cheeks/blush, ears, neck, body, clothing and every background artifact. Only the disjoint eye/eyebrow, nose and mouth marks may be visible, floating in their correct face layout on REAL alpha transparency. No skin-colored rectangle, face silhouette, head outline, black/white/checkerboard backdrop, labels or extra expression. Output one square RGBA transparent PNG, with the complete feature cluster centered and ample clear transparent margin (cluster about 70 percent of canvas width); include only the male default facial overlay, not a sheet or comparison.
+
+## 여성형 편집 프롬프트
+
+Use case: background-extraction. There are two recent images: the USER'S red/pink-eyed female full-body character, and the newly generated blue-eyed male facial-feature-only overlay. EDIT TARGET is the red/pink-eyed FEMALE FULL-BODY CHARACTER ONLY. The blue male overlay is only a canvas/layout consistency reference, do not reuse its eyes. Create ONE female default facial overlay as a standalone RGBA PNG with REAL alpha transparency. Precisely isolate her original two crimson/pink eyes including white sclera, iris gradients, pupils, white highlights, original dark brown eyelash outlines and small eyebrow lines above, her original tiny nose mark and small gentle closed smiling mouth. Keep her exact eye silhouette, female upper lash shapes, crimson and pink colors, highlights, mouth expression, and original feature proportions. Remove all skull/head, ears, skin/cheeks/blush, neck, body, clothes and stray background pixels. Only eye/eyebrow, nose and mouth marks, all floating in their natural face arrangement. No face-shaped skin patch, no head outline, no black or white backdrop, no checkerboard image, no text or labels. Match the blue overlay's square canvas, feature cluster scale and placement so the male and female defaults can use the same texture placement: cluster about 70% of canvas width, pair of eyes at the same heights, tiny nose and mouth underneath at the facial centerline, ample transparent margins. Do not redesign, make extra expressions, or combine the two genders in one sheet. Produce only the female default overlay.

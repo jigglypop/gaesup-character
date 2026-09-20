@@ -1,0 +1,1367 @@
+{
+  "source": "C:\\dev\\3d_esset\\data\\avatar-factory\\1\\6bf3bf63f526778c18efea21\\native-parts\\13f23b9c4c66550c18e88916\\body.glb",
+  "source_sha256": "4c2ad0c4e0852443764d9e30ae4f0294469c63e328346cce789c302fd68aecd1",
+  "parts": [
+    {
+      "slot": "hair",
+      "path": "C:\\dev\\3d_esset\\data\\avatar-factory\\1\\6bf3bf63f526778c18efea21\\output\\generated-hair.glb",
+      "sha256": "a9748353b2882ec38f57882377ee32dc54388995e7b2a9aa544ff354108d674f",
+      "garment_kind": "source"
+    }
+  ],
+  "prefit_parts": [
+    {
+      "slot": "hat",
+      "path": "C:\\dev\\3d_esset\\data\\avatar-factory\\1\\6bf3bf63f526778c18efea21\\prefit-parts\\hat.glb",
+      "sha256": "804d13b064bef001d0541c99c04a9dbbb925061215a6d6035f42f94bdbc44287",
+      "report": {
+        "slot": "hat",
+        "source_sha256": "8a6579bdda3d585aaf87ee6324dd8d9705793530a4852f296ee8beed3b58ef82",
+        "objects": [
+          "hat_0"
+        ],
+        "anchors": [],
+        "transform_blender": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "binding": "rigid",
+        "max_surface_distance_m": 0.20602212846279144,
+        "possible_inside_vertices": 0,
+        "visual_review": "required",
+        "fitting": "shared_frame_axis_alignment",
+        "weights": "single_canonical_bone",
+        "measurement": {
+          "method": "uniform_hat_scale_on_measured_body_head",
+          "scale": 0.26558456597112334,
+          "target_head_width_m": 0.3322112411260605,
+          "fitted_width_m": 0.35214391559362407,
+          "crown_height_m": 1.399999976158142,
+          "source_proportions_preserved": true,
+          "seat": {
+            "method": "measured_upper_hair_seat",
+            "seat_height_m": 1.1377314329147339,
+            "hair_crown_bounds_gltf": [
+              [
+                -0.21605493128299713,
+                1.1380480527877808,
+                -0.21782450377941132
+              ],
+              [
+                0.24363750219345093,
+                1.2699998617172241,
+                0.22235266864299774
+              ]
+            ],
+            "measured_head_width_m": 0.5596107542514801,
+            "measured_crown_width_m": 0.45969243347644806,
+            "authored_hat_hair_width_ratio": 0.5936469846659121,
+            "authored_crown_rise_m": 0.13000017166137678,
+            "target_width_before_clearance_m": 0.33221123684800796
+          }
+        },
+        "runtime_budget": {
+          "source_triangles": 2001,
+          "runtime_triangles": 1599,
+          "target_triangles": 1600,
+          "source_objects": 1,
+          "runtime_objects": 1,
+          "source_materials": 1,
+          "runtime_materials": 1,
+          "shader_profile": "source-pbr",
+          "texture_max_edge": 512,
+          "resized_textures": 3,
+          "budget_met": true,
+          "source_files_preserved": true,
+          "runtime_draws": 1
+        },
+        "clearance": {
+          "adjusted_vertices": 0,
+          "maximum_adjustment_m": 0.0
+        },
+        "fitted_bounds_gltf": [
+          [
+            -0.16228066384792328,
+            1.164302110671997,
+            -0.24962085485458374
+          ],
+          [
+            0.18986324965953827,
+            1.399999976158142,
+            0.25414901971817017
+          ]
+        ],
+        "nodes": [
+          31
+        ]
+      },
+      "garment_kind": "source"
+    },
+    {
+      "slot": "top",
+      "path": "C:\\dev\\3d_esset\\data\\avatar-factory\\1\\6bf3bf63f526778c18efea21\\prefit-parts\\top.glb",
+      "sha256": "60c36c4f070426d3b13003b23854edaa916f2a7382c6632af98f1adb1b9f3eac",
+      "report": {
+        "slot": "top",
+        "source_sha256": "60c36c4f070426d3b13003b23854edaa916f2a7382c6632af98f1adb1b9f3eac",
+        "objects": [
+          "top_0"
+        ],
+        "anchors": [
+          {
+            "name": "0",
+            "source": [
+              -0.00039649009704589844,
+              0.0004914999008178711,
+              -0.0007099807262420654
+            ],
+            "target": [
+              0.0,
+              0.5133992433547974,
+              0.009999997913837433
+            ]
+          },
+          {
+            "name": "1",
+            "source": [
+              0.9996035099029541,
+              0.0004914999008178711,
+              -0.0007099807262420654
+            ],
+            "target": [
+              0.42051854729652405,
+              0.5133992433547974,
+              0.009999997913837433
+            ]
+          },
+          {
+            "name": "2",
+            "source": [
+              -0.00039649009704589844,
+              0.0004914999008178711,
+              -1.0007100105285645
+            ],
+            "target": [
+              0.0,
+              0.5133992433547974,
+              -0.5043438673019409
+            ]
+          },
+          {
+            "name": "3",
+            "source": [
+              -0.00039649009704589844,
+              1.0004914999008179,
+              -0.0007099807262420654
+            ],
+            "target": [
+              0.0,
+              0.8520728349685669,
+              0.009999997913837433
+            ]
+          }
+        ],
+        "transform_blender": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "binding": "transfer",
+        "max_surface_distance_m": 0.08744560927152634,
+        "possible_inside_vertices": 61,
+        "visual_review": "required",
+        "fitting": "shared_frame_axis_alignment",
+        "weights": "anatomical_sleeves_and_torso",
+        "measurement": {
+          "method": "axis_scale_in_shared_frame",
+          "source_bounds": [
+            [
+              -0.9516030550003052,
+              -0.26759302616119385,
+              -0.41020599007606506
+            ],
+            [
+              0.9508100748062134,
+              0.269012987613678,
+              0.4111889898777008
+            ]
+          ],
+          "target_bounds_gltf": [
+            [
+              -0.4,
+              0.3743068552017229,
+              -0.128
+            ],
+            [
+              0.4,
+              0.6524917101215671,
+              0.148
+            ]
+          ],
+          "axis_scale_gltf": [
+            0.42051854729652405,
+            0.3386736512184143,
+            0.5143438577651978
+          ],
+          "sleeves": {
+            "method": "sleeve_axis_to_actual_wrist",
+            "sides": {
+              "left": {
+                "source_cuff_m": [
+                  0.38547876477241516,
+                  0.556120753288269,
+                  0.010148330591619015
+                ],
+                "wrist_m": [
+                  0.3174239993095398,
+                  0.6072829961776733,
+                  0.01968436688184738
+                ]
+              },
+              "right": {
+                "source_cuff_m": [
+                  -0.38583603501319885,
+                  0.5543079972267151,
+                  0.014732583425939083
+                ],
+                "wrist_m": [
+                  -0.31742408871650696,
+                  0.6072832942008972,
+                  0.019684448838233948
+                ]
+              }
+            }
+          }
+        },
+        "runtime_budget": {
+          "source_triangles": 2047,
+          "runtime_triangles": 1999,
+          "target_triangles": 2000,
+          "source_objects": 1,
+          "runtime_objects": 1,
+          "source_materials": 1,
+          "runtime_materials": 1,
+          "shader_profile": "matte-pbr",
+          "texture_max_edge": 512,
+          "resized_textures": 3,
+          "budget_met": true,
+          "source_files_preserved": true,
+          "runtime_draws": 1
+        },
+        "clearance": {
+          "method": "loose_fit_no_surface_projection",
+          "body_margin_xz_m": [
+            0.006,
+            0.008
+          ],
+          "adjusted_vertices": 0,
+          "maximum_adjustment_m": 0.0
+        },
+        "fitted_bounds_gltf": [
+          [
+            -0.32878807187080383,
+            0.3743067979812622,
+            -0.12800000607967377
+          ],
+          [
+            0.33002471923828125,
+            0.6524916291236877,
+            0.14800000190734863
+          ]
+        ],
+        "origin": "reused_fitted_native",
+        "nodes": [
+          28
+        ]
+      },
+      "garment_kind": "source"
+    },
+    {
+      "slot": "bottom",
+      "path": "C:\\dev\\3d_esset\\data\\avatar-factory\\1\\6bf3bf63f526778c18efea21\\prefit-parts\\bottom.glb",
+      "sha256": "341f5788af4c3c22c0880dad0a6059e4bdcfc3125f6116f54f79aebd348c04ea",
+      "report": {
+        "slot": "bottom",
+        "source_sha256": "341f5788af4c3c22c0880dad0a6059e4bdcfc3125f6116f54f79aebd348c04ea",
+        "objects": [
+          "bottom_0"
+        ],
+        "anchors": [
+          {
+            "name": "0",
+            "source": [
+              0.0019179582595825195,
+              -0.003174036741256714,
+              0.002379968762397766
+            ],
+            "target": [
+              0.0,
+              0.30358272790908813,
+              0.01000000536441803
+            ]
+          },
+          {
+            "name": "1",
+            "source": [
+              1.0019179582595825,
+              -0.003174036741256714,
+              0.002379968762397766
+            ],
+            "target": [
+              0.2673792839050293,
+              0.30358272790908813,
+              0.01000000536441803
+            ]
+          },
+          {
+            "name": "2",
+            "source": [
+              0.0019179582595825195,
+              -0.003174036741256714,
+              -0.9976200461387634
+            ],
+            "target": [
+              0.0,
+              0.30358272790908813,
+              -0.3161974251270294
+            ]
+          },
+          {
+            "name": "3",
+            "source": [
+              0.0019179582595825195,
+              0.9968259334564209,
+              0.002379968762397766
+            ],
+            "target": [
+              0.0,
+              0.45334166288375854,
+              0.01000000536441803
+            ]
+          }
+        ],
+        "transform_blender": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "binding": "transfer",
+        "max_surface_distance_m": 0.1275678426027298,
+        "possible_inside_vertices": 9,
+        "visual_review": "required",
+        "fitting": "shared_frame_axis_alignment",
+        "weights": "body_surface_barycentric",
+        "measurement": {
+          "method": "axis_scale_in_shared_frame",
+          "source_bounds": [
+            [
+              -0.7086830735206604,
+              -0.4560929834842682,
+              -0.9510320425033569
+            ],
+            [
+              0.7125189900398254,
+              0.45133304595947266,
+              0.9446839690208435
+            ]
+          ],
+          "target_bounds_gltf": [
+            [
+              -0.19,
+              0.16163250565529752,
+              -0.138
+            ],
+            [
+              0.19,
+              0.44553293205442884,
+              0.158
+            ]
+          ],
+          "axis_scale_gltf": [
+            0.2673792839050293,
+            0.1497589349746704,
+            0.32619741559028625
+          ]
+        },
+        "garment_kind": "source",
+        "runtime_budget": {
+          "source_triangles": 2050,
+          "runtime_triangles": 1600,
+          "target_triangles": 1600,
+          "source_objects": 1,
+          "runtime_objects": 1,
+          "source_materials": 1,
+          "runtime_materials": 1,
+          "shader_profile": "matte-pbr",
+          "texture_max_edge": 512,
+          "resized_textures": 3,
+          "budget_met": true,
+          "source_files_preserved": true,
+          "runtime_draws": 1
+        },
+        "clearance": {
+          "method": "loose_fit_no_surface_projection",
+          "body_margin_xz_m": [
+            0.006,
+            0.008
+          ],
+          "adjusted_vertices": 0,
+          "maximum_adjustment_m": 0.0
+        },
+        "fitted_bounds_gltf": [
+          [
+            -0.1899999976158142,
+            0.16163252294063568,
+            -0.1379999965429306
+          ],
+          [
+            0.1899999976158142,
+            0.4455329179763794,
+            0.15800002217292786
+          ]
+        ],
+        "origin": "reused_fitted_native",
+        "nodes": [
+          25
+        ]
+      },
+      "garment_kind": "source"
+    },
+    {
+      "slot": "shoes",
+      "path": "C:\\dev\\3d_esset\\data\\avatar-factory\\1\\6bf3bf63f526778c18efea21\\prefit-parts\\shoes.glb",
+      "sha256": "f4a0b15502915fee15a685c32c251490db81fd9ff7b5d34ab8271a11834cefd0",
+      "report": {
+        "slot": "shoes",
+        "source_sha256": "f4a0b15502915fee15a685c32c251490db81fd9ff7b5d34ab8271a11834cefd0",
+        "objects": [
+          "shoes_0"
+        ],
+        "anchors": [],
+        "binding": "rigid_per_foot",
+        "bones": {
+          "left": "LeftFoot",
+          "right": "RightFoot"
+        },
+        "vertices_per_foot": {
+          "left": 408,
+          "right": 396
+        },
+        "weights": "single_anatomical_foot_bone",
+        "cross_foot_weights": 0,
+        "body_surface_transfer": false,
+        "visual_review": "required",
+        "measurement": {
+          "method": "connected_components_uniform_per_foot",
+          "uniform_scale": 0.09182495446365978,
+          "divider_x_m": 0.00047647953033447266,
+          "minimum_gap_m": 0.008,
+          "fitted_gap_m": 0.008000000000000007,
+          "topology_split": false,
+          "bridge_faces_removed": 0,
+          "source_center_half_gap_m": 0.0,
+          "feet": {
+            "left": {
+              "source_bounds_blender": [
+                [
+                  0.06193799898028374,
+                  -0.854904055595398,
+                  -0.5789761543273926
+                ],
+                [
+                  0.9470000267028809,
+                  0.8541809320449829,
+                  0.559436023235321
+                ]
+              ],
+              "target_bounds_gltf": [
+                [
+                  -0.020344837158918376,
+                  0,
+                  -0.05882306098937988
+                ],
+                [
+                  0.10965516284108164,
+                  0.13,
+                  0.1611769390106201
+                ]
+              ],
+              "source_anchor_gltf": [
+                0.5044690370559692,
+                -0.5789761543273926,
+                0.00036156177520751953
+              ],
+              "target_anchor_gltf": [
+                0.04465516284108162,
+                0.0,
+                0.05117693543434143
+              ],
+              "components": 1,
+              "vertices": 408
+            },
+            "right": {
+              "source_bounds_blender": [
+                [
+                  -0.9460470676422119,
+                  -0.8531320691108704,
+                  -0.5785319805145264
+                ],
+                [
+                  -0.06009799987077713,
+                  0.8535169363021851,
+                  0.5596299171447754
+                ]
+              ],
+              "target_bounds_gltf": [
+                [
+                  -0.10965634375810625,
+                  0,
+                  -0.05882277600467205
+                ],
+                [
+                  0.020343656241893764,
+                  0.13,
+                  0.16117722399532794
+                ]
+              ],
+              "source_anchor_gltf": [
+                -0.5030725598335266,
+                -0.5785319805145264,
+                -0.00019243359565734863
+              ],
+              "target_anchor_gltf": [
+                -0.04465634375810623,
+                0.0,
+                0.051177218556404114
+              ],
+              "components": 1,
+              "vertices": 396
+            }
+          }
+        },
+        "runtime_budget": {
+          "source_triangles": 2069,
+          "runtime_triangles": 1599,
+          "target_triangles": 1600,
+          "source_objects": 1,
+          "runtime_objects": 1,
+          "source_materials": 1,
+          "runtime_materials": 1,
+          "shader_profile": "matte-pbr",
+          "texture_max_edge": 512,
+          "resized_textures": 3,
+          "budget_met": true,
+          "source_files_preserved": true,
+          "runtime_draws": 1
+        },
+        "clearance": {
+          "method": "rigid_foot_fit_no_surface_projection",
+          "adjusted_vertices": 0,
+          "maximum_adjustment_m": 0.0
+        },
+        "fitted_bounds_gltf": [
+          [
+            -0.0853324607014656,
+            0.0,
+            -0.027291394770145416
+          ],
+          [
+            0.08529055118560791,
+            0.10453464835882187,
+            0.12964525818824768
+          ]
+        ],
+        "final_pose_fitting": {
+          "method": "post_rest_pose_rigid_foot_reseat",
+          "minimum_gap_m": 0.008,
+          "gap_before_m": 0.007999991532415152,
+          "final_gap_m": 0.008000002708286047,
+          "uniform_scale": 1.0,
+          "foot_bone_x_m": {
+            "left": 0.04465516284108162,
+            "right": -0.04465634375810623
+          },
+          "shoe_center_x_m": {
+            "left": 0.0446551616769284,
+            "right": -0.04465634562075138
+          },
+          "adjusted_vertices": 804,
+          "weights_preserved": true,
+          "skeleton_changed": false
+        },
+        "origin": "reused_fitted_native",
+        "nodes": [
+          27
+        ]
+      },
+      "garment_kind": "source"
+    }
+  ],
+  "output": "C:\\dev\\3d_esset\\data\\avatar-factory\\1\\6bf3bf63f526778c18efea21\\native-parts\\97720d72fa838b9fa6dc2d55",
+  "contract": {
+    "recipe": "native-parts-v13-expression-uv-bake",
+    "worker_sha256": "9858d3e3df5023bd470631626582e604d0be8480bc894ea232df53429f0a507f",
+    "canonical_pose": false,
+    "binding_worker_sha256": "5b3b406ae3b1da05a50ec04a972658d176ea70e8ab2c7bda263121b83bf3085c",
+    "body_layers_sha256": "cd648c5ecc3d9bdfd59b7c63db8566d67176b7b4fa21da13b93dd48d6cbfd385",
+    "head_geometry_sha256": "4e1ba2d319cd124c480b5b6ce5ae1ba8aa4544ec13abe9a1c5f0f940403bf5d1",
+    "shoe_geometry_sha256": "cbba4587af8e5505c30f6da072f3f462679d13e37c9b6f0a76886cf5704a74fd",
+    "arm_geometry_sha256": "0bf0ce254aaa0f5b47c01b0ff9170e6918e2903d5fb672e96755d70dcc73067f",
+    "render_budget_sha256": "bb5a0997641b9ad4024589d8e74c0df2a465c38172807d4d3b62ea69da354335",
+    "equipment_sha256": "b02ab880e46bfcfbd0ca34b08f52404a5b3d8575bc24229fa39112c94b9738be",
+    "expression_bake_sha256": "6c350851c07963c7fb880507ab796116f83751e2adc9c6010254a587ed084f17",
+    "expression_uv_sha256": "abf287ce019e950bd4b2f8d0ade767a52018375156f8ce265735cbf91b62e520",
+    "garment_kinds": {
+      "body": "source",
+      "hair": "source",
+      "hat": "source",
+      "top": "source",
+      "bottom": "source",
+      "shoes": "source"
+    },
+    "body": "4c2ad0c4e0852443764d9e30ae4f0294469c63e328346cce789c302fd68aecd1",
+    "parts": [
+      [
+        "hair",
+        "a9748353b2882ec38f57882377ee32dc54388995e7b2a9aa544ff354108d674f"
+      ]
+    ],
+    "prefit_parts": [
+      [
+        "hat",
+        "804d13b064bef001d0541c99c04a9dbbb925061215a6d6035f42f94bdbc44287"
+      ],
+      [
+        "top",
+        "60c36c4f070426d3b13003b23854edaa916f2a7382c6632af98f1adb1b9f3eac"
+      ],
+      [
+        "bottom",
+        "341f5788af4c3c22c0880dad0a6059e4bdcfc3125f6116f54f79aebd348c04ea"
+      ],
+      [
+        "shoes",
+        "f4a0b15502915fee15a685c32c251490db81fd9ff7b5d34ab8271a11834cefd0"
+      ]
+    ],
+    "production_spec_sha256": "cc0acf48d4c7ad58ec51e57ce2ab45cf21b46b8ffe514923d81f4dd680756d80",
+    "source_spec_sha256": "effb1b32f2e2e4cc0d4c970eeed72b4f3e8b0829630f45b3648333f9a19c9403",
+    "fit_worker_sha256": "f43fe91c746a2bc95c725a819fe78455b86b1a5b8955c5f71393eaa4007cd2a4"
+  },
+  "production_spec": {
+    "id": "sd-factory-v1",
+    "revision": 17,
+    "rest_pose": "T",
+    "units": "metres",
+    "axes": {
+      "right": "+X",
+      "up": "+Y",
+      "front": "+Z",
+      "anatomical_left": "+X"
+    },
+    "origin": "floor_between_feet",
+    "body_height_m": 1.2022683322429657,
+    "base_body": {
+      "face": "blank smooth egg-shaped head; no eyes, nose, mouth, ears or facial relief",
+      "torso_width_m": 0.22,
+      "torso_depth_m": 0.13,
+      "arm_diameter_m": 0.036,
+      "leg_diameter_m": 0.044,
+      "wrist_diameter_m": 0.028,
+      "ankle_diameter_m": 0.032,
+      "clothing": "thin opaque matte white fitted underlayer with no padding or folds",
+      "color_rgba": [
+        0.86,
+        0.86,
+        0.84,
+        1.0
+      ]
+    },
+    "head_height_ratio": [
+      0.54,
+      0.66
+    ],
+    "canvas": {
+      "width": 2048,
+      "height": 2048,
+      "center_x": 1024,
+      "sole_y": 1800,
+      "scalp_y": 300,
+      "pixels_per_metre": 1247.6416119200135
+    },
+    "views": {
+      "front": {
+        "camera": [
+          0,
+          0,
+          1
+        ],
+        "horizontal": [
+          1,
+          0,
+          0
+        ]
+      },
+      "side": {
+        "camera": [
+          1,
+          0,
+          0
+        ],
+        "horizontal": [
+          0,
+          0,
+          -1
+        ]
+      },
+      "back": {
+        "camera": [
+          0,
+          0,
+          -1
+        ],
+        "horizontal": [
+          -1,
+          0,
+          0
+        ]
+      },
+      "opposite": {
+        "camera": [
+          -1,
+          0,
+          0
+        ],
+        "horizontal": [
+          0,
+          0,
+          1
+        ]
+      }
+    },
+    "generated_views": [
+      "front",
+      "side"
+    ],
+    "anchors": {
+      "crown": [
+        -0.0006124675273895264,
+        1.1999999284744263,
+        0.010000064969062805
+      ],
+      "neck": [
+        0.0017491667531430721,
+        0.48014694452285767,
+        0.021230150014162064
+      ],
+      "waist": [
+        0.002248030621558428,
+        0.4253484308719635,
+        0.014226207509636879
+      ],
+      "shoulder_left": [
+        0.07318935543298721,
+        0.6072830557823181,
+        0.01968436688184738
+      ],
+      "shoulder_right": [
+        -0.07319066673517227,
+        0.6072832345962524,
+        0.01968436874449253
+      ],
+      "wrist_left": [
+        0.3174239993095398,
+        0.6072829961776733,
+        0.01968436688184738
+      ],
+      "wrist_right": [
+        -0.31742408871650696,
+        0.6072832942008972,
+        0.019684448838233948
+      ],
+      "ankle_left": [
+        0.04465516284108162,
+        0.07159911841154099,
+        0.016176939010620117
+      ],
+      "ankle_right": [
+        -0.04465634375810623,
+        0.07159793376922607,
+        0.01617722399532795
+      ]
+    },
+    "envelopes": {
+      "hair": [
+        [
+          -0.64,
+          0.05,
+          -0.5
+        ],
+        [
+          0.64,
+          1.32,
+          0.5
+        ]
+      ],
+      "head": [
+        [
+          -0.61,
+          0.32,
+          -0.48
+        ],
+        [
+          0.61,
+          1.46,
+          0.48
+        ]
+      ],
+      "body": [
+        [
+          -0.46,
+          0,
+          -0.3
+        ],
+        [
+          0.46,
+          1.2,
+          0.34
+        ]
+      ],
+      "hairBack": [
+        [
+          -0.64,
+          0.05,
+          -0.5
+        ],
+        [
+          0.64,
+          1.32,
+          0.33
+        ]
+      ],
+      "hairFront": [
+        [
+          -0.64,
+          0.08,
+          -0.31
+        ],
+        [
+          0.64,
+          1.32,
+          0.5
+        ]
+      ],
+      "hat": [
+        [
+          -0.75,
+          0.48,
+          -0.5
+        ],
+        [
+          0.75,
+          1.46,
+          0.53
+        ]
+      ],
+      "top": [
+        [
+          -0.46,
+          0.19,
+          -0.2
+        ],
+        [
+          0.46,
+          0.51,
+          0.23
+        ]
+      ],
+      "bottom": [
+        [
+          -0.26,
+          0.1,
+          -0.22
+        ],
+        [
+          0.26,
+          0.3,
+          0.24
+        ]
+      ],
+      "shoes": [
+        [
+          -0.22,
+          -0.012,
+          -0.13
+        ],
+        [
+          0.22,
+          0.15,
+          0.23
+        ]
+      ],
+      "weapon": [
+        [
+          -0.4095601886510849,
+          0.4862927542924881,
+          -0.04840628445148468
+        ],
+        [
+          -0.22528798878192904,
+          1.0312454538345337,
+          0.08777518212795259
+        ]
+      ],
+      "tool": [
+        [
+          0.22528789937496188,
+          0.5199559695720672,
+          -0.04840636640787124
+        ],
+        [
+          0.40956009924411774,
+          0.8965911026000977,
+          0.08777510017156602
+        ]
+      ],
+      "glasses": [
+        [
+          -0.26232171773910523,
+          0.7820646142959594,
+          -0.08780301910638809
+        ],
+        [
+          0.2610967826843262,
+          0.9372410917282105,
+          0.3240103452205658
+        ]
+      ]
+    },
+    "fitting": {
+      "revision": "shared-size-v17-head-skin-rear-shell",
+      "hair_length_profiles": {
+        "source": null,
+        "short": 1.0,
+        "long": 1.7
+      },
+      "method": "shared_size_with_body_cut_lines",
+      "fit_to_body_surface": false,
+      "body_crop": {
+        "opening_inset_m": 0.008,
+        "wrist_inset_m": 0.006
+      },
+      "hair_volume_scale_xz": [
+        1.1,
+        1.14
+      ],
+      "hair_clearance_m": 0.025,
+      "hair_crown_clearance_m": 0.07,
+      "scalp_clearance_m": 0.003,
+      "hat_width_scale": 1.06,
+      "hat_hairline_m": 1.14,
+      "garment_margin_m": {
+        "top": [
+          0.006,
+          0.008
+        ],
+        "bottom": [
+          0.006,
+          0.008
+        ]
+      },
+      "bounds": {
+        "hair": [
+          [
+            -0.4475329741835594,
+            0.17013947963715453,
+            -0.4190153554081917
+          ],
+          [
+            0.5595889016985893,
+            1.2699999284744263,
+            0.4390154853463173
+          ]
+        ],
+        "head": [
+          [
+            -0.51,
+            0.45927168074108304,
+            -0.39
+          ],
+          [
+            0.51,
+            1.414010305662413,
+            0.4
+          ]
+        ],
+        "body": [
+          [
+            -0.41325536370277405,
+            -0.0022684037685394287,
+            -0.2760102152824402
+          ],
+          [
+            0.412030428647995,
+            1.1999999284744263,
+            0.2960103452205658
+          ]
+        ],
+        "hairBack": [
+          [
+            -0.52,
+            0.17013947963715453,
+            -0.4
+          ],
+          [
+            0.52,
+            1.2680942206769377,
+            0.15
+          ]
+        ],
+        "hairFront": [
+          [
+            -0.5,
+            0.47231898137501305,
+            -0.1
+          ],
+          [
+            0.5,
+            1.2680942206769377,
+            0.4
+          ]
+        ],
+        "hat": [
+          [
+            -0.30041885369608545,
+            1.1400001049041748,
+            -0.28990539831992906
+          ],
+          [
+            0.29745601111242914,
+            1.4000001001358031,
+            0.3212275199401073
+          ]
+        ],
+        "top": [
+          [
+            -0.4,
+            0.3743068552017229,
+            -0.128
+          ],
+          [
+            0.4,
+            0.6524917101215671,
+            0.148
+          ]
+        ],
+        "bottom": [
+          [
+            -0.19,
+            0.16163250565529752,
+            -0.138
+          ],
+          [
+            0.19,
+            0.44553293205442884,
+            0.158
+          ]
+        ],
+        "shoes": [
+          [
+            -0.12475992605090142,
+            0,
+            -0.06353412177413702
+          ],
+          [
+            0.1262313151359558,
+            0.13,
+            0.1580586205050349
+          ]
+        ],
+        "weapon": [
+          [
+            -0.3895601886510849,
+            0.5062927542924881,
+            -0.02840628445148468
+          ],
+          [
+            -0.24528798878192903,
+            1.0112454538345337,
+            0.06777518212795258
+          ]
+        ],
+        "tool": [
+          [
+            0.24528789937496187,
+            0.5399559695720673,
+            -0.028406366407871246
+          ],
+          [
+            0.3895600992441177,
+            0.8765911026000976,
+            0.06777510017156602
+          ]
+        ],
+        "glasses": [
+          [
+            -0.2423217177391052,
+            0.8020646142959594,
+            -0.06780301910638808
+          ],
+          [
+            0.24109678268432616,
+            0.9172410917282104,
+            0.3040103452205658
+          ]
+        ]
+      },
+      "shoe_bounds": {
+        "left": [
+          [
+            -0.020344837158918376,
+            0,
+            -0.05882306098937988
+          ],
+          [
+            0.10965516284108164,
+            0.13,
+            0.1611769390106201
+          ]
+        ],
+        "right": [
+          [
+            -0.10965634375810625,
+            0,
+            -0.05882277600467205
+          ],
+          [
+            0.020343656241893764,
+            0.13,
+            0.16117722399532794
+          ]
+        ]
+      },
+      "hair_length": "source",
+      "hair_length_head_ratio": null
+    },
+    "tolerances": {
+      "canvas_px": 24,
+      "view_height_px": 32,
+      "clearance_m": 0.002,
+      "max_surface_adjustment_m": 0.015
+    },
+    "release_requires": [
+      "paired_images",
+      "shared_rig",
+      "assembly_files"
+    ],
+    "frozen_body": true,
+    "equipment": {
+      "weapon": {
+        "bone": "RightHand",
+        "position_m": [
+          -0.31742408871650696,
+          0.6072832942008972,
+          0.019684448838233948
+        ],
+        "pivot_fraction": [
+          0.5,
+          0.2,
+          0.5
+        ],
+        "size_m": [
+          0.14427219986915588,
+          0.5049526995420456,
+          0.09618146657943726
+        ]
+      },
+      "tool": {
+        "bone": "LeftHand",
+        "position_m": [
+          0.3174239993095398,
+          0.6072829961776733,
+          0.01968436688184738
+        ],
+        "pivot_fraction": [
+          0.5,
+          0.2,
+          0.5
+        ],
+        "size_m": [
+          0.14427219986915588,
+          0.33663513302803044,
+          0.09618146657943726
+        ]
+      },
+      "glasses": {
+        "bone": "Head",
+        "position_m": [
+          -0.0006124675273895264,
+          0.8596528530120849,
+          0.3040103452205658
+        ],
+        "pivot_fraction": [
+          0.5,
+          0.5,
+          1.0
+        ],
+        "size_m": [
+          0.4834185004234314,
+          0.11517647743225098,
+          0.3718133643269539
+        ]
+      }
+    },
+    "measured_head_bounds_m": [
+      [
+        -0.2796793282032013,
+        0.6327548027038574,
+        -0.2760102152824402
+      ],
+      [
+        0.3917352557182312,
+        1.1999999284744263,
+        0.2960103452205658
+      ]
+    ],
+    "sha256": "cc0acf48d4c7ad58ec51e57ce2ab45cf21b46b8ffe514923d81f4dd680756d80"
+  },
+  "source_measurements": {
+    "body": [
+      [
+        -0.46,
+        0,
+        -0.3
+      ],
+      [
+        0.46,
+        1.2,
+        0.34
+      ]
+    ],
+    "hair": [
+      [
+        -0.6524309482971827,
+        0.13224951654672623,
+        -0.5666691405971845
+      ],
+      [
+        0.6580415338476499,
+        1.1966577466924986,
+        0.44243474626541135
+      ]
+    ],
+    "hat": [
+      [
+        -0.6251795327663422,
+        0.30297161972522735,
+        -0.6804838760495185
+      ],
+      [
+        0.6275840694308281,
+        1.105285353442033,
+        0.6804838760495185
+      ]
+    ],
+    "top": [
+      [
+        -0.6820869004925092,
+        0.2733156675299009,
+        -0.2300340075691541
+      ],
+      [
+        0.6828884127140045,
+        1.0772324256896972,
+        0.22522493424018222
+      ]
+    ],
+    "bottom": [
+      [
+        -0.3246124497056007,
+        0.12663893099625906,
+        -0.2075916653672854
+      ],
+      [
+        0.32381093748410544,
+        1.0299432046214738,
+        0.18194327427943546
+      ]
+    ],
+    "shoes": [
+      [
+        -0.4151833307345708,
+        -0.05450283106168111,
+        -0.38793191520373027
+      ],
+      [
+        0.41598484295606614,
+        0.49212850399812064,
+        0.34064269413550696
+      ]
+    ]
+  },
+  "canonical_pose": false
+}

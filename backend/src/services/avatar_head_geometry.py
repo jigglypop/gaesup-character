@@ -4,7 +4,7 @@ import bpy
 import numpy as np
 from mathutils import Matrix, Vector
 
-from src.services.avatar_fit_geometry import bounds, place, target_box
+from src.services.avatar_fit_geometry import bounds, head_region, place, surface, target_box
 
 
 def face_samples(meshes):
@@ -132,66 +132,146 @@ def prepare_rear_hair(meshes, body, hat_palette, spec):
             mesh.free()
         obj.data.update()
     report['rear_locks_extended_to_m'] = destination
-    # The original headwear concealed part of the rear scalp. Rebuild that
-    # backing from the common head surface, beneath the retained sculpted locks.
-    sample = min(hair, key=lambda row: float(np.linalg.norm(row[3]-hair_color)))
-    material, uv_point = sample[4], sample[5]
-    for original in body:
-        cap = bpy.data.objects.new('RearScalpBacking', original.data.copy())
-        bpy.context.scene.collection.objects.link(cap)
-        cap.matrix_world = original.matrix_world.copy()
-        place([cap], Matrix.Identity(4))
-        mesh = bmesh.new()
-        try:
-            mesh.from_mesh(cap.data)
-            for point, normal in ((Vector((0, -.015, 0)), Vector((0, 1, 0))),
-                                  (Vector((0, 0, spec['body_height_m']*.5)), Vector((0, 0, 1)))):
-                bmesh.ops.bisect_plane(mesh, geom=[*mesh.verts, *mesh.edges, *mesh.faces],
-                    dist=1e-6, plane_co=point, plane_no=normal, clear_inner=True, clear_outer=False)
-            mesh.normal_update()
-            for vertex in mesh.verts:
-                vertex.co += vertex.normal*spec['fitting'].get('scalp_clearance_m', .003)
-            mesh.to_mesh(cap.data)
-        finally:
-            mesh.free()
-        if not cap.data.polygons:
-            bpy.data.objects.remove(cap, do_unlink=True)
-            continue
-        cap.data.materials.clear(); cap.data.materials.append(material)
-        for face in cap.data.polygons:
-            face.material_index = 0; face.use_smooth = True
-        uv = cap.data.uv_layers.active or cap.data.uv_layers.new()
-        for value in uv.data:
-            value.uv = uv_point
-        cap['scalp_backing'] = True
-        cap.data.update(); meshes.append(cap)
-        report['scalp_shell'] = True
     return report
 
 
 def fit_hat(meshes, target, width_scale=1.0):
-    """Keep the crown and hanging ears in the source's proportions."""
+    """Uniformly fit headwear to the measured body head and crown seat."""
     lo, hi = bounds(meshes); a, b = target_box(target)
     scale = (b.x-a.x)/(hi.x-lo.x)*width_scale
     source = Vector(((lo.x+hi.x)/2, (lo.y+hi.y)/2, hi.z))
     destination = Vector(((a.x+b.x)/2, (a.y+b.y)/2, b.z))
     transform = Matrix.Translation(destination) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-source)
-    return transform, [], {'method': 'uniform_hat_scale', 'scale': scale,
+    return transform, [], {'method': 'uniform_hat_scale_on_measured_body_head', 'scale': scale,
+                           'target_head_width_m': b.x-a.x,
+                           'fitted_width_m': (hi.x-lo.x)*scale,
                            'crown_height_m': b.z, 'source_proportions_preserved': True}
 
 
+def hat_target_over_hair(target, hair, spec):
+    """Seat headwear around the upper hairstyle without sizing to hanging locks."""
+    a, b = target_box(target)
+    hair_lo, hair_hi = bounds(hair)
+    seat_height = a.z
+    crown = [obj.matrix_world @ vertex.co for obj in hair for vertex in obj.data.vertices
+             if (obj.matrix_world @ vertex.co).z >= seat_height]
+    if not crown:
+        return target, {'method': 'measured_head_fallback', 'seat_height_m': seat_height,
+                        'reason': 'no_hair_vertices_above_seat'}
+    crown_lo = Vector([min(point[i] for point in crown) for i in range(3)])
+    crown_hi = Vector([max(point[i] for point in crown) for i in range(3)])
+    authored = spec['fitting']['bounds']
+    base_width = max(b.x-a.x, crown_hi.x-crown_lo.x)
+    # Both inputs are already measured in the canonical head frame. Applying
+    # the legacy hat/hair envelope ratio again shrinks the cap below head width.
+    width = base_width
+    center_x = (crown_lo.x+crown_hi.x)/2
+    crown_rise = max(0., authored['hat'][1][1]-authored['hair'][1][1])
+    depth_center = (crown_lo.y+crown_hi.y)/2
+    depth = max(b.y-a.y, crown_hi.y-crown_lo.y)
+    fitted = [[center_x-width/2, seat_height, -depth_center-depth/2],
+              [center_x+width/2, hair_hi.z+crown_rise, -depth_center+depth/2]]
+    return fitted, {'method': 'measured_upper_hair_seat',
+                    'seat_height_m': seat_height,
+                    'hair_crown_bounds_gltf': [[crown_lo.x, crown_lo.z, -crown_hi.y],
+                                                [crown_hi.x, crown_hi.z, -crown_lo.y]],
+                    'measured_head_width_m': b.x-a.x,
+                    'measured_crown_width_m': crown_hi.x-crown_lo.x,
+                    'authored_crown_rise_m': crown_rise,
+                    'target_width_before_clearance_m': width}
+
+
 def fit_hair(meshes, target, spec):
-    """Seat the full hairstyle on the measured head without anisotropic stretch."""
+    """Uniformly contain the measured head; strand length never sets the scale."""
     lo, hi = bounds(meshes); a, b = target_box(target)
-    scale = (b.x-a.x)/(hi.x-lo.x)
-    if spec['fitting'].get('hair_length_head_ratio') is not None:
-        scale = max(scale, (b.z-a.z)/(hi.z-lo.z))
+    source_width, source_depth = hi.x-lo.x, hi.y-lo.y
+    target_width, target_depth = b.x-a.x, b.y-a.y
+    if min(source_width, source_depth, target_width, target_depth) <= 1e-8:
+        raise ValueError('Hair has no measurable scalp footprint')
+    width_scale = target_width/source_width
+    depth_scale = target_depth/source_depth
+    # One uniform scale preserves the authored silhouette. The larger required
+    # axis keeps the shell outside both measured head axes; bounded clearance
+    # handles only local intersections instead of reshaping the whole asset.
+    scale = max(width_scale, depth_scale)
     source = Vector(((lo.x+hi.x)/2, (lo.y+hi.y)/2, hi.z))
     destination = Vector(((a.x+b.x)/2, (a.y+b.y)/2, b.z))
     transform = Matrix.Translation(destination) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-source)
     return transform, [], {'method': 'uniform_hair_scale_on_measured_head', 'scale': scale,
+                           'width_scale_required': width_scale,
+                           'depth_scale_required': depth_scale,
+                           'target_head_width_m': target_width,
+                           'target_head_depth_m': target_depth,
                            'crown_height_m': b.z, 'source_proportions_preserved': True,
                            'hair_length': spec['fitting'].get('hair_length', 'source')}
+
+
+def fit_hair_length(meshes, target, spec):
+    """Adjust hanging strands below the crown, retaining scalp width and depth."""
+    ratio = spec['fitting'].get('hair_length_head_ratio')
+    if ratio is None:
+        return {'method': 'preserve_source_length'}
+    lo, hi = bounds(meshes); a, b = target_box(target)
+    source_length, target_length = hi.z-lo.z, b.z-a.z
+    if min(source_length, target_length) <= 1e-8:
+        raise ValueError('Hair has no measurable length')
+    # Keep the crown dome unchanged. Only the lower strands are extended or
+    # shortened, with a continuous mapping at the protected scalp boundary.
+    protected = min(source_length, target_length)*.35
+    shoulder = hi.z-protected
+    strand_scale = (target_length-protected)/(source_length-protected)
+    for obj in meshes:
+        inverse = obj.matrix_world.inverted()
+        for vertex in obj.data.vertices:
+            point = obj.matrix_world @ vertex.co
+            if point.z < shoulder:
+                point.z = shoulder-(shoulder-point.z)*strand_scale
+                vertex.co = inverse @ point
+        obj.data.update()
+    return {'method': 'strands_below_fixed_crown', 'head_height_ratio': ratio,
+            'source_length_m': source_length, 'target_length_m': target_length,
+            'protected_crown_m': protected, 'strand_scale': strand_scale,
+            'width_and_depth_preserved': True}
+
+
+def fit_hair_scalp(meshes, body, rig, spec):
+    """Seat existing hair surfaces outside the actual skull without adding faces.
+
+    Outer hair bounds include hanging locks and do not describe its head cavity.
+    A small generic clearance cap leaves deeply intersecting scalp vertices inside
+    the head. Resolve the full displacement in the skull region; keep the bounded
+    correction below the head so long strands retain their authored silhouette.
+    """
+    head_lo, _, _ = head_region(body, rig, spec)
+    tree, _, _ = surface(body)
+    minimum = spec['fitting'].get('hair_clearance_m', .025)
+    lower_limit = max(minimum, spec['tolerances'].get('max_surface_adjustment_m', .015))
+    adjusted = scalp_adjusted = 0
+    maximum_applied = 0.
+    for obj in meshes:
+        inverse = obj.matrix_world.inverted()
+        for vertex in obj.data.vertices:
+            point = obj.matrix_world @ vertex.co
+            hit, normal, _, _ = tree.find_nearest(point)
+            if hit is None:
+                raise ValueError('Missing head surface')
+            signed = (point-hit).dot(normal)
+            if signed >= minimum:
+                continue
+            amount = minimum-signed
+            scalp = point.z >= head_lo.z and hit.z >= head_lo.z
+            if not scalp:
+                amount = min(amount, lower_limit)
+            destination = point+normal*amount
+            vertex.co = inverse @ destination
+            adjusted += 1
+            scalp_adjusted += int(scalp)
+            maximum_applied = max(maximum_applied, (destination-point).length)
+        obj.data.update()
+    return {'method': 'measured_skull_surface_fit_v1', 'adjusted_vertices': adjusted,
+            'scalp_adjusted_vertices': scalp_adjusted, 'head_floor_m': head_lo.z,
+            'maximum_adjustment_m': maximum_applied, 'lower_strand_limit_m': lower_limit,
+            'topology_preserved': True, 'uv_preserved': True, 'added_faces': 0}
 
 
 def seat_legacy_hair_roots(meshes, body, spec):

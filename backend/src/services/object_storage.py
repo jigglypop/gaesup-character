@@ -53,7 +53,7 @@ def _location(path):
     # Runtime launch logs and file locks remain process-local, never asset storage.
     if not relative.parts or relative.parts[0] not in ('avatar-factory', 'avatar-blueprints', 'characters'):
         return None
-    if path.name.endswith(('.lock', '.tmp')) or '.locks' in relative.parts:
+    if path.name.endswith(('.lock', '.lock.guard', '.tmp')) or '.locks' in relative.parts:
         return None
     prefix = os.getenv('ASSET_S3_PREFIX', 'assets').strip('/')
     key = '/'.join(filter(None, (prefix, relative.as_posix())))

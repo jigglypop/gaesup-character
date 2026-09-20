@@ -1,0 +1,4 @@
+User-agent: *
+Disallow: /
+
+# Public deployments replace this file after PUBLIC_SITE_ORIGIN is validated.

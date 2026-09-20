@@ -13,6 +13,7 @@ from src.services.animation_glb import merge_character_clips
 from src.services.asset_editor import _write_json
 from src.services.asset_delivery import inspect_glb
 from src.services.wardrobe import _digest, download_glb
+from src.services.meshy_status import BLOCKED
 
 DEFAULT_ACTIONS = {"idle": 0, "walk": 1, "run": 14, "jump": 466, "fall": 502}
 ENDPOINTS = {"rig": "/openapi/v1/rigging", "animation": "/openapi/v1/animations"}
@@ -53,6 +54,7 @@ def _task(run, pack, slot, endpoint, payload, client):
         if response.status_code in {400, 401, 402, 403, 404, 422, 429}:
             value.update(status="submission_rejected", http_status=response.status_code)
             _save(run, pack)
+        character_jobs.save_submission_response(run, slot, response)
         response.raise_for_status()
         task_id = response.json().get("result")
         if not isinstance(task_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", task_id):
@@ -62,7 +64,7 @@ def _task(run, pack, slot, endpoint, payload, client):
             value["payload"] = {"height_meters": payload["height_meters"], "input_sha256": pack["input_sha256"]}
         value.update(task_id=task_id, status="PENDING")
         _save(run, pack)
-    if value["status"] in {"submission_uncertain", "submission_rejected", "FAILED", "CANCELED"}:
+    if value["status"] in BLOCKED:
         raise ValueError("Existing provider attempt requires recovery; no automatic resubmission")
     if value["status"] != "SUCCEEDED":
         response = client.get(f"{endpoint}/{value['task_id']}")

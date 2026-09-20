@@ -62,33 +62,6 @@ def place(meshes, transform):
         obj.data.update()
 
 
-def fit_shoes(meshes, targets):
-    """Fit each shoe around its own ankle instead of scaling the pair's gap."""
-    lo, hi = bounds(meshes)
-    divider = (lo.x+hi.x)/2
-    rows = [(obj, [(v.index, obj.matrix_world @ v.co) for v in obj.data.vertices]) for obj in meshes]
-    transforms, reports = {}, {}
-    for side, positive in (('left', True), ('right', False)):
-        points = [p for _, vertices in rows for _, p in vertices if (p.x >= divider) == positive]
-        if not points:
-            raise ValueError('Missing shoe geometry')
-        a = Vector([min(p[i] for p in points) for i in range(3)])
-        b = Vector([max(p[i] for p in points) for i in range(3)])
-        transforms[side], _, reports[side] = box_fit(a, b, targets[side])
-    for obj, vertices in rows:
-        world = obj.matrix_world.copy()
-        inverse = world.inverted()
-        for index, point in vertices:
-            side = 'left' if point.x >= divider else 'right'
-            transform = transforms[side]
-            if obj.data.shape_keys:
-                for key in obj.data.shape_keys.key_blocks:
-                    key.data[index].co = inverse @ (transform @ (world @ key.data[index].co))
-            obj.data.vertices[index].co = inverse @ (transform @ point)
-        obj.data.update()
-    return {'method': 'per_foot_axis_scale', 'feet': reports}
-
-
 def normalize_body(objects, body, target):
     lo, hi = bounds(body); a, b = target_box(target)
     scale = (b.z-a.z)/(hi.z-lo.z)
@@ -109,8 +82,39 @@ def normalize_body(objects, body, target):
     return report
 
 
+def head_weighted_vertices(body, rig, minimum=.25):
+    """Return vertices that are materially controlled by the canonical Head bone."""
+    head = next((bone for bone in rig.data.bones
+                 if bone.name.lower().split(':')[-1] == 'head'), None)
+    if head is None:
+        return {}
+    result = {}
+    for obj in body:
+        group = next((group for group in obj.vertex_groups
+                      if group.name.lower().split(':')[-1] == 'head'), None)
+        if group is None:
+            continue
+        underlayer = set()
+        for face in obj.data.polygons:
+            material = (obj.data.materials[face.material_index]
+                        if face.material_index < len(obj.data.materials) else None)
+            if material and material.get('base_underlayer'):
+                underlayer.update(face.vertices)
+        indices = set()
+        for vertex in obj.data.vertices:
+            if vertex.index in underlayer:
+                continue
+            weight = next((entry.weight for entry in vertex.groups
+                           if entry.group == group.index), 0.)
+            if weight >= minimum:
+                indices.add(vertex.index)
+        if indices:
+            result[obj] = indices
+    return result
+
+
 def head_region(body, rig, spec):
-    """Measure the head above the shoulders, independent of provider weights."""
+    """Measure skin weighted to Head, with a bounded geometric fallback."""
     lo, hi = bounds(body)
     bones = {bone.name.lower().split(':')[-1]: bone for bone in rig.data.bones}
     shoulders = [rig.matrix_world @ bones[name].head_local
@@ -118,11 +122,65 @@ def head_region(body, rig, spec):
     rise = spec['anchors']['neck'][1]-spec['anchors']['shoulder_left'][1]
     collar = (sum(p.z for p in shoulders)/len(shoulders)+rise if shoulders
               else lo.z+(hi.z-lo.z)*spec['anchors']['neck'][1]/spec['body_height_m'])
-    points = [obj.matrix_world @ vertex.co for obj in body for vertex in obj.data.vertices
-              if (obj.matrix_world @ vertex.co).z >= collar]
+    weighted = head_weighted_vertices(body, rig)
+    points = [obj.matrix_world @ obj.data.vertices[index].co
+              for obj, indices in weighted.items() for index in indices]
+    if not points:
+        # Some providers omit usable skin weights. The upper skull band avoids
+        # counting T-pose arms at shoulder height as head width.
+        skull_floor = max(collar, hi.z-(hi.z-lo.z)*.48)
+        points = [obj.matrix_world @ vertex.co for obj in body for vertex in obj.data.vertices
+                  if (obj.matrix_world @ vertex.co).z >= skull_floor]
+    if not points:
+        raise ValueError('Body has no measurable head surface')
     a = Vector([min(p[i] for p in points) for i in range(3)])
     b = Vector([max(p[i] for p in points) for i in range(3)])
     return a, b, collar
+
+
+def headwear_target(body, rig, spec):
+    """Build the hat seat from the body's measured head, not a fixed envelope."""
+    lo, hi, _ = head_region(body, rig, spec)
+    fitting = spec['fitting']
+    hairline_drop = max(0., spec['body_height_m']-fitting.get(
+        'hat_hairline_m', spec['body_height_m']))
+    crown_clearance = fitting.get('hair_crown_clearance_m', 0.)
+    return [[lo.x, max(lo.z, hi.z-hairline_drop), -hi.y],
+            [hi.x, hi.z+crown_clearance, -lo.y]]
+
+
+def hair_target(body, rig, spec, slot='hair'):
+    """Seat hair on the measured head without inflating it to a fixed envelope."""
+    lo, hi, _ = head_region(body, rig, spec)
+    fitting = spec['fitting']
+    clearance = fitting.get('hair_clearance_m', .025)
+    head_width = hi.x-lo.x
+    head_depth = hi.y-lo.y
+    width = head_width+clearance*2
+    depth = head_depth+clearance*2
+    center_x = (lo.x+hi.x)/2
+    center_depth = -(lo.y+hi.y)/2
+
+    # Split legacy parts retain their authored front/rear relationship to the
+    # head, while their size comes from the same measured head as unified hair.
+    authored = fitting.get('bounds', {})
+    authored_head = authored.get('head')
+    authored_slot = authored.get(slot)
+    if slot in ('hairFront', 'hairBack') and authored_head and authored_slot:
+        authored_width = authored_head[1][0]-authored_head[0][0]
+        authored_depth = authored_head[1][2]-authored_head[0][2]
+        if min(authored_width, authored_depth) > 1e-8:
+            width *= (authored_slot[1][0]-authored_slot[0][0])/authored_width
+            depth *= (authored_slot[1][2]-authored_slot[0][2])/authored_depth
+            head_depth_center = (authored_head[0][2]+authored_head[1][2])/2
+            slot_depth_center = (authored_slot[0][2]+authored_slot[1][2])/2
+            center_depth += (slot_depth_center-head_depth_center)*head_depth/authored_depth
+
+    crown = hi.z+fitting.get('hair_crown_clearance_m', .035)
+    length_ratio = fitting.get('hair_length_head_ratio')
+    lower = lo.z if length_ratio is None else crown-(hi.z-lo.z)*length_ratio
+    return [[center_x-width/2, lower, center_depth-depth/2],
+            [center_x+width/2, crown, center_depth+depth/2]]
 
 
 def bind_body_head(body, rig, spec):
@@ -319,17 +377,11 @@ def body_targets(body, rig, spec):
                 corner[2] += -ankle.y-spec['anchors'][f'ankle_{side}'][2]
     targets['shoes'] = [[min(box[0][i] for box in feet.values()) for i in range(3)],
                         [max(box[1][i] for box in feet.values()) for i in range(3)]]
-    if 'hair' in targets:
-        head_lo, head_hi, _ = head_region(body, rig, spec)
-        center = (head_lo+head_hi)/2
-        half_x = (head_hi.x-head_lo.x)*spec['fitting'].get('hair_head_width_ratio', 1.14)/2
-        half_z = (head_hi.y-head_lo.y)*spec['fitting'].get('hair_head_depth_ratio', 1.18)/2
-        targets['hair'][0][0], targets['hair'][1][0] = center.x-half_x, center.x+half_x
-        targets['hair'][0][2], targets['hair'][1][2] = -center.y-half_z, -center.y+half_z
-        targets['hair'][1][1] = head_hi.z+spec['fitting'].get('hair_crown_clearance_m', .035)
-        length_ratio = spec['fitting'].get('hair_length_head_ratio')
-        if length_ratio is not None:
-            targets['hair'][0][1] = max(.035, targets['hair'][1][1]-(head_hi.z-head_lo.z)*length_ratio)
+    for slot in ('hair', 'hairFront', 'hairBack'):
+        if slot in targets:
+            targets[slot] = hair_target(body, rig, spec, slot)
+    if 'hat' in targets:
+        targets['hat'] = headwear_target(body, rig, spec)
     return targets, feet
 
 

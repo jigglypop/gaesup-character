@@ -1,12 +1,13 @@
 {
   "id": "sd-factory-v1",
-  "revision": 16,
+  "revision": 18,
   "rest_pose": "T",
   "units": "metres",
   "axes": {"right": "+X", "up": "+Y", "front": "+Z", "anatomical_left": "+X"},
   "origin": "floor_between_feet",
   "body_height_m": 1.2,
   "base_body": {
+    "face": "blank smooth egg-shaped head; no eyes, nose, mouth, ears or facial relief",
     "torso_width_m": 0.22, "torso_depth_m": 0.13,
     "arm_diameter_m": 0.036, "leg_diameter_m": 0.044,
     "wrist_diameter_m": 0.028, "ankle_diameter_m": 0.032,
@@ -40,15 +41,14 @@
     "shoes": [[-0.22, -0.012, -0.13], [0.22, 0.15, 0.23]]
   },
   "fitting": {
-    "revision": "shared-size-v14-t-pose-slender-joints",
+    "revision": "shared-size-v20-measured-hair-scalp",
+    "hair_surface_fit": "measured-skull-v1",
     "hair_length_profiles": {"source": null, "short": 1.0, "long": 1.7},
     "method": "shared_size_with_body_cut_lines",
     "fit_to_body_surface": false,
     "body_crop": {"opening_inset_m": 0.008, "wrist_inset_m": 0.006},
     "hair_volume_scale_xz": [1.10, 1.14],
     "hair_clearance_m": 0.025,
-    "hair_head_width_ratio": 1.5,
-    "hair_head_depth_ratio": 1.5,
     "hair_crown_clearance_m": 0.07,
     "scalp_clearance_m": 0.003,
     "hat_width_scale": 1.06,

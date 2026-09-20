@@ -1,12 +1,5 @@
-import {
-  Mesh,
-  SkinnedMesh,
-  Texture,
-  type BufferGeometry,
-  type Material,
-  type Skeleton,
-} from 'three';
 import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { disposeObjectResources } from './gpu-resources';
 
 export type GLTFAssetLease = { gltf: GLTF; release: () => void };
 type Entry = { promise: Promise<GLTF>; references: number };
@@ -43,33 +36,13 @@ export class GLTFAssetCache {
         released = true;
         if (--owned.references > 0) return;
         if (this.entries.get(uri) === owned) this.entries.delete(uri);
-        disposeGLTFAsset(gltf);
+        disposeObjectResources(gltf.scenes);
       },
     };
   }
   getReferenceCount(uri: string): number {
     return this.entries.get(uri)?.references ?? 0;
   }
-}
-
-function disposeGLTFAsset(gltf: GLTF): void {
-  const geometries = new Set<BufferGeometry>();
-  const materials = new Set<Material>();
-  const textures = new Set<Texture>();
-  const skeletons = new Set<Skeleton>();
-  for (const scene of gltf.scenes)
-    scene.traverse((object) => {
-      if (!(object instanceof Mesh)) return;
-      geometries.add(object.geometry);
-      if (object instanceof SkinnedMesh) skeletons.add(object.skeleton);
-      for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
-        materials.add(material);
-        for (const value of Object.values(material))
-          if (value instanceof Texture) textures.add(value);
-      }
-    });
-  for (const resource of [...geometries, ...materials, ...textures, ...skeletons])
-    resource.dispose();
 }
 
 export const gltfAssetCache = new GLTFAssetCache();

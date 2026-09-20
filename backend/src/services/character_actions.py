@@ -1,6 +1,5 @@
 """Bounded action workers. No client-provided code, commands, or paths."""
 
-import json
 import logging
 import os
 

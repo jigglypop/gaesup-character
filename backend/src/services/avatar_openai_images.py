@@ -134,8 +134,10 @@ def _read_error_response(response):
     }
 
 
-def edit_response(client, base, key, payload, receipt=None, *, multipart=False, input_sha256=None):
+def edit_response(client, base, key, payload, receipt=None, *, multipart=False, input_sha256=None, endpoint='/images/edits'):
     """Keep response bytes before decoding; a cached response never re-enters POST."""
+    if endpoint not in ('/images/edits', '/images/generations') or (multipart and endpoint != '/images/edits'):
+        raise ValueError('Unsupported image endpoint')
     receipt = Path(receipt) if receipt else None
     response_path = receipt.with_suffix('.response.json') if receipt else None
     error_path = receipt.with_suffix('.error.json') if receipt else None
@@ -162,7 +164,7 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
     else:
         request_args = {'json': payload}
     started = time.monotonic()
-    metadata = {'transport': 's3-regional-image-urls-v2' if input_sha256 else 'buffered-multipart-v4' if multipart else 'buffered-json-v3', 'model': payload['model'], 'n': payload['n'],
+    metadata = {'transport': 's3-regional-image-urls-v2' if input_sha256 else 'buffered-multipart-v4' if multipart else 'buffered-json-v3', 'endpoint': endpoint, 'model': payload['model'], 'n': payload['n'],
                 'phase': 'prepared', 'events': [],
                 'client_request_id': previous.get('client_request_id') or uuid.uuid4().hex, 'request_started': False}
     if input_sha256:
@@ -205,7 +207,7 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
     headers = {'Authorization': 'Bearer '+key, 'X-Client-Request-Id': metadata['client_request_id']}
     if multipart:
         headers['Content-Type'] = 'multipart/form-data; boundary=factory-'+metadata['client_request_id']
-    request = client.build_request('POST', base.rstrip('/')+'/images/edits', headers=headers,
+    request = client.build_request('POST', base.rstrip('/')+endpoint, headers=headers,
                                    extensions={'trace': trace}, **request_args)
     # Finish encoding before opening the connection. Send a single replayable byte
     # stream, rather than interleaving multipart encoding with network writes.
@@ -336,6 +338,23 @@ def standard_image_bytes(response):
             raise PipelineError('canvas_mismatch', '응답 이미지가 허용한 크기를 초과했습니다. 자동 재생성하지 않습니다.', 422)
         image.verify()
     return raw
+
+
+def generate_image(prompt, model, base, *, receipt, background='opaque'):
+    """One prompt-only image request with the same durable response contract."""
+    if background not in ('opaque', 'transparent'):
+        raise ValueError('Unsupported image background')
+    saved = Path(receipt).with_suffix('.response.json')
+    if saved.is_file():
+        return standard_image_bytes(json.loads(saved.read_bytes()))
+    key = os.getenv('OPENAI_API_KEY', '').strip()
+    if not key:
+        raise PipelineError('image_provider_unavailable', 'OpenAI 이미지 생성 키가 필요합니다.', 422)
+    payload = {'model': model, 'prompt': prompt, 'n': 1, 'size': '1024x1024',
+               'quality': 'high', 'output_format': 'png', 'background': background}
+    with httpx.Client(timeout=httpx.Timeout(600, connect=15, write=60, pool=15), transport=image_transport()) as client:
+        response = edit_response(client, base, key, payload, receipt, endpoint='/images/generations')
+    return standard_image_bytes(response)
 
 
 def generate_part_image(source, prompt, model, base, *, receipt=None):

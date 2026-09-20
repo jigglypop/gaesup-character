@@ -8,12 +8,10 @@ from src.services.avatar_factory import _LOCK, digest
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.object_storage import copy_file
 from src.services.process_identity import identity, state as process_state
+from src.services.avatar_equipment import is_native_part_set
+from src.services.meshy_status import BLOCKED, saved_problem
 
-STAGES = ('images', 'models', 'rig', 'assemble')
-SLOTS = ('body', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes')
-HAIR_SLOTS = ('body', 'hair', 'hat', 'top', 'bottom', 'shoes')
-HISTORICAL_HEAD_SLOTS = ('body', 'head', 'top', 'bottom', 'shoes')
-BLOCKED = ('submission_uncertain', 'submission_rejected', 'FAILED', 'CANCELED')
+STAGES = ('images', 'models', 'rig', 'assemble', 'expressions')
 _WORKERS = {}
 
 
@@ -33,6 +31,8 @@ def ensure_stage_idle(factory, owner, job_id):
 
 
 def image_inputs(part, pipeline):
+    if pipeline.get('uploaded_glb'):
+        return []
     if pipeline.get('production_spec'):
         return [part.get('views', {}).get(view, {}) for view in pipeline['production_spec']['generated_views']]
     return [part.get('image', {})]
@@ -103,8 +103,7 @@ class AvatarStageResume:
         directory = self.factory.directory(owner, job_id)
         pipeline = read_json(directory/'pipeline.json')
         parts = pipeline.get('parts', [])
-        valid = any(len(parts) == len(slots) and {p['slot'] for p in parts} == set(slots)
-                    for slots in (SLOTS, HAIR_SLOTS, HISTORICAL_HEAD_SLOTS))
+        valid = is_native_part_set(p['slot'] for p in parts)
         operation = current_run(directory)
         busy = active_run(operation) or job.get('character_flow', {}).get('busy', False)
         native_pointer = read_json(directory/'native-parts/current.json')
@@ -125,12 +124,14 @@ class AvatarStageResume:
         delivery = read_json(directory/'meshy/delivery.json')
         rig_ready = bool(delivery.get('version') and delivery.get('files', {}).get('model.glb')
                          and (directory/'meshy/versions'/delivery['version']/'model.glb').is_file())
-        rig_task = read_json(directory/'meshy/character.json')
-        rig_blocked = rig_task.get('status') in BLOCKED
-        for path in (directory/'meshy/actions').glob('*/motion-pack.json'):
-            rig_blocked |= any(t.get('status') in BLOCKED for t in read_json(path).get('tasks', {}).values())
+        rig_problem = saved_problem(directory/'meshy')
+        expressions = job.get('default_expressions')
+        from src.services.avatar_expression_reuse import expression_reuse_state
+        reused_expressions = expression_reuse_state(directory)
+        if reused_expressions:
+            expressions = {**reused_expressions, 'items': []}
         image_resume = False
-        if valid:
+        if valid and not pipeline.get('uploaded_glb'):
             if pipeline.get('production_spec'):
                 from src.services.avatar_multiview_images import can_resume
                 image_resume = can_resume(directory, pipeline)
@@ -142,13 +143,28 @@ class AvatarStageResume:
             'images': None if image_resume else '기존 이미지 응답 확인 또는 실패 이미지 재요청이 필요합니다.',
             'models': model_error,
             'rig': '저장된 3D 파츠가 필요합니다.' if not models_ready else
-                   '기존 리깅·동작 요청의 응답 확인이 필요합니다.' if rig_blocked else None,
+                   rig_problem['message'] if rig_problem else None,
             'assemble': '저장된 3D 파츠가 필요합니다.' if not models_ready else
                         '저장된 리깅 결과가 필요합니다.' if not rig_ready else None,
+            'expressions': '이 작업에는 기본 표정 생성이 접수되지 않았습니다.' if not expressions else
+                           '저장된 조립 몸이 필요합니다.' if native.get('status') != 'review_required' else
+                           '기본 표정이 모두 저장됐습니다.' if expressions['status'] == 'complete' else None,
         }
+        if pipeline.get('uploaded_glb'):
+            reasons['images'] = reasons['models'] = '등록한 GLB를 사용합니다.'
+            if (pipeline.get('base_body_setup') or {}).get('import_mode') == 'register':
+                reasons['rig'] = '바로 등록한 원본입니다. 새 리깅은 GLB 등록에서 선택하세요.'
+                if not pipeline['uploaded_glb'].get('rigged'):
+                    reasons['assemble'] = '리깅 없는 원본이 등록됐습니다. 파츠 조립에는 리깅이 필요합니다.'
+        # Earlier stages already have their files; replaying them only hits the same rejected rig.
+        if models_ready and rig_problem:
+            reasons['models'] = '3D 파츠가 모두 저장됐습니다. 리깅 오류를 확인해 주세요.'
+            if image_count == len(images):
+                reasons['images'] = '이미지가 모두 저장됐습니다. 리깅 오류를 확인해 주세요.'
         stages_paid = {
-            'assemble': False,
-            'rig': not (rig_ready and rig_worker.get('status') == 'complete'),
+            'assemble': bool(not reused_expressions and expressions and expressions['status'] != 'complete'),
+            'expressions': bool(expressions and any(item['status'] != 'complete' for item in expressions['items'])),
+            'rig': not (rig_ready and rig_worker.get('status') == 'complete') and not bool((pipeline.get('base_body_setup') or {}).get('rig_source')),
             'models': not models_ready or not (rig_ready and rig_worker.get('status') == 'complete'),
             'images': any(i.get('status') != 'succeeded' for i in images) or not models_ready
                       or not (rig_ready and rig_worker.get('status') == 'complete'),
@@ -156,11 +172,15 @@ class AvatarStageResume:
         actions = [{'stage': stage, 'enabled': valid and not busy and not reasons[stage],
                     'reason': '진행 중인 작업이 있습니다.' if busy else reasons[stage] if valid else '저장된 파츠 작업이 필요합니다.',
                     'paid': stages_paid[stage]}
-                   for stage in STAGES]
+                   for stage in STAGES if stage != 'expressions' or expressions]
         recommended = next((a['stage'] for a in reversed(actions) if a['enabled']), None)
         public_operation = {k: operation.get(k) for k in ('id', 'stage', 'status', 'error', 'created_at', 'updated_at')} if operation else None
         if public_operation and operation['status'] in ('accepted', 'running') and not active_run(operation):
             public_operation.update(status='paused', error='서버가 중단되었습니다. 저장된 단계에서 다시 실행할 수 있습니다.')
+        elif public_operation and operation['status'] == 'paused' and rig_problem and models_ready:
+            public_operation['error'] = rig_problem['message']
+        elif public_operation and operation['status'] == 'paused' and rig_ready and rig_worker.get('origin') == 'rig_transfer':
+            public_operation = None  # The preserved old rejection is superseded by a local recovery.
         return {'actions': actions, 'busy': bool(busy), 'recommended_stage': recommended,
                 'saved': {'images': image_count, 'images_total': len(images), 'models': sum(models),
                           'models_total': len(parts), 'rig': rig_ready}, 'operation': public_operation}
@@ -209,17 +229,23 @@ class AvatarStageResume:
                     service = AvatarImagePipeline(self.factory)
                     service.resume(owner, job_id, stage=stage)
                     service.execute(owner, job_id)
+                elif stage == 'expressions':
+                    from src.services.avatar_expression_pipeline import execute as expressions_execute, summary
+                    pointer = read_json(directory/'native-parts/current.json')
+                    if pipeline.get('expression_reuse'):
+                        from src.services.avatar_expression_reuse import reuse_saved_expressions
+                        result = reuse_saved_expressions(self.factory, owner, job_id, pointer['version'])
+                    else:
+                        expressions_execute(self.factory, owner, job_id, pointer['version'])
+                        result = summary(directory, pointer['version'])
+                    job_record = read_json(directory/'job.json')
+                    job_record['error'] = (result.get('error') or '기본 표정 텍스처 처리 대기') if result and result['status'] != 'complete' else None
+                    _write_json(directory/'job.json', job_record)
                 else:
                     publish_saved_models(directory, pipeline)
                     if stage == 'rig':
-                        from src.services.avatar_meshy import AvatarMeshy
-                        if read_json(directory/'meshy/delivery.json') and read_json(directory/'meshy/worker.json').get('status') == 'complete':
-                            from src.services.avatar_character_flow import assemble_character
-                            assemble_character(self.factory, owner, job_id)
-                        else:
-                            service = AvatarMeshy(self.factory)
-                            service.start(owner, job_id)
-                            service.execute(owner, job_id)
+                        from src.services.avatar_character_flow import continue_character
+                        continue_character(self.factory, owner, job_id)
                     else:
                         from src.services.avatar_character_flow import assemble_character
                         assemble_character(self.factory, owner, job_id)
@@ -227,7 +253,9 @@ class AvatarStageResume:
                 native = read_json(directory/'native-parts'/pointer['version']/'record.json') if pointer else {}
                 job = read_json(directory/'job.json')
                 rig_worker = read_json(directory/'meshy/worker.json')
-                error = job.get('error') or native.get('error') or (rig_worker.get('error') if stage != 'assemble' else None)
+                problem = saved_problem(directory/'meshy') if stage != 'assemble' else None
+                error = job.get('error') or native.get('error') or (problem['message'] if problem else
+                        rig_worker.get('error') if stage != 'assemble' else None)
                 complete = native.get('status') == 'review_required' and not error
                 record.update(status='complete' if complete else 'paused',
                               error=None if complete else error or '저장된 작업 상태를 확인해 이어서 실행해 주세요.')

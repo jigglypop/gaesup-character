@@ -1,7 +1,10 @@
 """Meshy skeleton and library clips for a preserved factory whole character."""
+from copy import deepcopy
 import hashlib
 import json
+import logging
 import os
+import re
 from threading import Lock
 import time
 
@@ -16,9 +19,11 @@ from src.services.character_pipeline import PipelineError, read_json, now
 from src.services.glb import parse_glb
 from src.services.process_identity import identity, state as process_state
 from src.services.wardrobe import download_glb
+from src.services.meshy_status import BLOCKED, saved_problem
 
 SLOTS = ('idle', 'walk', 'run', 'jump', 'fall', 'sit', 'armsUp', 'crouch')
 _WORKERS = {}
+LOGGER = logging.getLogger(__name__)
 
 
 def client(base):
@@ -36,7 +41,7 @@ class AvatarMeshy:
         job = self.factory.get(owner, job_id)
         slots = [p['slot'] for p in job.get('parts', [])]
         valid_parts = job.get('production_mode') == 'character_parts' and 'body' in slots
-        if job.get('input_kind') != 'image' or (slots != ['body'] and not valid_parts):
+        if job.get('input_kind') not in ('image', 'glb') or (slots != ['body'] and not valid_parts):
             raise PipelineError('whole_character_required', '생성된 통짜 전신 작업이 필요합니다.', 422)
         return self.factory.directory(owner, job_id)/'meshy'
 
@@ -54,19 +59,53 @@ class AvatarMeshy:
         _write_json(path, {'fetched_at': time.time(), 'items': items})
         return items
 
+    def _saved_defaults(self, owner):
+        root = self.factory.root/str(int(owner))
+        saved = read_json(root/'motion-defaults.json', {'selections': {}})
+        if saved.get('scope') == 'owner':
+            return saved
+        # Older UI saved the same default-setting control in each job. Recover
+        # the newest saved value per slot, without modifying any rig contracts.
+        cache = getattr(self.factory, '_legacy_motion_defaults', {})
+        cache_key = (int(owner), json.dumps(saved, sort_keys=True))
+        if cache_key in cache:
+            return deepcopy(cache[cache_key])
+        records = [saved]
+        for path in root.glob('*/motion-defaults.json'):
+            if re.fullmatch(r'[a-f0-9]{24}', path.parent.name):
+                records.append(read_json(path))
+        resolved = {'selections': {}, 'scope': 'owner'}
+        for record in sorted(records, key=lambda item: item.get('updated_at', '')):
+            resolved['selections'].update({slot: value for slot, value in record.get('selections', {}).items()
+                                           if slot in SLOTS and type(value) is int})
+            if record.get('updated_at'):
+                resolved['updated_at'] = record['updated_at']
+        cache[cache_key] = deepcopy(resolved)
+        self.factory._legacy_motion_defaults = cache
+        return resolved
+
     def defaults(self, owner, selections=None, job_id=None):
         if job_id:
             self.factory.get(owner, job_id)
-        path = ((self.factory.directory(owner, job_id) if job_id else self.factory.root/str(int(owner)))
-                /'motion-defaults.json')
         if selections is not None:
-            available = {item['action_id'] for item in self.library(owner)}
-            if not set(selections) <= set(SLOTS) or any(type(v) is not int or v not in available for v in selections.values()):
-                raise PipelineError('invalid_action', '현재 Meshy 목록에서 기본 동작을 선택하세요.', 422)
-            with _LOCK:
+            self.validate_actions(owner, selections)
+        with _LOCK:
+            saved = self._saved_defaults(owner)
+            if selections is not None:
+                saved = {'scope': 'owner', 'selections': {**saved['selections'], **selections}, 'updated_at': now()}
+                path = self.factory.root/str(int(owner))/'motion-defaults.json'
                 path.parent.mkdir(parents=True, exist_ok=True)
-                _write_json(path, {'selections': selections, 'updated_at': now()})
-        return read_json(path, {'selections': {}})
+                _write_json(path, saved)
+            return saved
+
+    def validate_actions(self, owner, selections):
+        available = {item['action_id'] for item in self.library(owner)} if selections else set()
+        if not set(selections) <= set(SLOTS) or any(type(v) is not int or v not in available for v in selections.values()):
+            raise PipelineError('invalid_action', '현재 Meshy 목록에서 기본 동작을 선택하세요.', 422)
+
+    def default_actions(self, owner):
+        saved = self.defaults(owner)['selections']
+        return {slot: saved.get(slot, action_id) for slot, action_id in character_motion.DEFAULT_ACTIONS.items()}
 
     def start(self, owner, job_id):
         run = self.directory(owner, job_id)
@@ -74,6 +113,13 @@ class AvatarMeshy:
             job = run.parent
             contract = read_json(run/'input.json')
             pipeline = read_json(job/'pipeline.json')
+            uploaded = bool(pipeline.get('uploaded_glb'))
+            if uploaded and ((pipeline.get('base_body_setup') or {}).get('import_mode') != 'rig'
+                             or read_json(job/'job.json').get('limits', {}).get('meshy_rig_tasks') != 1):
+                raise PipelineError('uploaded_body', '바로 등록한 GLB입니다. 새 리깅 후 등록을 선택해 접수하세요.', 409)
+            if (read_json(run/'worker.json').get('origin') == 'rig_transfer'
+                    or read_json(run/'delivery.json').get('origin') == 'transferred_meshy_rig'):
+                raise PipelineError('local_rig_recovery', '저장된 골격 복구 작업에서 이어서 진행하세요.', 409)
             if pipeline.get('base_body'):
                 raise PipelineError('frozen_body', '저장된 기본 몸의 리깅은 다시 제출하지 않습니다.', 422)
             if 'motion_actions' in contract:
@@ -90,7 +136,7 @@ class AvatarMeshy:
             if not (run/'input.json').exists():
                 source = self.factory.artifact(owner, job_id, 'generated-body.glb')
                 provider = read_json(job/'parts/body/character.json')
-                if provider.get('stage') != 'generation' or provider.get('status') != 'SUCCEEDED':
+                if not uploaded and (provider.get('stage') != 'generation' or provider.get('status') != 'SUCCEEDED'):
                     raise PipelineError('generation_required', '성공한 Meshy 전신 생성 작업이 필요합니다.', 422)
                 base = pipeline['meshy_base']
                 height = pipeline.get('body_height_m', 1.81)
@@ -99,10 +145,12 @@ class AvatarMeshy:
                     pass
                 run.mkdir(exist_ok=True)
                 _write_json(run/'input.json', {'source_job_id': job_id, 'source_sha256': digest(source),
-                    'generation_task_id': provider['task_id'], 'height_meters': height, 'meshy_base': base,
+                    'generation_task_id': provider.get('task_id'), 'input_kind': 'model' if uploaded else 'generation',
+                    'height_meters': height, 'meshy_base': base,
                     'max_rig_tasks': 1, 'motion_actions': accepted_actions,
                     'max_animation_tasks': max_animation_tasks})
-                _write_json(run/'character.json', {**provider, 'height_meters': height})
+                if not uploaded:
+                    _write_json(run/'character.json', {**provider, 'height_meters': height})
             else:
                 # Legacy runs may have accepted actions in their immutable pipeline but
                 # predate the self-contained Meshy input contract. Freeze them once.
@@ -137,23 +185,27 @@ class AvatarMeshy:
                      for name in receipt.get('files', {})]
         artifacts.extend({'name': name+'.glb', 'url': f'/api/avatar-factory/jobs/{job_id}/meshy/provider/{name}.glb'}
                          for name in read_json(run/'rigging-artifacts.json') if name in ('rigged', 'walking', 'running'))
-        blocked = ('submission_uncertain', 'submission_rejected', 'FAILED', 'CANCELED')
-        frozen = receipt.get('origin') == 'frozen_body'
+        frozen = receipt.get('origin') in ('frozen_body', 'transferred_meshy_rig', 'uploaded_glb')
+        if (read_json(run.parent/'pipeline.json').get('base_body_setup') or {}).get('import_mode') == 'register':
+            frozen = True
+        problem = saved_problem(run)
+        local_recovery = worker.get('origin') == 'rig_transfer'
         clips = receipt.get('clips', [])
         if frozen and not clips and version:
             document, _ = parse_glb((run/'versions'/version/'model.glb').read_bytes(), strict=True)
-            clips = [{'slot': a.get('name', f'clip_{i}'), 'source': 'frozen_body', 'action_id': None}
+            clips = [{'slot': a.get('name', f'clip_{i}'), 'source': receipt['origin'], 'action_id': None}
                      for i, a in enumerate(document.get('animations', []))]
-        return {'provider': 'meshy', 'status': 'ready' if version else task.get('status', 'not_started'),
+        return {'provider': 'meshy', 'status': 'ready' if version else 'running' if local_recovery and busy else task.get('status', 'not_started'),
                 'rig_task_id': task.get('task_id') if task.get('stage') == 'rigging' else None,
                 'progress': task.get('progress', 0) if task.get('status') == 'IN_PROGRESS' else 0,
-                'busy': busy, 'error': worker.get('error'), 'artifacts': artifacts,
+                'busy': busy, 'error': worker.get('error') if local_recovery else problem['message'] if problem else worker.get('error'),
+                'failure': None if local_recovery and busy else problem, 'artifacts': artifacts,
                 'version': version, 'clips': clips, 'bone_count': receipt.get('bone_count'),
                 'can_request_action': not frozen and task.get('stage') == 'rigging' and task.get('status') == 'SUCCEEDED' and not busy,
                 'origin': receipt.get('origin', 'meshy'),
                 'model_sha256': receipt.get('files', {}).get('model.glb'),
                 'source_sha256': receipt.get('source_sha256'), 'actions': tasks,
-                'can_resume': not frozen and not busy and task.get('status') not in blocked and not any(t['status'] in blocked for t in tasks),
+                'can_resume': not frozen and not busy and problem is None,
                 'selected': read_json(run/'selected.json')}
 
     def _publish(self, run):
@@ -208,7 +260,16 @@ class AvatarMeshy:
         if len(unique_actions) > contract.get('max_animation_tasks', 0):
             raise ValueError('Accepted animation task budget exceeded')
         selected = read_json(run/'selected.json')
+        rigging_artifacts = read_json(run/'rigging-artifacts.json')
+        basic_artifacts = {'walk': 'walking', 'run': 'running'}
         for slot, action_id in accepted.items():
+            basic_name = basic_artifacts.get(slot)
+            uses_default_basic = (basic_name in rigging_artifacts
+                                  and action_id == character_motion.DEFAULT_ACTIONS.get(slot))
+            if uses_default_basic:
+                if selected.get(slot) == action_id:
+                    selected.pop(slot)
+                continue
             selected.setdefault(slot, action_id)
         _write_json(run/'selected.json', selected)
         selected_accepted = list(dict.fromkeys(
@@ -258,11 +319,14 @@ class AvatarMeshy:
             _write_json(run/'worker.json', {'status': 'running', 'process': identity(), 'error': None})
             deadline = time.monotonic()+timeout
             with client(contract['meshy_base']) as api:
-                task = character_jobs.state(run)
+                if contract.get('input_kind') == 'model' and not (run/'character.json').is_file():
+                    task = character_jobs.rig_model(run, run.parent/'output/generated-body.glb', contract['height_meters'], api)
+                else:
+                    task = character_jobs.state(run)
                 if task['stage'] == 'generation':
                     task = character_jobs.rig(run, api)
                 while True:
-                    if task['status'] in ('submission_uncertain', 'submission_rejected', 'FAILED', 'CANCELED'):
+                    if task['status'] in BLOCKED:
                         raise ValueError('Existing rig attempt requires recovery; no automatic resubmission')
                     task = character_jobs.refresh(run, api)
                     if task['status'] == 'SUCCEEDED':
@@ -280,7 +344,8 @@ class AvatarMeshy:
                             if motion['status'] != 'SUCCEEDED':
                                 pending = True; continue
                             with httpx.Client(timeout=120, follow_redirects=True) as downloader:
-                                download_glb(downloader, motion['result']['animation_glb_url'], directory/'clip.glb')
+                                download_glb(downloader, motion['result']['animation_glb_url'], directory/'clip.glb',
+                                             preserve_detail=task.get('generation_settings', {}).get('should_remesh') is False)
                             quality = inspect_glb((directory/'clip.glb').read_bytes(), budget_warnings=True)
                             if quality['errors'] or not quality['metrics']['animations']:
                                 raise ValueError('Provider animation is invalid')
@@ -297,8 +362,28 @@ class AvatarMeshy:
                         return
                     time.sleep(poll_seconds)
         except Exception as exc:
-            status = f'HTTP {exc.response.status_code}' if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__
-            _write_json(run/'worker.json', {'status': 'paused', 'error': f'Meshy 처리 중 중단되었습니다 ({status}). 기존 작업 ID를 보존했습니다. 불확실한 요청은 재제출하지 않습니다.'})
+            problem = saved_problem(run)
+            if problem:
+                error = problem['message']
+            elif isinstance(exc, httpx.HTTPError):
+                error = 'Meshy 응답을 가져오지 못했습니다. 저장된 작업에서 조회를 이어갈 수 있습니다.'
+            else:
+                error = '리깅·동작 파일 처리 중 중단됐습니다. 저장된 결과에서 이어갈 수 있습니다.'
+            # Record the failure location without logging signed URLs or response bodies.
+            trace = exc.__traceback__
+            while trace and trace.tb_next:
+                trace = trace.tb_next
+            LOGGER.error('Meshy worker stopped job=%s type=%s function=%s line=%s code=%s',
+                         job_id, type(exc).__name__, trace.tb_frame.f_code.co_name if trace else None,
+                         trace.tb_lineno if trace else None, problem['code'] if problem else None)
+            _write_json(run/'worker.json', {'status': 'paused', 'error': error,
+                        'failure': problem, 'exception_type': type(exc).__name__})
+            if problem and problem['code'] == 'rig_pose_rejected':
+                from src.services.avatar_rig_transfer import AvatarRigTransfer
+                try:
+                    AvatarRigTransfer(self.factory).recover_rejected(owner, job_id)
+                except Exception as recovery_error:
+                    LOGGER.error('Local rig recovery stopped job=%s type=%s', job_id, type(recovery_error).__name__)
         finally:
             lock.release()
 

@@ -1,0 +1,98 @@
+name: Deploy asset studio to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_key:
+        description: Existing content-addressed S3 key to redeploy or roll back to
+        required: false
+        type: string
+
+concurrency:
+  group: asset-studio-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ASSET_S3_BUCKET: ${{ vars.ASSET_S3_BUCKET }}
+      EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Use Node.js 22
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_key == '' }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Require deployment variables
+        shell: bash
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          : "${AWS_REGION:?Set the AWS_REGION environment variable}"
+          : "${ASSET_S3_BUCKET:?Set the ASSET_S3_BUCKET environment variable}"
+          : "${EC2_INSTANCE_ID:?Set the EC2_INSTANCE_ID environment variable}"
+          : "${AWS_DEPLOY_ROLE_ARN:?Set the AWS_DEPLOY_ROLE_ARN environment variable}"
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gaesup-asset-studio-deploy
+
+      - name: Build frontend
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_key == '' }}
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Check backend syntax
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_key == '' }}
+        run: |
+          python -m compileall -q backend/src infra/entrypoint.py
+          python -m pip install --disable-pip-version-check uv==0.11.9
+          uv build --package asset-3d-api
+
+      - name: Prepare and upload immutable release
+        id: release
+        shell: pwsh
+        env:
+          REQUESTED_RELEASE_KEY: ${{ inputs.release_key }}
+        run: |
+          if ($env:REQUESTED_RELEASE_KEY) {
+            if ($env:REQUESTED_RELEASE_KEY -notmatch '^releases/studio/[0-9a-f]{64}\.tar\.gz$') {
+              throw 'release_key must be a content-addressed releases/studio key.'
+            }
+            "release_key=$($env:REQUESTED_RELEASE_KEY)" >> $env:GITHUB_OUTPUT
+          } else {
+            $result = & ./infra/prepare-aws.ps1 -Region $env:AWS_REGION -Bucket $env:ASSET_S3_BUCKET -Upload
+            $receipt = $result | ConvertFrom-Json
+            "release_key=$($receipt.release_key)" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Deploy through SSM and verify health
+        shell: pwsh
+        run: |
+          ./infra/deploy-aws.ps1 `
+            -Region $env:AWS_REGION `
+            -Bucket $env:ASSET_S3_BUCKET `
+            -InstanceId $env:EC2_INSTANCE_ID `
+            -ReleaseKey '${{ steps.release.outputs.release_key }}'

@@ -1,5 +1,4 @@
 """Image-first paper-doll blueprints. Layer design precedes any 3D submission."""
-import base64
 from copy import deepcopy
 import hashlib
 import io
@@ -23,7 +22,7 @@ SLOTS = ['body', 'face', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes
 LEGACY_SLOTS = SLOTS[:]
 SLOTS += list(EQUIPMENT)
 ORDER = ['hairBack', 'body', 'shoes', 'bottom', 'top', 'face', 'hairFront', 'hat']
-LABELS = ['공통 몸', '얼굴', '뒷머리', '앞머리', '모자', '상의', '하의', '신발']
+LABELS = ['공통 몸', '얼굴', '뒷머리', '앞머리', '머리 장식', '상의', '하의', '신발']
 PLACEMENTS = [[116, 45, 280, 430], [131, 45, 250, 226], [75, 38, 362, 366], [92, 40, 328, 278],
               [65, 4, 382, 267], [94, 278, 324, 146], [168, 363, 176, 98], [186, 423, 140, 91]]
 # Actual atlas regions, retained as editable design data. The original bitmap is immutable.
@@ -34,7 +33,7 @@ Use a 4 column by 2 row grid, transparent background, no text or grid lines.
 Top row: 1 complete common SD body mannequin in an opaque plain bodysuit, bald and blank face;
 2 complete round head with the reference eyes and mouth, without hair or hat;
 3 complete back hair including the hidden crown; 4 front hair and bangs, transparent face opening.
-Bottom row: 5 hat with complete rim, without head or hair; 6 top with complete collar, sleeves and waist,
+Bottom row: 5 original head accessory (headband, bow, hair ornament or hat), preserving its actual type and open spaces, without head or hair; 6 top with complete collar, sleeves and waist,
 without hands or skirt; 7 bottom with a complete waistband and opaque inner shorts, without legs;
 8 shoes pair with complete hidden tops, without legs.
 Use the SAME approximately 1.6-head-tall front A-pose template for every character. Preserve the reference
@@ -93,6 +92,8 @@ class AvatarBlueprints:
         return path
 
     def upload(self, owner, content):
+        if not os.getenv('ASSET_S3_BUCKET', '').strip():
+            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
         if len(content) > 32*1024*1024:
             raise PipelineError('image_too_large', '이미지는 32MB 이하로 올려 주세요.', 422)
         try:

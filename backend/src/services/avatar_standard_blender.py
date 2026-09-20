@@ -133,7 +133,7 @@ def fit_matrix(anchors, tolerance):
     translation = target.mean(axis=0)-scale*rotation@source.mean(axis=0)
     fitted = (scale*rotation@source.T).T+translation
     errors = np.linalg.norm(fitted-target, axis=1)
-    if max(errors) > tolerance:
+    if tolerance is not None and max(errors) > tolerance:
         raise ValueError('Wearing anchors disagree; redesign required instead of stretching silhouette')
     result = Matrix.Identity(4)
     for i in range(3):

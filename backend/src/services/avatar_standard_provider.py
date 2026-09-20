@@ -2,7 +2,6 @@
 import hashlib
 import json
 import os
-from pathlib import Path
 from threading import Lock
 from contextlib import contextmanager, ExitStack
 

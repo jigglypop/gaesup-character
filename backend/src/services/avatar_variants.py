@@ -10,25 +10,85 @@ from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_image_pipeline import AvatarImagePipeline, capabilities
 from src.services.avatar_native_parts import AvatarNativeParts
-from src.services.avatar_production_spec import production_spec
+from src.services.avatar_production_spec import production_spec, seal_production_spec
+from src.services.avatar_fit_profiles import normalize_fit_profile, reject_generation_fit_profile
+from src.services.avatar_image_prompts import DEFAULT_DESIGN_PROMPTS
+from src.services.avatar_reference_preparation import initial_state as initial_reference_state, uses_legacy_side_pose
+from src.services.avatar_openai_images import DEFAULT_BASE
 from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec
 from src.services.glb import parse_glb
 from src.services.character_parts import blender_executable
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.object_storage import StoredPath as Path, copy_file, copy_tree, local_workspace, publish_checkpoint
 from src.services.process_identity import identity, state as process_state
+from src.services.studio_library import StudioLibrary
+from src.services.studio_prompts import StudioPrompts
 
 VARIANT_SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes', *EQUIPMENT)
+
+
+def requested_hair_length(payload):
+    """Explicit length wins; a new design can override the old art's length."""
+    selected = payload['hair_length']
+    if selected != 'source' or 'hair' not in payload['slots']:
+        return selected
+    description = payload.get('descriptions', {}).get('hair', '').lower()
+    short = bool(re.search(r'숏\s*컷|쇼트\s*컷|짧은\s*(머리|헤어)|단발|\b(short|pixie|bob|buzz\s*cut)\b', description))
+    long = bool(re.search(r'롱\s*(헤어|컷)|긴\s*(머리|헤어)|장발|\b(long|waist[- ]length)\b', description))
+    # Conflicting/missing cues retain source proportions instead of guessing.
+    return ('short' if short else 'long') if short != long else selected
+
+
+def requested_bottom_kind(payload):
+    selected = payload.get('bottom_kind') or 'source'
+    if selected not in ('source', 'pants', 'skirt'):
+        raise PipelineError('invalid_bottom_kind', '하의 종류를 다시 선택하세요.', 422)
+    if selected != 'source':
+        return selected
+    description = payload.get('descriptions', {}).get('bottom', '').lower()
+    skirt = bool(re.search(r'치마|스커트|\bskirt\b', description))
+    pants = bool(re.search(r'바지|팬츠|\b(pants|trousers|shorts|jeans)\b', description))
+    return ('skirt' if skirt else 'pants') if skirt != pants else 'source'
 
 
 class AvatarVariants:
     def __init__(self, factory):
         self.factory = factory
 
-    def create(self, owner, key, payload):
+    def create_single_part(self, owner, key, payload, *, frozen_context=None):
+        """Accept one saved prompt-backed part replacement.
+
+        The public single-part contract deliberately has no free-form prompt.
+        create() freezes the owner's prompt-library value into the accepted job,
+        while retaining its existing idempotency and recovery behavior.
+        """
+        slot = payload['slot']
+        variant = {
+            'base_job_id': payload['base_job_id'],
+            'base_version': payload['base_version'],
+            'slots': [slot],
+            'hair_length': payload.get('hair_length', 'source'),
+            'bottom_kind': payload.get('bottom_kind', 'source'),
+            'descriptions': {},
+            'single_part': True,
+        }
+        if 'fit_profile' in payload:
+            if slot not in ('top', 'bottom'):
+                raise PipelineError('invalid_fit_profile', '상의와 하의에만 의상 피팅을 적용할 수 있습니다.', 422)
+            variant['fit_profiles'] = {slot: payload['fit_profile']}
+        if 'view_mode' in payload:
+            variant['view_mode'] = payload['view_mode']
+        if 'meshy_options' in payload:
+            variant['meshy_options'] = payload['meshy_options']
+        for field in ('uploaded_views', 'part_name'):
+            if payload.get(field):
+                variant[field] = payload[field]
+        return self.create(owner, key, variant, frozen_context=frozen_context)
+
+    def create(self, owner, key, payload, *, photo_input=None, frozen_context=None):
         if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
             raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
-        if not os.getenv('ASSET_S3_BUCKET'):
+        if not os.getenv('ASSET_S3_BUCKET', '').strip():
             raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
         slots = payload['slots']
         if not slots or len(set(slots)) != len(slots) or not set(slots) <= set(VARIANT_SLOTS):
@@ -37,10 +97,15 @@ class AvatarVariants:
             raise PipelineError('invalid_hair_length', '머리 길이를 선택하세요.', 422)
         if not set(payload.get('descriptions', {})) <= set(slots):
             raise PipelineError('invalid_description', '선택한 파츠의 설명만 입력하세요.', 422)
-        if any(not payload.get('descriptions', {}).get(slot, '').strip() for slot in slots if slot in EQUIPMENT):
+        submitted_fit_profiles = (photo_input if photo_input is not None else payload).get('fit_profiles') or {}
+        if not isinstance(submitted_fit_profiles, dict) or not set(submitted_fit_profiles) <= {'top', 'bottom'}:
+            raise PipelineError('invalid_fit_profile', 'fit_profiles에는 top과 bottom만 입력할 수 있습니다.', 422)
+        if (not payload.get('single_part')
+                and any(not payload.get('descriptions', {}).get(slot, '').strip() for slot in slots if slot in EQUIPMENT)):
             raise PipelineError('equipment_description_required', '무기·도구·안경의 디자인을 입력하세요.', 422)
-        job_id = hashlib.sha256(f'{owner}:variant:{key}'.encode()).hexdigest()[:24]
-        fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        namespace = 'image' if photo_input is not None else 'variant'
+        job_id = hashlib.sha256(f'{owner}:{namespace}:{key}'.encode()).hexdigest()[:24]
+        fingerprint = hashlib.sha256(json.dumps(photo_input if photo_input is not None else payload, sort_keys=True).encode()).hexdigest()
         target = self.factory.directory(owner, job_id)
         with _LOCK:
             prior = read_json(target/'job.json')
@@ -48,33 +113,200 @@ class AvatarVariants:
                 if prior['fingerprint'] != fingerprint:
                     raise PipelineError('idempotency_conflict', '같은 요청의 입력이 변경되었습니다.', 409)
                 return self.factory.get(owner, job_id), False
-            if not capabilities()['ready']:
+            # Batch acceptance seals these values before any child is dispatched.
+            # This keyword is internal and is never read from browser input.
+            prompt_snapshot = (deepcopy(frozen_context['prompt_snapshot']) if frozen_context
+                               else StudioPrompts(self.factory, owner).snapshot())
+            from src.services.meshy_options import freeze_options
+            meshy_options = (deepcopy(frozen_context['meshy_options']) if frozen_context else
+                             {slot: freeze_options(self.factory, owner, (photo_input or payload).get('meshy_options'),
+                                                   slot, prompt_snapshot['meshy_texture']) for slot in slots})
+            uploaded_views = payload.get('uploaded_views')
+            if uploaded_views and (not payload.get('single_part') or set(uploaded_views) != {'front', 'side', 'back'}):
+                raise PipelineError('invalid_views', '단일 파츠의 정면·측면·후면 원본이 필요합니다.', 422)
+            available = capabilities()
+            if not (available['meshy_configured'] and available['blender_available']
+                    and (bool(uploaded_views) or available['image_configured'])):
                 raise PipelineError('provider_unavailable', '생성 서비스 연결을 확인하세요.', 503)
             base_id = payload['base_job_id']
             base = self.factory.get(owner, base_id)
-            native = AvatarNativeParts(self.factory).get(owner, base_id)
+            library = StudioLibrary(self.factory, owner)
+            metadata = library.metadata()
+            if (metadata['parts'].get(f'{base_id}:body', {}).get('deleted')
+                    or library.is_job_deleted(base, metadata)):
+                raise PipelineError('body_deleted', '삭제한 기본 몸은 갤러리 휴지통에서 복원한 뒤 선택하세요.', 409)
+            native_service = AvatarNativeParts(self.factory)
+            native = (native_service.get(owner, base_id, version=payload['base_version'])
+                      if photo_input is not None or frozen_context is not None else native_service.get(owner, base_id))
             if native.get('status') != 'review_required' or native.get('version') != payload['base_version']:
                 raise PipelineError('base_changed', '저장된 기본 몸 버전을 다시 선택하세요.', 409)
+            if native.get('origin') == 'uploaded_glb':
+                raise PipelineError('body_preparation_required',
+                    '리깅된 GLB는 피팅·조립부터 실행해 기준 몸을 준비하세요. 골격이 없으면 새 리깅 후 등록을 선택하세요.', 422)
             source = self.factory.directory(owner, base_id)
             body_file = source/'native-parts'/native['version']/'body.glb'
             body_hash = next((a['sha256'] for a in native['artifacts'] if a['name'] == 'body.glb'), None)
             if not body_hash or digest(body_file) != body_hash:
                 raise PipelineError('body_changed', '기본 몸 파일을 확인할 수 없습니다.', 409)
+            from src.services.avatar_fitting_management import FittingManagement, geometry_identity
+            default_profile = FittingManagement(self.factory, owner).body_default()
+            default_body = default_profile.get('body') or {}
+            body_geometry_sha256 = geometry_identity(body_file.read_bytes())
+            historical_body = (photo_input is not None and AvatarNativeParts(self.factory).get(owner, base_id).get('version') != native['version'])
+            if historical_body and (
+                    default_body.get('job_id') != base_id
+                    or default_body.get('body_sha256') != body_hash
+                    or default_body.get('geometry_sha256') != body_geometry_sha256):
+                raise PipelineError('base_changed', '저장된 공통 몸과 같은 형상의 몸 버전을 다시 선택하세요.', 409)
             original = read_json(source/'pipeline.json')
-            if not original.get('production_spec') or any(p['model']['status'] != 'ready' for p in original['parts']):
+            native_input = read_json(source/'native-parts'/native['version']/'input.json')
+            if not original.get('production_spec') or (photo_input is None and any(p['model']['status'] != 'ready' for p in original['parts'])):
                 raise PipelineError('base_incomplete', '정면·측면과 파츠가 저장된 기본 몸을 선택하세요.', 422)
+            character_id, character_name = base['character_id'], base['character_name']
+            image_source, source_hash = source/'source.png', base['source_sha256']
+            if base.get('input_kind') == 'glb':
+                source_hash = digest(image_source)
+            blueprint = None
+            if photo_input is not None:
+                image_service = AvatarImagePipeline(self.factory)
+                character = self.factory.pipeline.detail(photo_input['character_id'], owner)
+                image_source = self.factory.pipeline.artifact(character['id'], owner, 'reference')
+                source_hash = digest(image_source)
+                if source_hash != photo_input['source_sha256']:
+                    raise PipelineError('source_changed', '원본 이미지가 바뀌었습니다. 다시 불러오세요.', 409)
+                blueprint = image_service.blueprints.read(owner, character['id'])
+                if blueprint['revision'] != photo_input['blueprint_revision']:
+                    raise PipelineError('revision_conflict', '설계가 바뀌었습니다. 다시 불러오세요.', 409)
+                character_id, character_name = character['id'], character['name']
+                prompts = photo_input.get('design_prompts') or {}
+                if (not isinstance(prompts, dict) or not set(prompts) <= set(DEFAULT_DESIGN_PROMPTS)
+                        or any(not isinstance(value, str) or len(value) > 2000 for value in prompts.values())):
+                    raise PipelineError('invalid_design_prompts', '파츠 디자인 프롬프트를 다시 확인하세요.', 422)
             # Acceptance is the final write. Interrupted staging can be repeated using
             # the same key; no provider call occurs until a complete job is accepted.
             (target/'output').mkdir(parents=True, exist_ok=True)
-            copy_file(source/'source.png', target/'source.png')
+            copy_file(image_source, target/'source.png')
             state = deepcopy(original)
+            # A prepared body has no image provider. New part requests still
+            # freeze the configured image provider at their own acceptance.
+            state.update(image_provider='openai', image_model=capabilities()['image_model'],
+                         image_base=os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
+                         meshy_base=os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/'))
+            view_mode = (photo_input or payload).get('view_mode')
+            generated_views = ('front', 'side', 'back') if view_mode == 'front_side_back' else ('front', 'side')
+            # Repair/reuse pointers are scoped to their owning job and native
+            # version. A child job must establish fresh snapshots below instead
+            # of looking for the parent's version under its own directory.
+            for inherited_intent in ('local_refit', 'native_part_reuse', 'expression_reuse', 'native_assembly_version', 'uploaded_glb'):
+                state.pop(inherited_intent, None)
+            if photo_input is not None:
+                # Only the selected body is inherited; the uploaded photo owns every new part.
+                state['parts'] = [{'slot': 'body', 'views': {view: {'status': 'pending'} for view in generated_views},
+                                   'image': {'status': 'pending'}, 'model': {'status': 'ready', 'origin': 'frozen_body', 'task_id': None}}]
+                state['blueprint'] = blueprint
+                state['design_prompts'] = {**{slot: prompt_snapshot['parts'][slot] for slot in DEFAULT_DESIGN_PROMPTS}, **prompts}
+                state['reference_preparation'] = initial_reference_state(frozen_body=True, prompts=prompt_snapshot['reference']) if photo_input.get('prepare_reference') else None
+                from src.services.avatar_expression_pipeline import default_contract
+                state['default_expressions'] = default_contract(prompt_snapshot['expression']) if photo_input.get('default_expressions') else None
+            else:
+                if payload.get('single_part'):
+                    # The frozen body GLB already carries the saved face/body state.
+                    # Do not enqueue the five paid default-expression requests again.
+                    state['default_expressions'] = None
+                    from src.services.avatar_expression_reuse import snapshot_saved_expressions
+                    state['expression_reuse'] = snapshot_saved_expressions(
+                        self.factory, owner, base_id, native['version'], target)
+                elif state.get('default_expressions'):
+                    from src.services.avatar_expression_pipeline import default_contract
+                    state['default_expressions'] = default_contract(prompt_snapshot['expression'])
+                reference = state.get('reference_preparation')
+                if view_mode == 'front_side_back' and uses_legacy_side_pose(reference):
+                    # A new T-pose part must not inherit an old I-pose appearance reference.
+                    reference = None
+                    state['reference_preparation'] = None
+                if reference and reference.get('status') == 'succeeded':
+                    for image in [reference, *reference.get('views', {}).values()]:
+                        for field, hash_field in (('file', 'sha256'), ('raw_file', 'raw_sha256')):
+                            name = image.get(field)
+                            if not name:
+                                continue
+                            if Path(name).name != name or digest(source/'output'/name) != image.get(hash_field):
+                                raise PipelineError('reference_changed', '저장된 공통 규격 원본이 변경되었습니다.', 409)
+                            copy_file(source/'output'/name, target/'output'/name)
+                else:
+                    state['reference_preparation'] = None
+            hair_length = (requested_hair_length(payload) if 'hair' in slots
+                           else original.get('hair_length', 'source'))
+            inherited_spec = native_input.get('production_spec') or original['production_spec']
+            inherited_profiles = inherited_spec.get('fit_profiles', {})
+            native_reports = {part['slot']: part for part in native.get('parts', [])}
+            body_profile_identity = inherited_spec.get('body_profile_identity')
+            if body_profile_identity and body_profile_identity.get('body_sha256') != body_hash:
+                body_profile_identity = None
+            if body_profile_identity is None:
+                if (default_body.get('job_id') == base_id
+                        and default_body.get('body_sha256') == body_hash
+                        and default_body.get('geometry_sha256') == body_geometry_sha256):
+                    body_profile_identity = {
+                        'revision': default_profile.get('revision'),
+                        'profile_id': default_body.get('profile_id'),
+                        'geometry_sha256': default_body.get('geometry_sha256'),
+                        'body_sha256': body_hash,
+                        'job_id': base_id,
+                        'version': native['version'],
+                    }
+            native_body_profile = native.get('body_profile')
+            default_measurements = (default_body.get('measurements')
+                                    if default_body.get('body_sha256') == body_hash else None)
+            body_profile = native_body_profile or default_measurements or inherited_spec.get('body_profile')
+            descriptions = (state.get('design_prompts', {}) if photo_input is not None
+                            else payload.get('descriptions', {}))
+            fit_profiles = {}
+            for garment_slot in ('top', 'bottom'):
+                if garment_slot in slots:
+                    garment_kind = (requested_bottom_kind(payload) if garment_slot == 'bottom' else 'source')
+                    fit_profile = normalize_fit_profile(
+                        submitted_fit_profiles.get(garment_slot), slot=garment_slot,
+                        description=descriptions.get(garment_slot, ''), kind=garment_kind)
+                    reject_generation_fit_profile(fit_profile, slot=garment_slot)
+                else:
+                    inherited_part = next((part for part in state['parts'] if part['slot'] == garment_slot), {})
+                    report = native_reports.get(garment_slot, {})
+                    inherited = (report.get('fit_profile')
+                                 or report.get('measurement', {}).get('fit_profile')
+                                 or inherited_part.get('fit_profile')
+                                 or inherited_profiles.get(garment_slot))
+                    if inherited is None:
+                        continue
+                    fit_profile = normalize_fit_profile(
+                        inherited, slot=garment_slot,
+                        description=inherited_part.get('description', ''),
+                        kind=inherited_part.get('garment_kind', 'source'))
+                fit_profiles[garment_slot] = fit_profile
             state.update(base_body={'job_id': base_id, 'version': native['version'], 'sha256': body_hash},
-                         hair_length=payload['hair_length'], production_spec=production_spec(payload['hair_length']),
+                         hair_length=hair_length,
+                         production_spec=production_spec(
+                             hair_length, generated_views, fit_profiles=fit_profiles,
+                             body_profile=body_profile,
+                             body_profile_identity=body_profile_identity),
                          motion_actions={}, rig_with_meshy=True)
+            state['hair_length_selection'] = {'requested': payload['hair_length'], 'resolved': hair_length}
             state['production_spec']['frozen_body'] = True
+            if inherited_spec.get('base_body', {}).get('source_preserved'):
+                state['production_spec']['base_body']['source_preserved'] = True
+                if inherited_spec['base_body'].get('preserve_face_texture'):
+                    state['production_spec']['base_body']['preserve_face_texture'] = True
+                if photo_input is None:
+                    state['production_spec']['design_from_body_template'] = True
             state['production_spec']['fitting']['bounds'].update(deepcopy(native['fitting_targets']))
             equipment_spec(state['production_spec'])
-            state['parts'] = [p for p in state['parts'] if p['slot'] in ('body', *VARIANT_SLOTS)]
+            state['production_spec'] = seal_production_spec(state['production_spec'])
+            historical_hair = ('head', 'hairBack', 'hairFront')
+            if (not payload.get('single_part') and 'hair' in slots
+                    and any(p['slot'] == 'head' for p in state['parts']) and 'hat' not in slots):
+                raise PipelineError('headwear_required', '기존 일체형 머리를 교체할 때는 헤어와 머리 장식을 함께 선택하세요.', 422)
+            state['parts'] = [p for p in state['parts'] if p['slot'] in ('body', *VARIANT_SLOTS, *historical_hair)
+                             and not ('hair' in slots and p['slot'] in historical_hair)]
             for slot in slots:
                 if not any(p['slot'] == slot for p in state['parts']):
                     state['parts'].append({'slot': slot})
@@ -82,14 +314,51 @@ class AvatarVariants:
             for part in state['parts']:
                 slot = part['slot']
                 if slot in slots:
-                    part.update(description=payload.get('descriptions', {}).get(slot) or part.get('description', ''),
-                                views={v: {'status': 'pending'} for v in ('front', 'side')},
+                    part['meshy_options'] = meshy_options[slot]
+                    part.update(description=payload.get('descriptions', {}).get(slot) or prompt_snapshot['parts'][slot],
+                                views={v: {'status': 'pending'} for v in generated_views},
                                 image={'status': 'pending'}, model={'status': 'pending'},
                                 provenance={'origin': 'generated_for_frozen_body', 'source_job_id': base_id})
+                    if photo_input is not None:
+                        part['design_prompt'] = state['design_prompts'][slot]
+                    else:
+                        part['design_prompt'] = part['description']
+                        state.setdefault('design_prompts', {})[slot] = part['design_prompt']
+                    if slot == 'bottom':
+                        part['garment_kind'] = fit_profiles['bottom']['kind']
+                        if part['garment_kind'] == 'skirt':
+                            part['description'] += ' Lower garment type: SKIRT, one continuous open hem, no trouser legs or crotch split.'
+                        elif part['garment_kind'] == 'pants':
+                            part['description'] += ' Lower garment type: TROUSERS, separate left/right leg openings and crotch.'
+                    if slot in fit_profiles:
+                        part['fit_profile'] = deepcopy(fit_profiles[slot])
                     part.pop('target_bounds_m', None)
+                    if uploaded_views:
+                        from src.services.avatar_blueprints import AvatarBlueprints
+                        assets = AvatarBlueprints(self.factory.data)
+                        for view, asset_id in uploaded_views.items():
+                            asset = assets.asset(owner, asset_id)
+                            if digest(asset) != asset_id:
+                                raise PipelineError('source_changed', '파츠 원본이 변경되었습니다.', 409)
+                            name = f'{slot}-{view}.png'
+                            copy_file(asset, target/'output'/name)
+                            part['views'][view] = {'status': 'succeeded', 'file': name, 'sha256': asset_id,
+                                                   'asset': asset_id, 'origin': 'uploaded_part'}
+                        part['image'] = deepcopy(part['views']['front'])
+                        part['provenance']['origin'] = 'uploaded_part_views'
                     continue
                 reused.append(slot)
                 part['provenance'] = {'origin': 'reused', 'source_job_id': base_id}
+                if slot in fit_profiles:
+                    part['fit_profile'] = deepcopy(fit_profiles[slot])
+                if photo_input is not None and slot == 'body':
+                    model_path = target/'parts'/'body'/'generated.glb'
+                    model_path.parent.mkdir(parents=True, exist_ok=True)
+                    copy_file(body_file, model_path)
+                    _write_json(model_path.parent/'generation-artifacts.json', {'generated': {
+                        'path': str(model_path), 'sha256': body_hash,
+                        'reused_from': {'job_id': base_id, 'version': native['version'], 'slot': 'body'}}})
+                    continue
                 for view in part['views'].values():
                     name = view['file']
                     if Path(name).name != name or digest(source/'output'/name) != view['sha256']:
@@ -104,6 +373,26 @@ class AvatarVariants:
                 if digest(target/'parts'/slot/'generated.glb') != receipt['sha256']:
                     raise PipelineError('model_changed', '저장된 파츠 모델이 변경되었습니다.', 409)
             state['reuse'] = {'source_job_id': base_id, 'slots': reused}
+            if payload.get('single_part'):
+                native_record = read_json(source/'native-parts'/native['version']/'record.json')
+                native_files = native_record.get('files', {})
+                native_reports = {part['slot']: part for part in native_record.get('result', {}).get('parts', [])}
+                frozen_parts = {}
+                for part in state['parts']:
+                    slot = part['slot']
+                    if slot == 'body' or slot in slots:
+                        continue
+                    name = f'{slot}.glb'
+                    fitted = source/'native-parts'/native['version']/name
+                    expected = native_files.get(name)
+                    if not expected or not fitted.is_file() or digest(fitted) != expected:
+                        raise PipelineError('fitted_part_changed', f'저장된 {slot} 피팅 파츠를 확인할 수 없습니다.', 409)
+                    target_name = f'{slot}.glb'
+                    copy_file(fitted, target/'prefit-parts'/target_name)
+                    frozen_parts[slot] = {'file': target_name, 'sha256': expected,
+                                          'report': native_reports.get(slot, {})}
+                state['native_part_reuse'] = {
+                    'source_job_id': base_id, 'source_version': native['version'], 'parts': frozen_parts}
             # A minimal sealed rig delivery contains the actual chosen body and its
             # clips. It never copies another job's active provider worker or intent.
             version = body_hash[:24]
@@ -122,12 +411,18 @@ class AvatarVariants:
             _write_json(target/'pipeline.json', state)
             _write_json(target/'job.json', {'id': job_id, 'fingerprint': fingerprint,
                 'executor': self.factory.instance, 'executor_process': identity(),
-                'character_id': base['character_id'], 'character_name': base['character_name'],
-                'source_sha256': base['source_sha256'], 'input_kind': 'image',
+                'character_id': character_id, 'character_name': character_name,
+                'source_sha256': source_hash, 'input_kind': 'image',
+                **({'input': photo_input} if photo_input is not None else {}),
                 'production_mode': 'character_parts', 'auto_assemble': True, 'profile': base['profile'],
                 'status': 'pipeline_queued', 'created_at': now(), 'updated_at': now(), 'error': None,
                 'base_job_id': base_id, 'base_version': native['version'], 'requested_slots': slots,
-                'limits': {'image_tasks': 2*len(slots), 'meshy_tasks': len(slots),
+                'meshy_options': {slot: frozen['options'] for slot, frozen in meshy_options.items()},
+                **({'resume_stage': 'models', 'part_name': payload.get('part_name', '')} if uploaded_views else {}),
+                'limits': {'image_tasks': (0 if uploaded_views else len(generated_views)*len(slots)) + (2 if photo_input is not None and state.get('reference_preparation') else 0),
+                           'reference_tasks': 2 if photo_input is not None and state.get('reference_preparation') else 0,
+                           'expression_tasks': (0 if payload.get('single_part') else 5 if state.get('default_expressions') else 0),
+                           'meshy_tasks': len(slots),
                            'meshy_rig_tasks': 0, 'meshy_animation_tasks': 0},
                 'review': {'decision': 'pending'}, 'files': {}})
             AvatarImagePipeline(self.factory).publish(owner, job_id, state)
@@ -146,12 +441,44 @@ def prepare_body(service, owner, job_id, state):
     runner = read_json(output/'runner.json')
     if runner and process_state(runner.get('process')) != 'exited':
         raise PipelineError('body_render_running', '기존 기본 몸 렌더가 실행 중입니다.', 409)
+    worker = Path(__file__).with_name('avatar_body_reference_blender.py')
+    legacy_side_i = uses_legacy_side_pose(state.get('reference_preparation'))
     _write_json(output/'input.json', {'source': str(body), 'sha256': body_hash,
-                                     'output': str(output), 'spec': state['production_spec']})
+        'worker_sha256': digest(worker), 'output': str(output), 'spec': state['production_spec'],
+        'legacy_side_i': legacy_side_i})
     with local_workspace(output, inputs=[body]):
+        seal = read_json(output/'complete.json')
+        required = {'spec.json', *(f'body-{view}.png' for view in state['production_spec']['generated_views'])}
+        if legacy_side_i:
+            required.add('body-side-i.png')
+        cached = (seal.get('input_sha256') == digest(output/'input.json')
+                  and required <= seal.get('files', {}).keys()
+                  and all((output/name).is_file() and digest(output/name) == seal['files'][name] for name in required))
+        if not cached:
+            render_body_reference(output, worker)
+        seal = read_json(output/'complete.json')
+        if (seal.get('input_sha256') != digest(output/'input.json') or not required <= seal.get('files', {}).keys()
+                or any(not (output/name).is_file() or digest(output/name) != seal['files'][name] for name in required)):
+            raise PipelineError('body_render_failed', '기본 몸 참조 렌더 저장 확인 실패', 409)
+    state['production_spec'] = read_json(output/'spec.json')
+    state['body_height_m'] = state['production_spec']['body_height_m']
+    part = next(p for p in state['parts'] if p['slot'] == 'body')
+    for view in state['production_spec']['generated_views']:
+        name = f'body-{view}.png'
+        copy_file(output/name, directory/'output'/name)
+        part['views'][view] = {'status': 'succeeded', 'file': name,
+                              'sha256': digest(directory/'output'/name), 'origin': 'frozen_body_render'}
+    part['image'] = deepcopy(part['views']['front'])
+    if legacy_side_i:
+        copy_file(output/'body-side-i.png', directory/'output'/'body-side-i.png')
+    state['base_body']['prepared'] = True
+    service.publish(owner, job_id, state)
+
+
+def render_body_reference(output, worker):
         with (output/'blender.log').open('wb') as log:
             process = subprocess.Popen([blender_executable(), '--background', '--disable-autoexec', '--python-exit-code', '1', '--threads', '2', '--python',
-                str(Path(__file__).with_name('avatar_body_reference_blender.py')), '--', str(output/'input.json')],
+                str(worker), '--', str(output/'input.json')],
                 stdout=log, stderr=subprocess.STDOUT, env={**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'},
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             _write_json(output/'runner.json', {'process': identity(process.pid)})
@@ -163,13 +490,3 @@ def prepare_body(service, owner, job_id, state):
                 raise PipelineError('body_render_timeout', '기본 몸 참조 렌더 시간 초과', 409) from None
             if code:
                 raise PipelineError('body_render_failed', '기본 몸 참조 렌더 실패', 409)
-    state['production_spec'] = read_json(output/'spec.json')
-    part = next(p for p in state['parts'] if p['slot'] == 'body')
-    for view in ('front', 'side'):
-        name = f'body-{view}.png'
-        copy_file(output/name, directory/'output'/name)
-        part['views'][view] = {'status': 'succeeded', 'file': name,
-                              'sha256': digest(directory/'output'/name), 'origin': 'frozen_body_render'}
-    part['image'] = deepcopy(part['views']['front'])
-    state['base_body']['prepared'] = True
-    service.publish(owner, job_id, state)

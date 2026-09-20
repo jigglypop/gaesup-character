@@ -1,4 +1,10 @@
 .git
+.venv
+.codex
+logs
+tests
+backend/tests
+*.py[cod]
 .env*
 data
 dist

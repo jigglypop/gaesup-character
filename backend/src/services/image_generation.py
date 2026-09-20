@@ -12,7 +12,6 @@ from src.services.media import (
     _resolve_media_model_alias,
     _upload_to_s3,
 )
-from src.db import setting_or_env
 from src.text_utils import redact_url
 
 logger = logging.getLogger(__name__)
@@ -20,10 +19,6 @@ logger = logging.getLogger(__name__)
 
 def _first_text(value: Any) -> str:
     return str(value or "").strip()
-
-
-def setting(settings: dict[str, str], key: str, env_key: str = "", default: str = "") -> str:
-    return setting_or_env(key, env_key, default, settings=settings)
 
 
 def collect_reference_images(

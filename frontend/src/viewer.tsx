@@ -1,7 +1,7 @@
 import { Component, Suspense, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { createRoot, events, extend, useFrame, useThree } from '@react-three/fiber';
 import { GaesupWorld, GaesupWorldContent, GaesupController, useGaesupStore } from 'gaesup-world';
-import { Physics, RigidBody, type RapierRigidBody } from '@react-three/rapier';
+import { CuboidCollider, Physics, RigidBody, type RapierRigidBody } from '@react-three/rapier';
 import { WebGPURenderer } from 'three/webgpu';
 import * as THREE from 'three';
 
@@ -11,27 +11,14 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FaceEditor, type PaintSettings } from './face-editor';
 import { captureRestPose } from './model-pose';
 import { NativeWardrobe, type Wearable } from './native-wardrobe';
-import { TextureExpressions, type ExpressionName, type FaceLayout } from './texture-expressions';
+import { TextureExpressions } from './texture-expressions';
+import { disposeObjectResources } from './assets/gpu-resources';
 
 type Model = { gltf: GLTF; url: string; rigged: boolean; restorePose(): void };
-type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; studio?: boolean; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
+type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; studio?: boolean; card?: boolean; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
 const worldMode = { type: 'character', controller: 'keyboard', control: 'thirdPerson' } as const;
 
-function release(object: THREE.Object3D) {
-  const textures = new Set<THREE.Texture>(), materials = new Set<THREE.Material>(), geometries = new Set<THREE.BufferGeometry>();
-  object.traverse(node => {
-    if (!(node instanceof THREE.Mesh)) return;
-    geometries.add(node.geometry);
-    for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
-      materials.add(material);
-      for (const value of Object.values(material)) if (value instanceof THREE.Texture) textures.add(value);
-    }
-    if (node instanceof THREE.SkinnedMesh) node.skeleton.dispose();
-  });
-  textures.forEach(texture => { (texture.source.data as ImageBitmap)?.close?.(); texture.dispose(); });
-  materials.forEach(material => material.dispose());
-  geometries.forEach(geometry => geometry.dispose());
-}
+const release = (gltf: GLTF) => disposeObjectResources(gltf.scenes);
 
 class PreviewBoundary extends Component<{ children: ReactNode; onError(error: Error): void }, { failed: boolean }> {
   state = { failed: false };
@@ -79,7 +66,10 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
     if (!body.current || !outer.current) return;
     const velocity = body.current.linvel(), speed = Math.hypot(velocity.x, velocity.z);
     const pattern = velocity.y > .8 ? /^jump$/i : velocity.y < -1 ? /^fall$/i : speed > 5 ? /run|running/i : speed > .1 ? /walk|walking/i : /idle|standing/i;
-    const requested = animation >= 0 ? animation : model.gltf.animations.findIndex(clip => pattern.test(clip.name));
+    const matched = animation >= 0 ? animation : model.gltf.animations.findIndex(clip => pattern.test(clip.name));
+    // A missing airborne clip keeps the last real action playing. Never turn a
+    // missing jump/fall into an unlabeled clip or a frozen rest pose.
+    const requested = matched < 0 && playing.current >= 0 ? playing.current : matched;
     if (requested !== playing.current) {
       mixer.stopAllAction();
       if (requested >= 0) {
@@ -149,16 +139,87 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
   return <group ref={group}><primitive object={model.gltf.scene} dispose={null} /></group>;
 }
 
+function CardScene({ model, hidden, onReady, onError }: ViewProps) {
+  const { camera, gl, invalidate, size: viewport } = useThree();
+  const controls = useRef<OrbitControls | null>(null);
+  const group = useRef<THREE.Group>(null!);
+  useEffect(() => {
+    model.gltf.scene.traverse(node => {
+      const index = model.gltf.parser.associations.get(node)?.nodes;
+      if (index !== undefined) node.visible = !hidden.has(index);
+    });
+  }, [model, hidden]);
+  useEffect(() => {
+    model.restorePose();
+    group.current.position.set(0, 0, 0);
+    group.current.updateMatrixWorld(true);
+    model.gltf.scene.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(model.gltf.scene);
+    if (bounds.isEmpty()) {
+      onError(new Error('모델의 표시 가능한 경계를 찾을 수 없습니다.'));
+      return;
+    }
+    const center = bounds.getCenter(new THREE.Vector3());
+    const dimensions = bounds.getSize(new THREE.Vector3());
+    group.current.position.copy(center).multiplyScalar(-1);
+    group.current.updateMatrixWorld(true);
+
+    const perspective = camera as THREE.PerspectiveCamera;
+    const aspect = Math.max(viewport.width / Math.max(viewport.height, 1), .1);
+    perspective.aspect = aspect;
+    const verticalFov = THREE.MathUtils.degToRad(perspective.fov);
+    const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
+    const distance = Math.max(
+      dimensions.z / 2 + dimensions.y / (2 * Math.tan(verticalFov / 2)),
+      dimensions.z / 2 + dimensions.x / (2 * Math.tan(horizontalFov / 2)),
+      .25,
+    ) * 1.18;
+    perspective.position.set(0, 0, distance);
+    perspective.near = Math.max(distance / 100, .001);
+    perspective.far = Math.max(distance * 20, dimensions.length() * 10, 10);
+    perspective.lookAt(0, 0, 0);
+    perspective.updateProjectionMatrix();
+
+    const orbit = new OrbitControls(perspective, gl.domElement);
+    orbit.target.set(0, 0, 0);
+    orbit.enableDamping = true;
+    orbit.enablePan = false;
+    orbit.enableZoom = true;
+    orbit.minDistance = Math.max(distance * .2, .02);
+    orbit.maxDistance = distance * 8;
+    orbit.update();
+    const changed = () => invalidate();
+    orbit.addEventListener('change', changed);
+    controls.current = orbit;
+    onReady();
+    invalidate();
+    return () => {
+      orbit.removeEventListener('change', changed);
+      orbit.dispose();
+      controls.current = null;
+    };
+  }, [camera, gl, invalidate, model, onError, onReady, viewport.height, viewport.width]);
+  useFrame(() => { if (controls.current?.update()) invalidate(); });
+  return <group ref={group}><primitive object={model.gltf.scene} dispose={null} /></group>;
+}
+
 function Garden() {
+  const extent = 48;
   return <>
     <color attach="background" args={['#dce9e2']} />
-    <fog attach="fog" args={['#dce9e2', 18, 48]} />
+    <fog attach="fog" args={['#dce9e2', 40, 110]} />
     <hemisphereLight args={[0xffffff, 0x8b9e85, 2.4]} />
     <directionalLight position={[4, 9, 5]} intensity={3.5} />
     <RigidBody type="fixed" colliders="cuboid">
-      <mesh position={[0, -.15, 0]} receiveShadow><boxGeometry args={[24, .3, 24]} /><meshStandardMaterial color="#abc8ae" roughness={.95} /></mesh>
+      <mesh position={[0, -.2, 0]} receiveShadow><boxGeometry args={[extent * 2, .4, extent * 2]} /><meshStandardMaterial color="#abc8ae" roughness={.95} /></mesh>
     </RigidBody>
-    <gridHelper args={[24, 24, '#8aaa93', '#a1bea5']} position={[0, .005, 0]} />
+    <RigidBody type="fixed" colliders={false}>
+      <CuboidCollider args={[extent, 2, .25]} position={[0, 1.8, -extent]} />
+      <CuboidCollider args={[extent, 2, .25]} position={[0, 1.8, extent]} />
+      <CuboidCollider args={[.25, 2, extent]} position={[-extent, 1.8, 0]} />
+      <CuboidCollider args={[.25, 2, extent]} position={[extent, 1.8, 0]} />
+    </RigidBody>
+    <gridHelper args={[extent * 2, 48, '#8aaa93', '#a1bea5']} position={[0, .005, 0]} />
     {[-1, 1].flatMap(x => [-1, 1].map(z => <group key={`${x}:${z}`} position={[x * 7, 0, z * 7]}>
       <RigidBody type="fixed" colliders="cuboid"><mesh position={[0, .8, 0]}><cylinderGeometry args={[.22, .3, 1.6, 8]} /><meshStandardMaterial color="#958071" /></mesh></RigidBody>
       <mesh position={[0, 2.4, 0]}><icosahedronGeometry args={[1.5, 1]} /><meshStandardMaterial color={x > 0 ? '#739e82' : '#93b58a'} roughness={1} /></mesh>
@@ -170,9 +231,20 @@ function CharacterViewport(props: ViewProps) {
   const urls = useMemo(() => ({ characterUrl: props.model.url }), [props.model.url]);
   const cameraOption = useMemo(() => {
     const height = Math.max(new THREE.Box3().setFromObject(props.model.gltf.scene).getSize(new THREE.Vector3()).y, 1);
-    return { type: 'thirdPerson' as const, xDistance: 0, yDistance: height * 1.35, zDistance: height * 2.8,
-      distance: height * 2.8, fov: 42, zoom: 1, enableZoom: true, minZoom: .6, maxZoom: 2, zoomSpeed: .001, enableCollision: false };
+    return { type: 'thirdPerson' as const, xDistance: 0, yDistance: height * 1.6, zDistance: height * 3.6,
+      distance: height * 3.6, maxDistance: height * 7, fov: 40, zoom: 1, enableZoom: true,
+      minZoom: .75, maxZoom: 1.6, zoomSpeed: .001, enableCollision: false,
+      smoothing: { position: .14, rotation: .14, fov: .12 }, bounds: { minX: -54, maxX: 54, minY: .35, maxY: 24, minZ: -54, maxZ: 54 } };
   }, [props.model]);
+  if (props.card) return <GaesupWorld urls={urls} enablePhysics={false}>
+    <PreviewBoundary onError={props.onError}>
+      <ambientLight intensity={1.15} />
+      <hemisphereLight args={[0xffffff, 0x787878, 1.8]} />
+      <directionalLight position={[4, 6, 7]} intensity={2.4} />
+      <directionalLight position={[-5, 2, -4]} intensity={1.1} />
+      <CardScene {...props} />
+    </PreviewBoundary>
+  </GaesupWorld>;
   if (props.studio) return <GaesupWorld urls={urls} enablePhysics={false}>
     <PreviewBoundary onError={props.onError}>
       <color attach="background" args={['#191f17']} />
@@ -206,10 +278,12 @@ export class ModelViewer {
   private mount = document.createElement('div');
   private canvas = document.createElement('canvas');
   private observer: ResizeObserver;
+  private visibilityObserver: IntersectionObserver;
+  private inViewport = true;
   private initializing?: Promise<void>;
   private badge = document.createElement('span');
   private model: Model | null = null;
-  private retired: THREE.Object3D[] = [];
+  private retired: GLTF[] = [];
   private animation = -1;
   private editing = false;
   private editor: FaceEditor | null = null;
@@ -224,34 +298,58 @@ export class ModelViewer {
   private renderers = new Set<WebGPURenderer>();
   private finish?: () => void;
   private fail?: (error: Error) => void;
-  constructor(private container: HTMLElement, private presentation: 'world' | 'studio' = 'world') {
+  constructor(private container: HTMLElement, private presentation: 'world' | 'studio' | 'card' = 'world') {
     this.mount.className = 'r3f-viewport'; this.badge.className = 'renderer-badge';
     this.badge.textContent = 'WebGPU 초기화 중';
     container.append(this.mount, this.badge);
     this.mount.append(this.canvas);
     this.observer = new ResizeObserver(() => { if (this.root && !this.disposed) void this.root.configure({ size: this.size() }); });
     this.observer.observe(container);
+    this.visibilityObserver = new IntersectionObserver(entries => {
+      this.inViewport = entries.some(entry => entry.isIntersecting);
+      this.updateVisibility();
+    });
+    this.visibilityObserver.observe(container);
+    document.addEventListener('visibilitychange', this.updateVisibility);
   }
+  private frameLoop() {
+    return document.hidden || !this.inViewport ? 'never' : this.presentation === 'world' ? 'always' : 'demand';
+  }
+  private updateVisibility = () => {
+    if (this.root && !this.disposed) void this.root.configure({ frameloop: this.frameLoop() }).then(() => this.render());
+  };
   private size() { return { width: this.container.clientWidth, height: this.container.clientHeight, top: 0, left: 0 }; }
   private initialize() {
-    return this.initializing ??= (async () => {
+    if (this.initializing) return this.initializing;
+    const pending = (async () => {
       const renderer = new WebGPURenderer({ canvas: this.canvas, antialias: true, alpha: true });
-      await renderer.init();
-      if (this.disposed) { renderer.dispose(); return; }
-      this.renderers.add(renderer);
-      renderer.outputColorSpace = THREE.SRGBColorSpace;
-      renderer.toneMapping = THREE.NeutralToneMapping;
-      renderer.setClearColor(0x000000, 0);
-      const backend = renderer.backend as { isWebGPUBackend?: boolean };
-      this.onBackend(backend.isWebGPUBackend ? 'webgpu' : 'webgl-fallback');
-      // Initialize before creating an R3F root so a removed panel cannot finish an async Canvas mount.
-      this.root = createRoot(this.canvas);
-      await this.root.configure({ gl: renderer, size: this.size(), dpr: Math.min(devicePixelRatio, 1.5),
-        frameloop: this.presentation === 'studio' ? 'demand' : 'always',
-        camera: { fov: 42, position: [0, 3, 7] }, events,
-        onCreated: state => state.events.connect?.(this.canvas) });
-      if (this.disposed) this.root.unmount();
+      try {
+        await renderer.init();
+        if (this.disposed) { renderer.dispose(); return; }
+        this.renderers.add(renderer);
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        renderer.toneMapping = THREE.NeutralToneMapping;
+        renderer.setClearColor(0x000000, 0);
+        const backend = renderer.backend as { isWebGPUBackend?: boolean };
+        this.onBackend(backend.isWebGPUBackend ? 'webgpu' : 'webgl-fallback');
+        // Initialize before creating an R3F root so a removed panel cannot finish an async Canvas mount.
+        this.root = createRoot(this.canvas);
+        await this.root.configure({ gl: renderer, size: this.size(), dpr: Math.min(devicePixelRatio, 1.5),
+          frameloop: this.frameLoop(),
+          camera: { fov: 42, position: [0, 3, 7] }, events,
+          onCreated: state => state.events.connect?.(this.canvas) });
+        if (this.disposed) this.root.unmount();
+      } catch (error) {
+        try { this.root?.unmount(); } catch { /* best-effort cleanup after configure failure */ }
+        this.root = undefined;
+        this.renderers.delete(renderer);
+        renderer.dispose();
+        throw error;
+      }
     })();
+    this.initializing = pending;
+    void pending.catch(() => { if (this.initializing === pending) this.initializing = undefined; });
+    return pending;
   }
   private onBackend = (value: string) => {
     if (this.disposed) return;
@@ -273,27 +371,28 @@ export class ModelViewer {
   };
   private render() {
     if (!this.model || this.disposed || !this.root) return;
-    this.root.render(<CharacterViewport model={this.model} animation={this.animation} hidden={this.hidden} editing={this.editing} studio={this.presentation === 'studio'}
+    const store = this.root.render(<CharacterViewport model={this.model} animation={this.animation} hidden={this.hidden} editing={this.editing} studio={this.presentation === 'studio'} card={this.presentation === 'card'}
       onEditor={this.onEditor} onPaint={this.onPaint}
       onReady={this.onReady} onError={this.onError} onWorld={this.onWorld} />);
+    store.getState().invalidate();
   }
   async load(url: string, options: { sha256?: string; wardrobe?: boolean } = {}) {
     const token = ++this.generation;
     this.request?.abort(); this.finish?.();
     this.request = new AbortController();
-    const response = await fetch(url, { signal: this.request.signal });
+    const response = await fetch(url, { signal: AbortSignal.any([this.request.signal, AbortSignal.timeout(20000)]) });
     if (!response.ok) throw new Error('모델 파일을 불러올 수 없습니다.');
     const content = await response.arrayBuffer();
     const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', content))).map(value => value.toString(16).padStart(2, '0')).join('');
     if (options.sha256 && options.sha256 !== digest) throw new Error('모델이 고정한 몸 버전과 다릅니다.');
     const gltf = await new GLTFLoader().parseAsync(content, '');
-    if (this.disposed || token !== this.generation) { release(gltf.scene); return []; }
+    if (this.disposed || token !== this.generation) { release(gltf); return []; }
     let wardrobe: NativeWardrobe | undefined;
     if (options.wardrobe) {
       try { wardrobe = new NativeWardrobe(gltf.scene); }
-      catch (error) { release(gltf.scene); throw error; }
+      catch (error) { release(gltf); throw error; }
     }
-    if (this.model) this.retired.push(this.model.gltf.scene);
+    if (this.model) this.retired.push(this.model.gltf);
     this.expressions?.dispose(); this.expressions = undefined; this.expressionError = '';
     if (options.wardrobe) {
       try { this.expressions = new TextureExpressions(gltf); }
@@ -309,19 +408,24 @@ export class ModelViewer {
     return gltf.animations.map((clip, index) => ({ index, name: clip.name || `Animation ${index + 1}` }));
   }
   play(index: number) { this.animation = index; this.render(); }
-  async expression(name: ExpressionName, layout: FaceLayout) {
-    if (!this.expressions) throw new Error(this.expressionError || '표정 텍스쳐가 준비되지 않았습니다.');
-    const maps = await this.expressions.apply(name, layout); this.render(); return maps;
+  async clearExpression() {
+    this.expressions?.clear(); this.render();
+    return !this.disposed;
   }
   async savedExpression(maps: { material: number; url: string; sha256: string }[]) {
     if (!this.expressions) throw new Error(this.expressionError || '표정 텍스쳐가 준비되지 않았습니다.');
-    await this.expressions.saved(maps); this.render();
+    const expressions = this.expressions;
+    const applied = await expressions.saved(maps);
+    if (!applied || this.disposed || expressions !== this.expressions) return false;
+    this.render();
+    return true;
   }
   wear(parts: Wearable[]) {
     if (!this.wardrobe) return Promise.reject(new Error('공용 골격 옷장이 준비되지 않았습니다.'));
     return this.wardrobe.equip(parts).then(applied => { if (applied) this.render(); return applied; });
   }
   wardrobeDiagnostics() { return this.wardrobe?.diagnostics(); }
+  setHairColor(color: string | null) { this.wardrobe?.setHairColor(color); this.render(); }
   setEditing(enabled: boolean, onCount: (count: number) => void) { this.editing = enabled; this.paintCount = onCount; this.render(); }
   setPaint(settings: PaintSettings) { this.paintSettings = settings; if (this.editor) this.editor.settings = settings; }
   selections() { return this.editor?.export() ?? []; }
@@ -336,11 +440,12 @@ export class ModelViewer {
     this.expressions?.dispose(); this.expressions = undefined;
     this.wardrobe?.dispose(); this.wardrobe = undefined;
     this.disposed = true; this.generation++; this.request?.abort(); this.finish?.();
-    this.observer.disconnect(); this.root?.unmount();
+    this.observer.disconnect(); this.visibilityObserver.disconnect();
+    document.removeEventListener('visibilitychange', this.updateVisibility); this.root?.unmount();
     // R3F completes its canvas cleanup on a deferred callback; release the WebGPU device afterwards.
     const renderers = this.renderers;
     setTimeout(() => { renderers.forEach(renderer => renderer.dispose()); renderers.clear(); }, 600);
-    if (this.model) release(this.model.gltf.scene);
+    if (this.model) release(this.model.gltf);
     this.retired.forEach(release); this.retired = [];
     this.mount.remove(); this.badge.remove(); delete this.container.dataset.renderer;
   }

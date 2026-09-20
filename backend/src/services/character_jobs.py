@@ -17,6 +17,15 @@ def state(directory: Path) -> dict:
     return json.loads((directory / "character.json").read_text(encoding="utf-8"))
 
 
+def save_submission_response(directory, name, response):
+    # Keep provider evidence in private asset storage, never in a public error.
+    _write_json(directory / f'{name}-submission-response.json', {
+        'http_status': response.status_code,
+        'request_id': response.headers.get('x-request-id'),
+        'body': response.text,
+    })
+
+
 def _submit(directory: Path, value: dict, endpoint: str, payload: dict, client: httpx.Client) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
     _write_json(directory / "character.json", value)
@@ -24,6 +33,7 @@ def _submit(directory: Path, value: dict, endpoint: str, payload: dict, client: 
     if response.status_code in {400, 401, 402, 403, 404, 422, 429}:
         value.update(status="submission_rejected", http_status=response.status_code)
         _write_json(directory / "character.json", value)
+    save_submission_response(directory, value['stage'], response)
     response.raise_for_status()
     task_id = response.json().get("result")
     if not isinstance(task_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", task_id):
@@ -33,7 +43,7 @@ def _submit(directory: Path, value: dict, endpoint: str, payload: dict, client: 
     return value
 
 
-def generate(directory: Path, image: Path, height: float, client: httpx.Client, profile: str = "meshy-7", *, isolated_part: bool = False, body_type: str = "humanoid") -> dict:
+def generate(directory: Path, image: Path, height: float, client: httpx.Client, profile: str = "meshy-7", *, isolated_part: bool = False, body_type: str = "humanoid", texture_prompt: str | None = None) -> dict:
     if (directory / "character.json").exists():
         raise ValueError("Existing run: refresh or recover; never resubmit an uncertain task")
     if not 0.1 <= height <= 100:
@@ -63,6 +73,10 @@ def generate(directory: Path, image: Path, height: float, client: httpx.Client, 
         payload['target_polycount'] = 2000
     if body_type == "quadruped":
         payload.pop("pose_mode", None)
+    if texture_prompt is not None:
+        if profile != 'meshy-7' or not isinstance(texture_prompt, str) or not 1 <= len(texture_prompt.strip()) <= 600:
+            raise ValueError('Meshy 7 texture prompt must contain 1 to 600 characters')
+        payload['texture_prompt'] = texture_prompt.strip()
     value["generation_settings"] = {k: v for k, v in payload.items() if k != "image_url"}
     return _submit(directory, value, "/openapi/v1/image-to-3d", payload, client)
 
@@ -74,35 +88,59 @@ def rig(directory: Path, client: httpx.Client) -> dict:
     if value["stage"] != "generation" or value["status"] != "SUCCEEDED":
         raise ValueError("A successful generation is required before rigging")
     task_id = value.pop("task_id")
-    value.update(generation_task_id=task_id, stage="rigging", status="submission_uncertain")
+    value.update(generation_task_id=task_id, stage="rigging", status="submission_uncertain", progress=0)
     return _submit(directory, value, "/openapi/v1/rigging",
                    {"input_task_id": task_id, "height_meters": value["height_meters"]}, client)
 
 
-def generate_multiview_part(directory: Path, images: list[Path], client: httpx.Client, *, isolated_part=True, height=1.2) -> dict:
-    """One fixed Meshy 7 submission; caller validates object/view lineage."""
+def generate_multiview_part(directory: Path, images: list[Path], client: httpx.Client, *, isolated_part=True,
+                            height=1.2, expected_views: list[str] | None = None,
+                            texture_prompt: str | None = None, preserve_geometry: bool = False,
+                            quality_profile: str | None = None, generation_options: dict | None = None) -> dict:
+    """One submission using the caller's frozen quality and view contract."""
     if (directory/'character.json').exists():
         raise ValueError('Existing run: recover or refresh, never resubmit')
     if not 1 <= len(images) <= 4:
         raise ValueError('One to four views of the same object are required')
+    if expected_views is not None and (
+            expected_views not in (['front', 'side'], ['front', 'side', 'back'])
+            or len(images) != len(expected_views)):
+        raise ValueError('Images must match the accepted front/side/back view contract')
     urls, sources = [], []
-    for image in images:
+    for index, image in enumerate(images):
         with Image.open(io.BytesIO(image.read_bytes())) as reference:
             if reference.format != 'PNG':
                 raise ValueError('Prepared PNG required')
             reference.verify()
-        sources.append({'image_sha256': _digest(image)})
+        sources.append({'image_sha256': _digest(image),
+                        **({'view': expected_views[index], 'name': image.name} if expected_views is not None else {})})
         urls.append('data:image/png;base64,'+base64.b64encode(image.read_bytes()).decode('ascii'))
     payload = {'image_urls': urls, 'ai_model': 'meshy-7', 'should_texture': True, 'enable_pbr': True,
                'should_remesh': True, 'target_polycount': 2000, 'image_enhancement': False,
                'remove_lighting': True, 'target_formats': ['glb']}
     if not isolated_part:
         payload.update(target_polycount=8000, pose_mode='t-pose')
+    if preserve_geometry:
+        if isolated_part:
+            raise ValueError('Geometry preservation requires a whole body')
+        payload['should_remesh'] = False
+        payload.pop('target_polycount', None)
+    if quality_profile is not None:
+        if quality_profile != 'high-v1' or isolated_part or not preserve_geometry:
+            raise ValueError('High quality requires a preserved whole body')
+        payload.update(ai_model='meshy-7.1', geometry_resolution='2k', texture_resolution='4k')
+    if texture_prompt is not None:
+        if not isinstance(texture_prompt, str) or not 1 <= len(texture_prompt.strip()) <= 800:
+            raise ValueError('Meshy texture prompt must contain 1 to 800 characters')
+        payload['texture_prompt'] = texture_prompt.strip()
+    if generation_options is not None:
+        payload = {'image_urls': urls, **generation_options}
     endpoint = '/openapi/v1/multi-image-to-3d'
-    value = {'stage': 'generation', 'status': 'submission_uncertain', 'profile': 'meshy-7',
+    value = {'stage': 'generation', 'status': 'submission_uncertain', 'profile': payload['ai_model'],
              'generation_endpoint': endpoint, 'sources': sources, 'isolated_part': isolated_part,
              'height_meters': height, 'body_type': 'humanoid',
-             'generation_settings': {k: v for k, v in payload.items() if k != 'image_urls'}}
+             'generation_settings': {k: v for k, v in payload.items() if k not in ('image_urls', 'texture_image_url', 'texture_image_urls')},
+             'preserve_download_detail': generation_options is not None}
     return _submit(directory, value, endpoint, payload, client)
 
 
@@ -133,6 +171,7 @@ def rig_model(directory: Path, model: Path, height: float, client: httpx.Client,
         target.write(content)
     value = {"stage": "rigging", "status": "submission_uncertain", "body_type": body_type,
              "height_meters": height, "source_sha256": source_hash, "input_kind": "model",
+             "generation_settings": {"should_remesh": False},
              "source_model": str(model.resolve()), "provider": "meshy"}
     return _submit(directory, value, "/openapi/v1/rigging", {
         "model_url": "data:model/gltf-binary;base64," + base64.b64encode(content).decode("ascii"),
@@ -173,10 +212,15 @@ def download(directory: Path, stage: str, download_model=download_glb) -> dict:
     if not next(iter(urls.values())):
         raise ValueError("Task succeeded without a GLB URL")
     artifacts = {}
+    saved = state(directory)
+    preserve_detail = saved.get('preserve_download_detail') or saved.get('generation_settings', {}).get('should_remesh') is False
     with httpx.Client(timeout=120, follow_redirects=True) as client:
         for name, url in urls.items():
             output = directory / (name + ".glb")
-            quality = download_model(client, url, output)
+            if preserve_detail and download_model is download_glb:
+                quality = download_model(client, url, output, preserve_detail=True)
+            else:
+                quality = download_model(client, url, output)
             _write_json(directory / (name + "-quality.json"), quality)
             artifacts[name] = {"path": str(output.resolve()), "sha256": _digest(output)}
     _write_json(directory / (stage + "-artifacts.json"), artifacts)

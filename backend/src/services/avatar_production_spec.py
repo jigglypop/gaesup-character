@@ -7,6 +7,9 @@ import json
 from PIL import Image, ImageDraw, ImageOps
 
 from src.paths import BACKEND_ROOT
+from src.services.avatar_fit_profiles import (
+    FIT_PROFILE_REVISION, fit_profiles_sha256, normalize_fit_profiles,
+)
 from src.services.character_pipeline import PipelineError
 
 IMAGE_INTAKE_POLICY = 'prepare-without-quality-gates-v2'
@@ -16,9 +19,45 @@ def can_reuse_image(image):
     return bool(image.get('file') and image.get('sha256'))
 
 
-def production_spec(hair_length='source'):
+def _seal(spec):
+    result = deepcopy(spec)
+    result.pop('sha256', None)
+    canonical = json.dumps(result, sort_keys=True, separators=(',', ':')).encode()
+    result['sha256'] = hashlib.sha256(canonical).hexdigest()
+    return result
+
+
+def seal_production_spec(spec):
+    """Seal a fully configured spec after body/fitting helpers finish mutating it."""
+    return _seal(spec)
+
+
+def configure_fit_profiles(spec, fit_profiles, *, body_profile=None, body_profile_identity=None):
+    """Return a newly sealed spec with normalized garment/body identities."""
+    result = deepcopy(spec)
+    profiles = normalize_fit_profiles(fit_profiles, slots=tuple(fit_profiles))
+    result['fit_profiles'] = profiles
+    result['fit_profiles_revision'] = FIT_PROFILE_REVISION
+    result['fit_profiles_sha256'] = fit_profiles_sha256(profiles)
+    if body_profile is not None:
+        try:
+            result['body_profile'] = json.loads(json.dumps(body_profile))
+        except (TypeError, ValueError) as exc:
+            raise PipelineError('invalid_body_profile', 'body_profile must be JSON serializable', 422) from exc
+    if body_profile_identity is not None:
+        result['body_profile_identity'] = deepcopy(body_profile_identity)
+    return _seal(result)
+
+
+def production_spec(hair_length='source', generated_views=None, *, fit_profiles=None, body_profile=None,
+                    body_profile_identity=None):
     raw = (BACKEND_ROOT/'assets/avatars/production-v1.json').read_bytes()
     spec = json.loads(raw)
+    if generated_views is not None:
+        views = list(generated_views)
+        if views not in (['front', 'side'], ['front', 'side', 'back']):
+            raise PipelineError('invalid_generated_views', '지원하지 않는 이미지 뷰 계약입니다.', 422)
+        spec['generated_views'] = views
     profiles = spec['fitting']['hair_length_profiles']
     if hair_length not in profiles:
         raise PipelineError('invalid_hair_length', '머리카락 길이를 다시 선택하세요.', 422)
@@ -29,8 +68,43 @@ def production_spec(hair_length='source'):
         head_height = spec['anchors']['crown'][1]-spec['anchors']['neck'][1]
         spec['fitting']['bounds']['hair'][0][1] = max(.035, spec['fitting']['bounds']['hair'][1][1]-head_height*ratio)
         spec['envelopes']['hair'][0][1] = min(spec['envelopes']['hair'][0][1], spec['fitting']['bounds']['hair'][0][1])
-    canonical = json.dumps(spec, sort_keys=True, separators=(',', ':')).encode()
-    return {**spec, 'sha256': hashlib.sha256(canonical).hexdigest()}
+    if fit_profiles is not None:
+        return configure_fit_profiles(spec, fit_profiles, body_profile=body_profile,
+                                      body_profile_identity=body_profile_identity)
+    if body_profile is not None:
+        spec['body_profile'] = deepcopy(body_profile)
+    if body_profile_identity is not None:
+        spec['body_profile_identity'] = deepcopy(body_profile_identity)
+    return _seal(spec)
+
+
+def refresh_fitting_spec(saved, hair_length='source', *, fit_profiles=None, body_profile=None):
+    """Use current fitting rules while retaining a saved body's metric frame."""
+    inherited_profiles = fit_profiles if fit_profiles is not None else (saved or {}).get('fit_profiles')
+    inherited_body = body_profile if body_profile is not None else (saved or {}).get('body_profile')
+    current = production_spec(hair_length, (saved or {}).get('generated_views'),
+                              fit_profiles=inherited_profiles, body_profile=inherited_body)
+    if not saved:
+        return current
+    result = deepcopy(saved)
+    saved_fitting = saved.get('fitting', {})
+    fitting = deepcopy(current['fitting'])
+    # These boxes were registered to the saved body's canvas and anchors. Keep
+    # them for garments and feet; hair and hats are remeasured in Blender.
+    for key in ('bounds', 'shoe_bounds'):
+        if key in saved_fitting:
+            fitting[key] = deepcopy(saved_fitting[key])
+    result['fitting'] = fitting
+    result['tolerances'] = deepcopy(current['tolerances'])
+    result['revision'] = current['revision']
+    if inherited_profiles is not None:
+        profiles = normalize_fit_profiles(inherited_profiles, slots=tuple(inherited_profiles))
+        result['fit_profiles'] = profiles
+        result['fit_profiles_revision'] = FIT_PROFILE_REVISION
+        result['fit_profiles_sha256'] = fit_profiles_sha256(profiles)
+    if inherited_body is not None:
+        result['body_profile'] = deepcopy(inherited_body)
+    return _seal(result)
 
 
 def project(point, view, spec):
@@ -157,4 +231,8 @@ def public_spec(spec):
     result = {key: spec[key] for key in ('id', 'revision', 'sha256', 'body_height_m', 'axes', 'canvas', 'generated_views', 'release_requires')}
     if spec.get('fitting'):
         result['fitting'] = spec['fitting']
+    for key in ('fit_profiles', 'fit_profiles_revision', 'fit_profiles_sha256',
+                'body_profile', 'body_profile_identity'):
+        if key in spec:
+            result[key] = spec[key]
     return deepcopy(result)

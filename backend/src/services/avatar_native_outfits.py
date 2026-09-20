@@ -33,6 +33,11 @@ class AvatarNativeOutfits:
             return {'version': version, 'body_sha256': body_hash, 'revision': '0', 'slots': slots}
 
     def put(self, owner, job, version, payload, expected_revision, key):
+        payload = dict(payload)
+        if payload.get('hair_color') is None:
+            payload.pop('hair_color', None)
+        elif not re.fullmatch('#[0-9a-fA-F]{6}', payload['hair_color']):
+            raise PipelineError('invalid_color', '헤어 색상을 선택하세요.', 422)
         if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
             raise PipelineError('invalid_key', '저장 요청 식별자가 필요합니다.', 422)
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -59,7 +64,7 @@ class AvatarNativeOutfits:
             saved_at = now()
             revision = hashlib.sha256(f'{current["revision"]}:{fingerprint}:{key_hash}:{saved_at}'.encode()).hexdigest()
             result = {'version': version, 'body_sha256': body_hash, 'revision': revision,
-                      'slots': list(slots), 'saved_at': saved_at}
+                      'slots': list(slots), 'hair_color': payload.get('hair_color'), 'saved_at': saved_at}
             state['current'] = result
             state['receipts'][key_hash] = {'fingerprint': fingerprint, 'result': result}
             _write_json(path, state)

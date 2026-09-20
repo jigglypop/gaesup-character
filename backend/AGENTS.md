@@ -5,7 +5,7 @@ Python 코드는 `src/`, 테스트는 `tests/`, DB migration은 `migrations/`에
 ## 경계
 
 - FastAPI는 입력 검증·인증·응답을, 서비스는 상태 전이·실행·검증을 담당한다. CLI와 HTTP가 같은 서비스를 사용하게 하고 `.codex/` 스크립트를 런타임 dependency로 가져오지 않는다.
-- 제어 API를 추가할 때 [공유 계약](../docs/character-control-plane.md)을 읽는다. 기존 `/api/world/*`와 CLI 동작은 유지한다.
+- 제어 API는 기존 소유권·작업 영수증·idempotency 계약을 유지한다. 기존 `/api/world/*`와 CLI 동작은 유지한다.
 - 브라우저에서 받는 값은 캐릭터·작업·산출물 ID와 action별 입력이다. 임의 명령·Blender 코드·서버 경로는 받지 않는다. 사용자 소유권과 실행 가능 상태는 서버에서 다시 검사한다.
 - 인증정보·절대 경로·내부 예외는 응답에 노출하지 않는다. 기존 인증을 우회하는 새 경로를 만들지 않는다.
 
@@ -20,6 +20,6 @@ Python 코드는 `src/`, 테스트는 `tests/`, DB migration은 `migrations/`에
 
 ## 에셋과 검증
 
-- 생성·리깅·분리 작업에는 [meshy-character-wardrobe](../.codex/skills/meshy-character-wardrobe/SKILL.md)의 해당 모드를 사용한다. 일반 API 수정에는 Blender 문서를 모두 읽지 않는다.
+- 삭제된 스킬이나 계약 문서를 복원하지 않는다. 생성·리깅·분리 코드는 실제 서비스 진입점과 저장된 작업 계약을 기준으로 수정한다.
 - 외부 API·Blender·DB·파일 I/O를 대체한 테스트로 상태 전이와 복구를 검증한다. fixture는 임시 디렉터리를 쓰고 실제 provider 호출이나 운영 데이터 접근은 하지 않는다.
-- 실제 Meshy 성공과 Blender 시각 품질은 실제 작업·산출물 증거로 확인한다. 코드 변경에 맞는 pytest를 실행하고 import·패키징을 변경하면 CLI·빌드까지 검증한다.
+- 실제 Meshy 성공과 Blender 시각 품질은 실제 작업·산출물 증거로 구분한다. 현재 사용자 지시에 따라 pytest·실제 생성 검사는 실행하지 않고 백엔드 문법·패키지 빌드만 수행한다.

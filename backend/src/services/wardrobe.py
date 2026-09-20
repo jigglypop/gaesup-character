@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import re
 import uuid
@@ -24,9 +23,9 @@ def _digest(path: Path) -> str:
     return sha256(path)
 
 
-def download_glb(client: httpx.Client, url: str, output: Path) -> dict:
+def download_glb(client: httpx.Client, url: str, output: Path, *, preserve_detail: bool = False) -> dict:
     """Validate a CDN download before replacing an artifact; client has no API key."""
-    policy = DeliveryPolicy()
+    policy = DeliveryPolicy(max_file_bytes=256 * 1024 * 1024) if preserve_detail else DeliveryPolicy()
     data = bytearray()
     with client.stream("GET", url) as response:
         response.raise_for_status()
@@ -34,7 +33,7 @@ def download_glb(client: httpx.Client, url: str, output: Path) -> dict:
             data.extend(chunk)
             if len(data) > policy.max_file_bytes:
                 raise ValueError("Generated GLB exceeds file budget")
-    quality = inspect_glb(bytes(data), policy)
+    quality = inspect_glb(bytes(data), policy, budget_warnings=preserve_detail)
     if quality["errors"]:
         raise ValueError("Generated GLB rejected: " + "; ".join(quality["errors"]))
     temporary = output.with_suffix(".glb.part")

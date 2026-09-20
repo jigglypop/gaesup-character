@@ -8,6 +8,7 @@ import os
 from src.services.object_storage import StoredPath as Path
 import re
 import subprocess
+import time
 from threading import RLock, Semaphore
 import uuid
 
@@ -18,7 +19,7 @@ from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.character_parts import blender_executable
 from src.services.character_pipeline import CharacterPipeline, PipelineError, read_json, now
-from src.services.character_segmentation import PART_ROLES, triangle_indices
+from src.services.character_segmentation import triangle_indices
 from src.services.glb import parse_glb
 from src.services.process_identity import identity, state as process_state
 from src.services.object_storage import local_workspace, sha256
@@ -44,6 +45,8 @@ class AvatarFactory:
         self.data = Path(root).resolve(); self.root = self.data/'avatar-factory'
         self.pipeline = CharacterPipeline(self.data)
         self.instance = uuid.uuid4().hex
+        self._listing_lock = RLock()
+        self._listings = {}
 
     def directory(self, owner, job_id):
         if not re.fullmatch(r'[a-f0-9]{24}', job_id):
@@ -212,7 +215,9 @@ class AvatarFactory:
                 _write_json(directory/'job.json', job)
         public = {k: deepcopy(v) for k, v in job.items() if k not in ('executor', 'executor_process', 'fingerprint', 'files')}
         public['progress'] = read_json(directory/'output/progress.json', {'stage': 'queued', 'message': '로컬 생산 대기 중'})
-        public['artifacts'] = [{'name': name, 'url': f'/api/avatar-factory/jobs/{job_id}/artifacts/{name}'} for name in job.get('files', {})]
+        public['artifacts'] = [{'name': name, 'sha256': sha256,
+                                'url': f'/api/avatar-factory/jobs/{job_id}/artifacts/{name}'}
+                               for name, sha256 in job.get('files', {}).items()]
         public['next_actions'] = []
         if job.get('input_kind') == 'image' and job['status'] in ('pipeline_paused', 'failed', 'recovery_required'):
             state = read_json(directory/'pipeline.json')
@@ -231,6 +236,8 @@ class AvatarFactory:
             public['next_actions'] = [{'id': 'resume', 'enabled': not blocked,
                                        'reason': '이미 시도한 요청의 결과 확인이 필요합니다. 자동 재제출하지 않습니다.' if blocked else None}]
         if job.get('production_mode') == 'character_parts':
+            from src.services.avatar_expression_pipeline import summary as expression_summary
+            public['default_expressions'] = expression_summary(directory)
             from src.services.avatar_character_flow import character_flow
             public['character_flow'] = character_flow(directory, public)
             public['progress'] = {key: public['character_flow'][key] for key in ('stage', 'message')}
@@ -241,7 +248,17 @@ class AvatarFactory:
         return public
 
     def listing(self, owner):
-        return [self.get(owner, path.parent.name) for path in sorted((self.root/str(int(owner))).glob('*/job.json'), reverse=True)]
+        # Several open views otherwise repeat the entire S3 history scan and
+        # occupy every API worker, delaying the selected body's textures too.
+        # Action endpoints and individual job reads always use current records.
+        owner = int(owner)
+        with self._listing_lock:
+            cached = self._listings.get(owner)
+            if cached and time.monotonic() - cached[0] < 10:
+                return deepcopy(cached[1])
+            result = [self.get(owner, path.parent.name) for path in sorted((self.root/str(owner)).glob('*/job.json'), reverse=True)]
+            self._listings[owner] = time.monotonic(), result
+            return result
 
     def artifact(self, owner, job_id, filename):
         directory = self.directory(owner, job_id); job = read_json(directory/'job.json')

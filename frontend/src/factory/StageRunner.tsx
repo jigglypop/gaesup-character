@@ -4,7 +4,7 @@ import { usePolling } from '../use-polling';
 import { factoryApi, type FactoryStage } from './api';
 
 const labels: Record<FactoryStage, string> = {
-  images: '이미지', models: '3D 파츠', rig: '리깅·동작', assemble: '피팅·조립',
+  images: '이미지', models: '3D 파츠', rig: '리깅·동작', assemble: '피팅·조립', expressions: '기본 표정',
 };
 type Pending = { stage: FactoryStage; key: string };
 function readPending(storage: string): Pending | null {

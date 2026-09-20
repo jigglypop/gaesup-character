@@ -20,6 +20,10 @@ export class ApiError extends Error {
   constructor(public code: string, message: string, public status: number) { super(message); }
 }
 
+export function isDefinitiveRejection(error: unknown): error is ApiError {
+  return error instanceof ApiError && [400, 401, 403, 404, 422].includes(error.status);
+}
+
 export async function request<T>(url: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
   const { timeoutMs = 15000, signal, ...init } = options;
   const controller = new AbortController();

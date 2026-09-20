@@ -16,6 +16,10 @@ from src.services.character_pipeline import PipelineError, now, read_json
 
 
 def can_resume(directory, state):
+    from src.services.avatar_reference_preparation import can_resume as reference_can_resume
+    reference_next = reference_can_resume(directory, state)
+    if reference_next is not None:
+        return reference_next
     def next_view(part):
         for view in state['production_spec']['generated_views']:
             image = part['views'][view]
@@ -34,7 +38,8 @@ def can_resume(directory, state):
     body_next = next_view(body)
     if body_next is not None:
         return body_next
-    remaining = [next_view(p) for p in state['parts'] if p['slot'] != 'body']
+    reused = set(state.get('reuse', {}).get('slots', []))
+    remaining = [next_view(p) for p in state['parts'] if p['slot'] != 'body' and p['slot'] not in reused]
     return any(item is True for item in remaining) or all(item is None for item in remaining)
 
 
@@ -79,7 +84,8 @@ def execute(service, owner, job_id, state):
 
     body = deepcopy(body)
     _generate_part(service, owner, job_id, state, body, body, publish, reserve)
-    parts = [deepcopy(p) for p in state['parts'] if p['slot'] != 'body']
+    reused = set(state.get('reuse', {}).get('slots', []))
+    parts = [deepcopy(p) for p in state['parts'] if p['slot'] != 'body' and p['slot'] not in reused]
     errors = []
     if parts:
         # The hat fits the saved complete hairstyle. Garments remain parallel;
@@ -134,10 +140,16 @@ def _generate_part(service, owner, job_id, state, part, body, publish, reserve, 
             if template.is_file() and template.read_bytes() != template_bytes:
                 raise PipelineError('guide_changed', '생산 기준 이미지가 변경되었습니다.', 409)
             template.write_bytes(template_bytes)
-            refs = [template, directory/'source.png']
+            reference = state.get('reference_preparation')
+            prepared_view = reference.get('views', {}).get(view, {}) if reference else {}
+            prepared_name = prepared_view.get('file') or (reference.get('file') if reference else None)
+            appearance = (output/prepared_name if reference and reference.get('status') == 'succeeded' and prepared_name
+                          else directory/'source.png')
+            refs = [template, appearance]
             if slot != 'body':
                 refs.insert(1, output/body['views'][view]['file'])
             hair_reference = slot == 'hat' and hair is not None
+            design_from_body_template = spec.get('design_from_body_template') is True and slot != 'body'
             if hair_reference and recorded:
                 # Response recovery preserves the exact inputs already sent.
                 hair_reference = any(ref['name'] == hair['views'][view]['file'] for ref in recorded.get('references', []))
@@ -145,11 +157,14 @@ def _generate_part(service, owner, job_id, state, part, body, publish, reserve, 
                 refs.insert(2, output/hair['views'][view]['file'])
             if view != 'front':
                 refs.append(output/part['views']['front']['file'])
+            if view == 'back':
+                refs.append(output/part['views']['side']['file'])
             previous = image.get('previous_attempts', [])
             prompt = build_prompt(spec, slot, view,
                 previous_qc=previous[-1].get('qc') if previous else None,
-                accepted_front_qc=(part['views']['front'].get('measurement') or part['views']['front'].get('qc')) if view == 'side' else None,
-                notes=part.get('description', ''), hair_reference=hair_reference)
+                accepted_front_qc=(part['views']['front'].get('measurement') or part['views']['front'].get('qc')) if view != 'front' else None,
+                accepted_side_qc=(part['views']['side'].get('measurement') or part['views']['side'].get('qc')) if view == 'back' else None,
+                notes=part.get('design_prompt', part.get('description', '')), hair_reference=hair_reference)
             if not cached:
                 # Store the exact text and ordered input identities before the paid POST.
                 if prompt_receipt.is_file():
@@ -161,7 +176,9 @@ def _generate_part(service, owner, job_id, state, part, body, publish, reserve, 
                     _write_json(prompt_receipt, {'revision': PROMPT_REVISION, 'spec_sha256': spec['sha256'],
                         'layout': layout_contract(spec, slot, view), 'prompt': prompt,
                         'references': [{'name': p.name, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest(), 'role': role}
-                            for p, role in zip(refs, reference_roles(slot, view, hair_reference=hair_reference))]})
+                            for p, role in zip(refs, reference_roles(
+                                slot, view, hair_reference=hair_reference,
+                                design_from_body_template=design_from_body_template))]})
                 image['prompt_revision'] = read_json(prompt_receipt)['revision']
             reserve(part, view)
             try:
@@ -192,8 +209,9 @@ def _generate_part(service, owner, job_id, state, part, body, publish, reserve, 
                     image['failure'].update(http_status=exc.response.status_code,
                                             provider_code=exc.provider_error.get('code'))
                 publish(part)
-                label = {'body': '몸', 'hair': '머리카락', 'head': '기존 머리 파츠', 'hairBack': '뒷머리', 'hairFront': '앞머리', 'hat': '모자', 'top': '상의', 'bottom': '하의', 'shoes': '신발', 'weapon': '무기', 'tool': '도구', 'glasses': '안경'}.get(slot, slot)
-                raise PipelineError('view_response_missing', f'{label} {"정면" if view == "front" else "측면"}: {message}', 409) from None
+                label = {'body': '몸', 'hair': '머리카락', 'head': '기존 머리 파츠', 'hairBack': '뒷머리', 'hairFront': '앞머리', 'hat': '머리 장식', 'top': '상의', 'bottom': '하의', 'shoes': '신발', 'weapon': '무기', 'tool': '도구', 'glasses': '안경'}.get(slot, slot)
+                view_label = {'front': '정면', 'side': '측면', 'back': '후면'}.get(view, view)
+                raise PipelineError('view_response_missing', f'{label} {view_label}: {message}', 409) from None
         image.pop('failure', None)
         saving_started = time.monotonic()
         received = path.read_bytes()
@@ -207,7 +225,7 @@ def _generate_part(service, owner, job_id, state, part, body, publish, reserve, 
         image.update(asset=asset['id'], status='succeeded')
         image['saving_seconds'] = round(time.monotonic()-saving_started, 3)
         publish(part)
-    measurements = [part['views'][v].get('measurement') or part['views'][v].get('qc') or {} for v in views]
-    part['target_bounds_m'] = paired_bounds(*measurements, spec, slot)
+    measurements = {v: part['views'][v].get('measurement') or part['views'][v].get('qc') or {} for v in views}
+    part['target_bounds_m'] = paired_bounds(measurements['front'], measurements['side'], spec, slot)
     part['image'] = {**part['views']['front'], 'status': 'succeeded'}
     publish(part)

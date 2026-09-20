@@ -1,26 +1,25 @@
-import { Group, Matrix4, Skeleton, Vector3, type Bone, type Object3D, type SkinnedMesh, type Texture, type Material, type BufferGeometry } from 'three';
+import { Group, Matrix4, MeshStandardMaterial, Skeleton, Vector3, type Bone, type Object3D, type SkinnedMesh, type Material } from 'three';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
+import { disposeObjectResources } from './assets/gpu-resources';
+import { prepareExpressionMaterial } from './texture-expressions';
+import { hairColorControl } from './hair-color';
 
 export type Wearable = { id: string; slot: string; url: string; sha256: string };
 type Entry = { spec: Wearable; group: Group; source: GLTF; skeletons: Set<Skeleton>; touched: number };
 type RestBone = { bone: Bone; matrix: Matrix4; parent: string | null };
 
+function standardSlot(object: Object3D): unknown {
+  // A glTF node with several material primitives loads as a Group. Its extras
+  // belong to that parent, while the skinned primitive meshes are children.
+  for (let node: Object3D | null = object; node; node = node.parent) {
+    if (node.userData.standard_slot !== undefined) return node.userData.standard_slot;
+  }
+  return undefined;
+}
+
 function disposeEntry(entry: Entry) {
   entry.group.removeFromParent();
-  const textures = new Set<Texture>(), materials = new Set<Material>(), geometries = new Set<BufferGeometry>();
-  for (const root of [entry.group, entry.source.scene]) root.traverse(object => {
-    const mesh = object as SkinnedMesh;
-    if (!mesh.isMesh) return;
-    geometries.add(mesh.geometry);
-    for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
-      materials.add(material);
-      for (const value of Object.values(material)) if (value && (value as Texture).isTexture) textures.add(value as Texture);
-    }
-    if (mesh.isSkinnedMesh) entry.skeletons.add(mesh.skeleton);
-  });
-  textures.forEach(texture => { (texture.source.data as ImageBitmap)?.close?.(); texture.dispose(); });
-  materials.forEach(material => material.dispose()); geometries.forEach(geometry => geometry.dispose());
-  entry.skeletons.forEach(skeleton => skeleton.dispose());
+  disposeObjectResources([entry.group, ...entry.source.scenes], entry.skeletons);
 }
 
 /** Variant meshes share the loaded body's actual bone objects and mixer.
@@ -36,7 +35,18 @@ export class NativeWardrobe {
   private loading = new Map<string, Promise<Entry>>();
   private references = new Map<string, number>();
   private generation = 0;
+  private headGeneration = 0;
+  private head?: Entry;
   private disposed = false;
+  private lifetime = new AbortController();
+  private hairColor: string | null = null;
+  private hairControls = new Map<MeshStandardMaterial, (color: string | null) => void>();
+
+  setHairColor(color: string | null) {
+    if (color !== null && !/^#[0-9a-f]{6}$/i.test(color)) throw new Error('올바른 헤어 색상을 선택하세요.');
+    this.hairColor = color;
+    this.hairControls.forEach(update => update(color));
+  }
 
   constructor(private body: Object3D) {
     body.updateMatrixWorld(true); this.baseInverse = body.matrixWorld.clone().invert();
@@ -71,7 +81,7 @@ export class NativeWardrobe {
       return entry;
     }
     const request = (async () => {
-      const response = await fetch(spec.url);
+      const response = await fetch(spec.url, { signal: AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(20000)]) });
       if (!response.ok) throw new Error('의상 모델을 불러올 수 없습니다.');
       const bytes = await response.arrayBuffer();
       const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).map(v => v.toString(16).padStart(2, '0')).join('');
@@ -83,7 +93,19 @@ export class NativeWardrobe {
         source.scene.updateMatrixWorld(true);
         const meshes: SkinnedMesh[] = [];
         source.scene.traverse(object => { if ((object as SkinnedMesh).isSkinnedMesh) meshes.push(object as SkinnedMesh); });
-        if (!meshes.length || meshes.some(mesh => mesh.userData.standard_slot !== spec.slot)) throw new Error('공용 골격에 맞춘 해당 슬롯의 의상 파일이 필요합니다.');
+        if (!meshes.length || meshes.some(mesh => standardSlot(mesh) !== spec.slot)) throw new Error('공용 골격에 맞춘 해당 슬롯의 의상 파일이 필요합니다.');
+        if (['hair', 'hairFront', 'hairBack'].includes(spec.slot)) {
+          const materials = new Set(meshes.flatMap(mesh => Array.isArray(mesh.material) ? mesh.material : [mesh.material]));
+          materials.forEach(material => {
+            if (!(material instanceof MeshStandardMaterial)) return;
+            const update = hairColorControl(material); this.hairControls.set(material, update); update(this.hairColor);
+            material.addEventListener('dispose', () => this.hairControls.delete(material));
+          });
+        }
+        if (spec.slot === 'faceHead') {
+          const materials = new Set(meshes.flatMap(mesh => Array.isArray(mesh.material) ? mesh.material : [mesh.material]));
+          materials.forEach(material => { if (material instanceof MeshStandardMaterial) prepareExpressionMaterial(material); });
+        }
         for (const mesh of meshes) {
           const native = mesh.skeleton;
           if (native.bones.length !== this.bones.size) throw new Error('의상의 골격 규격이 기준 몸과 다릅니다.');
@@ -105,6 +127,7 @@ export class NativeWardrobe {
           entry.skeletons.add(mesh.skeleton);
           mesh.removeFromParent(); transform.decompose(mesh.position, mesh.quaternion, mesh.scale); mesh.updateMatrix();
           mesh.name = `wardrobe-${spec.id}-${entry.group.children.length}`;
+          mesh.userData.standard_slot = spec.slot;
           mesh.userData.wardrobePartId = spec.id; entry.group.add(mesh);
         }
         this.loaded.set(spec.id, entry); return entry;
@@ -133,15 +156,44 @@ export class NativeWardrobe {
       this.baseMaterials.forEach((visible, material) => {
         const value: unknown = material.userData.hidden_by_slots;
         const slots = typeof value === 'string' ? value.split('+') : Array.isArray(value) ? value : [];
-        material.visible = visible && !slots.some(slot => this.active.has(slot));
+        // Older assemblies tagged the whole upper scalp as covered by hair.
+        // A hairstyle is open between strands; hiding skin creates rear holes.
+        material.visible = visible && !slots.some(slot => slot !== 'hair' && slot !== 'head'
+          && slot !== 'hairFront' && slot !== 'hairBack' && this.active.has(slot));
       });
       this.body.updateMatrixWorld(true); return true;
     } finally {
       parts.forEach(part => { const count = (this.references.get(part.id) || 1)-1; if (count) this.references.set(part.id, count); else this.references.delete(part.id); });
-      const active = new Set(Array.from(this.active.values(), entry => entry.spec.id));
-      const inactive = Array.from(this.loaded.values()).filter(entry => !active.has(entry.spec.id) && !this.references.has(entry.spec.id)).sort((a,b) => b.touched-a.touched);
-      for (const entry of inactive.slice(2)) { this.loaded.delete(entry.spec.id); disposeEntry(entry); }
+      this.prune();
     }
+  }
+
+  async equipHead(spec: Wearable): Promise<boolean> {
+    if (this.disposed) throw new Error('캐릭터 화면이 닫혔습니다.');
+    if (spec.slot !== 'faceHead') throw new Error('분리된 머리 파츠가 필요합니다.');
+    const generation = ++this.headGeneration;
+    this.references.set(spec.id, (this.references.get(spec.id) || 0)+1);
+    try {
+      const entry = await this.load(spec);
+      if (this.disposed || generation !== this.headGeneration) return false;
+      this.head?.group.removeFromParent();
+      this.head = entry;
+      entry.touched = performance.now();
+      this.body.add(entry.group);
+      this.body.updateMatrixWorld(true);
+      return true;
+    } finally {
+      const count = (this.references.get(spec.id) || 1)-1;
+      if (count) this.references.set(spec.id, count); else this.references.delete(spec.id);
+      this.prune();
+    }
+  }
+
+  private prune() {
+    const active = new Set(Array.from(this.active.values(), entry => entry.spec.id));
+    if (this.head) active.add(this.head.spec.id);
+    const inactive = Array.from(this.loaded.values()).filter(entry => !active.has(entry.spec.id) && !this.references.has(entry.spec.id)).sort((a,b) => b.touched-a.touched);
+    for (const entry of inactive.slice(2)) { this.loaded.delete(entry.spec.id); disposeEntry(entry); }
   }
 
   diagnostics() {
@@ -155,7 +207,7 @@ export class NativeWardrobe {
         mesh.applyBoneTransform(i, point).applyMatrix4(mesh.matrixWorld); bodySample.push(point.x, point.y, point.z);
       }
     }
-    this.active.forEach(entry => { const points: number[] = []; partSamples[entry.spec.slot] = points; entry.group.traverse(object => {
+    [...this.active.values(), ...(this.head ? [this.head] : [])].forEach(entry => { const points: number[] = []; partSamples[entry.spec.slot] = points; entry.group.traverse(object => {
       const mesh = object as SkinnedMesh; if (!mesh.isSkinnedMesh) return;
       shared &&= mesh.skeleton.bones.every(bone => this.bones.get(bone.name)?.bone === bone);
       mesh.skeleton.update();
@@ -169,8 +221,8 @@ export class NativeWardrobe {
   }
 
   dispose() {
-    this.disposed = true; this.generation++;
+    this.disposed = true; this.generation++; this.headGeneration++; this.lifetime.abort();
     this.baseMaterials.forEach((visible, material) => { material.visible = visible; }); this.baseMaterials.clear();
-    this.loaded.forEach(disposeEntry); this.loaded.clear(); this.active.clear();
+    this.loaded.forEach(disposeEntry); this.loaded.clear(); this.active.clear(); this.head = undefined;
   }
 }

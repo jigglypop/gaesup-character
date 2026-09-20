@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ModelViewer } from '../viewer';
 import { usePolling } from '../use-polling';
 import { studioApi } from './api';
+import { GlbUpload } from './GlbUpload';
 
 export default function Animals() {
   const listing=usePolling(studioApi.animals,5000);
@@ -20,8 +21,18 @@ export default function Animals() {
     if(locked.current)return;locked.current=true;setBusy(true);setError('');
     try{await action();}catch(e){setError((e as Error).message);}finally{locked.current=false;setBusy(false);}
   }
+  async function upload(file: File) {
+    if (locked.current) throw new Error('진행 중인 작업이 끝나면 등록해 주세요.');
+    locked.current = true; setBusy(true); setError('');
+    try {
+      const result = await studioApi.uploadAnimal(file, species, name.trim() || file.name.replace(/\.glb$/i, '').slice(0, 80));
+      setSelected(result.id);
+      listing.setValue(current => ({ items: [result, ...(current?.items || []).filter(a => a.id !== result.id)] }));
+    } finally { locked.current = false; setBusy(false); }
+  }
   const statuses:Record<string,string>={uploaded:'원본 저장',accepted:'리깅 대기',running:'리깅 중',complete:'리깅 파일 저장',paused:'리깅 중단',failed:'리깅 실패'};
-  return <div className="workspace-content"><h1>동물</h1><div className="texture-form"><label>종류<select disabled={busy} value={species} onChange={e=>setSpecies(e.target.value)}><option value="dog">강아지</option><option value="cat">고양이</option><option value="dragon">용</option></select></label><label>이름<input value={name} maxLength={80} disabled={busy} onChange={e=>setName(e.target.value)} /></label><label>GLB 등록<input type="file" accept=".glb" disabled={busy} onChange={e=>{const file=e.target.files?.[0];e.target.value='';if(!file)return;void perform(async()=>{const result=await studioApi.uploadAnimal(file,species,name.trim()||file.name.replace(/\.glb$/i,''));setSelected(result.id);listing.setValue(current=>({items:[result,...(current?.items||[]).filter(a=>a.id!==result.id)]}));});}} /></label></div>
+  return <div className="workspace-content"><h1>동물</h1><div className="texture-form"><label>종류<select disabled={busy} value={species} onChange={e=>setSpecies(e.target.value)}><option value="dog">강아지</option><option value="cat">고양이</option><option value="dragon">용</option></select></label><label>이름<input value={name} maxLength={80} disabled={busy} onChange={e=>setName(e.target.value)} /></label></div>
+    <GlbUpload disabled={busy} onUpload={upload} />
     <small>정면 +Z · 위 +Y · 네 발이 바닥에 닿는 기본 자세</small>
     {(error||listing.error||animal?.error)&&<p role="alert">{error||listing.error||animal?.error}</p>}
     <div className="asset-grid">{listing.value?.items.map(a=><button className={`asset-card ${animal?.id===a.id?'selected':''}`} key={a.id} onClick={()=>setSelected(a.id)}><strong>{a.name}</strong><small>{statuses[a.status]||a.status}</small></button>)}</div>
