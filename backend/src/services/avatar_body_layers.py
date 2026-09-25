@@ -4,7 +4,7 @@ import bpy
 from mathutils import Vector
 
 from src.services.avatar_fit_geometry import bounds
-from src.services.avatar_standard_blender import blender_to_gltf, gltf_to_blender
+from src.services.avatar_blender_common import blender_to_gltf, gltf_to_blender
 from src.services.glb import parse_glb, build_glb
 
 
@@ -121,7 +121,9 @@ def cropped_slots(point, bone, regions, *, is_fabric=False):
     return slots
 
 
-def mark_body_coverage(body, garments, rig, spec, coverage_profiles=None):
+def mark_body_coverage(body, garments, rig, spec, coverage_profiles=None, *, shell_slots=()):
+    """shell_slots: garments built from the body; their exact coverage is stored as
+    `shell_cover_<slot>` vertex attributes instead of anatomical crop planes."""
     from src.services.avatar_head_geometry import underlayer_faces
     regions, lines = crop_regions(garments, rig, spec, coverage_profiles)
     materials, face_counts = [], {}
@@ -140,6 +142,13 @@ def mark_body_coverage(body, garments, rig, spec, coverage_profiles=None):
             material.use_nodes = True
             obj.data.materials.append(material)
         names = {g.index: g.name.lower() for g in obj.vertex_groups}
+        shell_values = {}
+        for slot in shell_slots:
+            attribute = obj.data.attributes.get(f'shell_cover_{slot}')
+            if attribute is not None:
+                values = [0.]*len(obj.data.vertices)
+                attribute.data.foreach_get('value', values)
+                shell_values[slot] = values
         variants = {}
         for polygon in obj.data.polygons:
             weights = {}
@@ -147,8 +156,12 @@ def mark_body_coverage(body, garments, rig, spec, coverage_profiles=None):
                 for group in obj.data.vertices[index].groups:
                     weights[group.group] = weights.get(group.group, 0)+group.weight
             bone = names.get(max(weights, key=weights.get), '') if weights else ''
-            slots = tuple(sorted(cropped_slots(obj.matrix_world @ polygon.center, bone, regions,
-                                              is_fabric=polygon.index in fabric)))
+            covered = set(cropped_slots(obj.matrix_world @ polygon.center, bone, regions,
+                                        is_fabric=polygon.index in fabric))
+            for slot, values in shell_values.items():
+                if all(values[index] >= .5 for index in polygon.vertices):
+                    covered.add(slot)
+            slots = tuple(sorted(covered))
             if not slots:
                 continue
             key = polygon.material_index, slots

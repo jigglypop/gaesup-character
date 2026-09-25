@@ -44,8 +44,32 @@ class FittingManagement:
     def body_default(self):
         return read_json(self.library.root/'body-profile.json', {'revision': '0', 'body': None})
 
-    def save_body_default(self, job, version, expected_revision):
+    def body_entry(self, job, version):
+        """(identity of a saved, prepared body version, its job) or a refusal; part jobs can build on it."""
         from src.services.avatar_native_parts import AvatarNativeParts
+        metadata = self.library.metadata()
+        source_job = self.factory.get(self.owner, job)
+        if (self.library.is_job_deleted(source_job, metadata)
+                or metadata['parts'].get(f'{job}:body', {}).get('deleted')):
+            raise PipelineError('body_deleted', '보관 중인 몸을 선택하세요.', 409)
+        native = AvatarNativeParts(self.factory)
+        root = native.root(self.owner, job)
+        if not re.fullmatch(r'[a-f0-9]{24}', version):
+            raise PipelineError('not_found', '몸 버전을 찾을 수 없습니다.', 404)
+        record = read_json(root/version/'record.json')
+        if record.get('status') != 'review_required':
+            raise PipelineError('body_incomplete', '저장된 조립 몸을 선택하세요.', 409)
+        if record.get('result', {}).get('origin') == 'uploaded_glb':
+            # Part generation rejects an unprepared GLB body, so it cannot be a shared body either.
+            raise PipelineError('body_preparation_required', '바로 등록한 GLB는 피팅·조립부터 실행한 뒤 지정하세요.', 422)
+        path = native.artifact(self.owner, job, version, 'body.glb')
+        identity = geometry_identity(path.read_bytes())
+        body = {'job_id': job, 'version': version, 'profile_id': f'body-{identity[:24]}',
+                'geometry_sha256': identity, 'body_sha256': record['files']['body.glb'],
+                'measurements': record.get('result', {}).get('body_profile')}
+        return body, source_job
+
+    def save_body_default(self, job, version, expected_revision):
         self.library.require_storage()
         with _LOCK:
             previous = self.body_default()
@@ -54,24 +78,7 @@ class FittingManagement:
                 return previous
             if previous['revision'] != expected_revision:
                 raise PipelineError('revision_conflict', '공통 몸이 변경되었습니다. 다시 불러오세요.', 409)
-            metadata = self.library.metadata()
-            source_job = self.factory.get(self.owner, job)
-            if (self.library.is_job_deleted(source_job, metadata)
-                    or metadata['parts'].get(f'{job}:body', {}).get('deleted')):
-                raise PipelineError('body_deleted', '보관 중인 몸을 선택하세요.', 409)
-            native = AvatarNativeParts(self.factory)
-            root = native.root(self.owner, job)
-            if not re.fullmatch(r'[a-f0-9]{24}', version):
-                raise PipelineError('not_found', '몸 버전을 찾을 수 없습니다.', 404)
-            record = read_json(root/version/'record.json')
-            if record.get('status') != 'review_required':
-                raise PipelineError('body_incomplete', '저장된 조립 몸을 선택하세요.', 409)
-            path = native.artifact(self.owner, job, version, 'body.glb')
-            sha = record['files']['body.glb']
-            identity = geometry_identity(path.read_bytes())
-            body = {'job_id': job, 'version': version, 'profile_id': f'body-{identity[:24]}',
-                    'geometry_sha256': identity, 'body_sha256': sha,
-                    'measurements': record.get('result', {}).get('body_profile')}
+            body, _ = self.body_entry(job, version)
             value = {'body': body, 'updated_at': now()}
             value['revision'] = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
             _write_json(self.library.root/'body-profile.json', value)

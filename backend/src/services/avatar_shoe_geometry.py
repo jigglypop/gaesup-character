@@ -4,7 +4,7 @@ import bmesh
 from mathutils import Matrix, Vector
 
 from src.services.avatar_fit_geometry import target_box
-from src.services.avatar_standard_blender import blender_to_gltf
+from src.services.avatar_blender_common import blender_to_gltf
 
 
 def _components(obj):

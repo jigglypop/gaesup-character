@@ -15,6 +15,7 @@ export type FitProfile = {
   anchors?: FitAnchor[];
   source_sha256?: string;
 };
+export type PartMethod = 'isolated' | 'body_shell' | 'worn';
 export type FactoryJob = {
   meshy_options?: Record<string, MeshyOptions>;
   id: string; character_id: string; character_name: string; source_sha256: string;
@@ -22,6 +23,7 @@ export type FactoryJob = {
   base_job_id?: string; base_version?: string; requested_slots?: string[]; part_name?: string;
   base_body?: { body_type: 'male' | 'female'; import_mode?: 'register' | 'rig'; views?: Partial<Record<'front' | 'side' | 'back', string>>; rig_source?: { job_id: string; version: string } | null };
   assembly_version?: string | null;
+  assembly_origin?: string | null;
   assembly_artifacts?: { name: string; url: string; sha256: string }[];
   updated_at?: string;
   character_flow?: { status: string; stage: string; message: string; busy: boolean };
@@ -39,18 +41,21 @@ export type FactoryJob = {
   input_kind?: string;
   production_mode?: 'legacy' | 'character_parts';
   image_provider?: string; image_model?: string;
-  parts?: { slot: string; image_status: string; image_asset?: string; model_status: string; task_id?: string; progress?: number; reused?: boolean; assembly_status?: 'pending' | 'running' | 'failed' | 'complete'; image_failure?: { id: string; category: string }; views?: Record<string, {status: string; file?: string; qc?: {passed: boolean; issues: string[]}; failure?: {id: string; message?: string; elapsed_seconds?: number}}> }[];
+  parts?: { slot: string; part_method?: PartMethod; image_status: string; image_asset?: string; model_status: string; task_id?: string; progress?: number; reused?: boolean; assembly_status?: 'pending' | 'running' | 'failed' | 'complete'; image_failure?: { id: string; category: string }; views?: Record<string, {status: string; file?: string; qc?: {passed: boolean; issues: string[]}; failure?: {id: string; message?: string; elapsed_seconds?: number}}> }[];
   limits?: { image_tasks: number; meshy_tasks: number; reference_tasks?: number; expression_tasks?: number };
   next_actions?: { id: string; enabled: boolean; reason?: string; slot?: string; view?: string; failure_id?: string; images?: ImageRetry[] }[];
 };
 export type ImageProductionInput = { meshy_options?: MeshyOptions; character_id: string; source_sha256: string; blueprint_revision: string; image_mode: 'generate' | 'prepared'; slots: string[]; production_mode?: 'legacy' | 'character_parts'; view_mode?: 'single' | 'front_side' | 'front_side_back'; hair_length?: 'source' | 'short' | 'long'; reuse_job_id?: string; rig_with_meshy?: boolean; body_purpose?: 'whole_character' | 'wardrobe_base'; motion_actions?: Record<string, number>; design_prompts?: Record<string, string>; prepare_reference?: boolean; default_expressions?: boolean; base_job_id?: string; base_version?: string; fit_profiles?: { top?: FitProfile; bottom?: FitProfile } };
-export type FactoryCapabilities = { character_pipeline?: string; ready: boolean; image_provider: string; image_model: string; slots: string[]; design_prompt_defaults?: Record<string, string>; meshy_model: string; image_configured: boolean; meshy_configured: boolean; blender_available: boolean; next_actions: { id: string; enabled: boolean; reason?: string }[] };
+export type FactoryCapabilities = { character_pipeline?: string; ready: boolean; meshy_balance?: number | null; meshy_credit_estimate?: { part: number; rig: number }; image_provider: string; image_model: string; slots: string[]; design_prompt_defaults?: Record<string, string>; meshy_model: string; image_configured: boolean; meshy_configured: boolean; tripo_configured?: boolean; model_providers?: ('meshy' | 'tripo')[]; default_model_provider?: 'meshy' | 'tripo'; part_methods?: { defaults: Partial<Record<string, PartMethod>> }; blender_available: boolean; next_actions: { id: string; enabled: boolean; reason?: string }[] };
 export type MeshyAction = { action_id: number; name: string; key: string; category: string; sub_category: string; preview_url?: string };
 export type MeshyState = { provider: 'meshy'; status: string; rig_task_id?: string; progress: number; busy: boolean; error?: string;
   origin?: string; can_request_action?: boolean;
   version?: string; model_sha256?: string; bone_count?: number; can_resume: boolean; artifacts: {name: string; url: string}[];
   clips: {slot: string; source: string; action_id: number | null}[]; selected: Record<string, number>;
   actions: {action_id: number; task_id?: string; status?: string; progress?: number}[] };
+/** Pre-rig ring measurement of sleeves / trouser legs against the body (worn parts). */
+export type LimbFitCheck = { status: 'pass' | 'fail' | 'not_applicable'; failures: { limb: string; message: string }[];
+  limbs: Record<string, { rings?: number; min_margin_cm?: number; angle_deg?: number | null }> };
 export type NativePartsState = {
   origin?: string;
   rigged?: boolean;
@@ -58,21 +63,40 @@ export type NativePartsState = {
   fitting_revision?: string; fit_update_available?: boolean; expression_pending?: boolean; fit_status?: string;
   refit_request_key?: string | null;
   incomplete_parts?: { slot: string; status: string; errors: { code: string; message: string }[] }[];
-  parts: { slot: string; objects: string[]; runtime_budget?: {
+  parts: { slot: string; objects: string[]; available?: boolean; fit_method?: string; unavailable_reason?: string; runtime_budget?: {
     source_triangles?: number; runtime_triangles?: number; target_triangles?: number;
     texture_max_edge?: number; resized_textures?: number; source_files_preserved?: boolean;
-  } }[];
+  }; limb_fit?: { check?: LimbFitCheck } }[];
   artifacts: { name: string; url: string; sha256: string }[];
   preview?: NativePartsState;
 };
 export type NativeOutfit = { version: string; body_sha256: string; revision: string; slots: string[]; hair_color?: string | null; saved_at?: string };
 export type BodyProfileState = { revision: string; body: null | { job_id: string; version: string; profile_id: string; body_sha256: string } };
+export type WardrobeBody = { job_id: string; version: string; profile_id: string; body_sha256: string; geometry_sha256: string; name: string; body_type?: 'male' | 'female' | null; registered_at: string; is_default: boolean; part_jobs: number | null };
+export type WardrobeBodiesState = { revision: string; bodies: WardrobeBody[]; default: null | { job_id: string; version: string } };
+/** Body-shell garment shape: sleeve 0 (none)..1 (wrist); hem top waist..crotch, bottom shorts..ankle. */
+export type GarmentShape = { sleeve?: number; hem?: number; fit?: 'tight' | 'normal' | 'loose' };
+export type WardrobePart = { job_id: string; version: string; slot: string; name: string; character_name?: string | null; fit_method?: string | null;
+  shape?: GarmentShape | null;
+  fit_check?: { status: 'pass' | 'fail'; failures: string[] } | null; sha256: string; created_at?: string | null };
+export type WardrobeParts = { body: WardrobeBody; parts: WardrobePart[] };
+export type WardrobePartRef = { job_id: string; version: string; sha256: string };
+export type WardrobeOutfit = { name: string; body: { job_id: string; version: string }; parts: Record<string, WardrobePartRef>; hair_color?: string | null; colors?: Record<string, Record<string, string>>; saved_at?: string };
+export type WardrobeColors = { slot: string; material: number; regions: { index: number; color: string; share: number; light: number }[] };
+export type WardrobeOutfits = { revision: string; outfits: Record<string, WardrobeOutfit> };
+export type WardrobeCoverage = { slot: string; hidden: Record<string, string>; triangles: Record<string, number>; covers_bottom: boolean };
+export const wardrobeUrls = {
+  body: (body: { job_id: string; version: string }) => `/api/avatar-factory/jobs/${body.job_id}/native-parts/${body.version}/body.glb`,
+  part: (part: WardrobePart) => `/api/avatar-factory/jobs/${part.job_id}/native-parts/${part.version}/${part.slot}.glb`,
+  preview: (part: WardrobePart) => `/api/avatar-factory/wardrobe/previews/${part.job_id}/${part.slot}?${new URLSearchParams({ version: part.version })}`,
+  colorMask: (part: WardrobePart) => `/api/avatar-factory/wardrobe/colors/${part.job_id}/${part.slot}/mask?${new URLSearchParams({ version: part.version })}`,
+};
 export type PartFitProfile = { slot: 'top' | 'bottom'; source_version: string; source_sha256: string; fit_profile: FitProfile; measurement?: Record<string, unknown>; body_profile?: Record<string, unknown> };
 export type NativePartsVersions = { current: string | null; items: { version: string; created_at?: string; fitting_revision?: string; url?: string }[] };
 export type FactoryStage = 'images' | 'models' | 'rig' | 'assemble' | 'expressions';
 export type FactoryStages = {
   busy: boolean; recommended_stage: FactoryStage | null;
-  actions: { stage: FactoryStage; enabled: boolean; reason: string | null; paid: boolean }[];
+  actions: { stage: FactoryStage; enabled: boolean; reason: string | null; paid: boolean; warning?: string }[];
   saved: { images: number; images_total: number; models: number; models_total: number; rig: boolean };
   operation: { id: string; stage: FactoryStage; status: string; error: string | null; created_at: string; updated_at: string } | null;
 };
@@ -106,6 +130,25 @@ export const factoryApi = {
   saveBodyProfile: (job_id: string, version: string, expected_revision: string) => request<BodyProfileState>('/api/avatar-factory/body-profile', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job_id, version, expected_revision }),
   }),
+  wardrobeBodies: (signal?: AbortSignal) => request<WardrobeBodiesState>('/api/avatar-factory/wardrobe/bodies', { signal }),
+  registerWardrobeBody: (job_id: string, version: string, expected_revision: string) => request<WardrobeBodiesState>(`/api/avatar-factory/wardrobe/bodies/${job_id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version, expected_revision }),
+  }),
+  unregisterWardrobeBody: (job_id: string, revision: string) => request<WardrobeBodiesState>(`/api/avatar-factory/wardrobe/bodies/${job_id}`, {
+    method: 'DELETE', headers: { 'If-Match': revision },
+  }),
+  wardrobeParts: (bodyJobId: string, signal?: AbortSignal) => request<WardrobeParts>(`/api/avatar-factory/wardrobe/bodies/${bodyJobId}/parts`, { signal }),
+  wardrobeOutfits: (signal?: AbortSignal) => request<WardrobeOutfits>('/api/avatar-factory/wardrobe/outfits', { signal }),
+  wardrobeColors: (part: WardrobePart, signal?: AbortSignal) => request<WardrobeColors>(
+    `/api/avatar-factory/wardrobe/colors/${part.job_id}/${part.slot}?${new URLSearchParams({ version: part.version })}`, { signal }),
+  wardrobeCoverage: (bodyJobId: string, part: WardrobePart, signal?: AbortSignal) => request<WardrobeCoverage>(
+    `/api/avatar-factory/wardrobe/bodies/${bodyJobId}/coverage/${part.job_id}/${part.slot}?${new URLSearchParams({ version: part.version })}`, { signal }),
+  saveWardrobeOutfit: (id: string, input: WardrobeOutfit, revision: string, key: string) => request<WardrobeOutfits>(`/api/avatar-factory/wardrobe/outfits/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-Match': revision, 'Idempotency-Key': key }, body: JSON.stringify(input),
+  }),
+  deleteWardrobeOutfit: (id: string, revision: string) => request<WardrobeOutfits>(`/api/avatar-factory/wardrobe/outfits/${id}`, {
+    method: 'DELETE', headers: { 'If-Match': revision },
+  }),
   fitProfile: (id: string, slot: 'top' | 'bottom', sourceVersion: string, signal?: AbortSignal) => request<PartFitProfile>(`/api/avatar-factory/jobs/${id}/fit-profile/${slot}?${new URLSearchParams({ source_version: sourceVersion })}`, { signal }),
   nativePartsVersions: (id: string, signal?: AbortSignal) => request<NativePartsVersions>(`/api/avatar-factory/jobs/${id}/native-parts/versions`, { signal }),
   pendingNativePartsSelection: (id: string): PendingNativePartsSelection | null => {
@@ -130,7 +173,7 @@ export const factoryApi = {
       throw error;
     }
   },
-  pendingRefit: (id: string): { key: string; input: { source_version: string; slot: string; fit_profile?: FitProfile } } | null => {
+  pendingRefit: (id: string): { key: string; input: { source_version: string; slot: string; fit_profile?: FitProfile; part_method?: 'isolated' | 'body_shell'; shape?: GarmentShape } } | null => {
     const raw = localStorage.getItem(`gaesup.part-refit:${id}`);
     if (!raw) return null;
     const value = JSON.parse(raw);
@@ -140,11 +183,11 @@ export const factoryApi = {
   acknowledgeRefit: (id: string, key: string) => {
     if (factoryApi.pendingRefit(id)?.key === key) localStorage.removeItem(`gaesup.part-refit:${id}`);
   },
-  async refitPart(id: string, source_version: string, slot: string, fit_profile?: FitProfile) {
+  async refitPart(id: string, source_version: string, slot: string, fit_profile?: FitProfile, part_method?: 'isolated' | 'body_shell', shape?: GarmentShape) {
     const storage = `gaesup.part-refit:${id}`;
     const saved = factoryApi.pendingRefit(id);
     if (saved && saved.input.slot !== slot) throw new Error(`저장된 ${saved.input.slot} 피팅 요청을 먼저 복구해야 합니다.`);
-    const pending = saved || { key: crypto.randomUUID(), input: { source_version, slot, ...(fit_profile ? { fit_profile } : {}) } };
+    const pending = saved || { key: crypto.randomUUID(), input: { source_version, slot, ...(fit_profile ? { fit_profile } : {}), ...(part_method ? { part_method } : {}), ...(shape ? { shape } : {}) } };
     localStorage.setItem(storage, JSON.stringify(pending));
     try {
       const result = await request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts/refit`, {

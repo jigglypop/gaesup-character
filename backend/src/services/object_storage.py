@@ -19,8 +19,34 @@ _content_cache = {}
 _key_index = {}
 _written_keys = {}
 _generations = {}
+_changes = {}
 _cache_lock = RLock()
-_workspace_lock = RLock()
+_workspace_lock = RLock()   # guards the bookkeeping below, never held while a worker runs
+_directory_locks = {}       # one active workspace per local directory
+_materialized = {}          # shared input path -> [workspaces using it, created by a workspace]
+
+
+def _change_scope(path):
+    from src.paths import data_root
+    try:
+        relative = LocalPath(path).resolve().relative_to(LocalPath(data_root()).resolve())
+    except (ValueError, OSError):
+        return None
+    return '/'.join(relative.parts[:3]) if len(relative.parts) > 3 else None
+
+
+def mark_changed(path):
+    scope = _change_scope(path)
+    if scope:
+        with _cache_lock:
+            _changes[scope] = time.monotonic()
+
+
+def changed_since(path, since):
+    """True when this process wrote under the path's job directory after `since` (monotonic)."""
+    scope = _change_scope(path)
+    with _cache_lock:
+        return bool(scope) and _changes.get(scope, 0) > since
 
 
 @lru_cache(maxsize=4)
@@ -65,36 +91,38 @@ def _s3():
                    os.getenv('ASSET_AWS_PROFILE', os.getenv('AWS_PROFILE', '')))
 
 
-def _keys(bucket, prefix):
+def _index(bucket, prefix):
+    """Cached key set of one prefix. Callers only test membership; writers add under _cache_lock."""
     with _cache_lock:
         cached = _key_index.get((bucket, prefix))
         if cached and time.monotonic() - cached[0] < 15:
-            return set(cached[1])
+            return cached[1]
     result = set()
     for page in _s3().get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=prefix):
         result.update(item['Key'] for item in page.get('Contents', []))
     with _cache_lock:
         result.update(key for key in _written_keys.get(bucket, ()) if key.startswith(prefix))
+        if len(_key_index) > 4096:
+            _key_index.clear()
         _key_index[bucket, prefix] = time.monotonic(), result
-    return set(result)
+    return result
 
 
-def _listed(path):
-    location = _location(path)
-    if not location:
-        return False
+def _keys(bucket, prefix):
+    keys = _index(bucket, prefix)
+    with _cache_lock:
+        return set(keys)
+
+
+def _scope(key):
+    """The job-sized prefix of a key (prefix/<namespace>/<owner>/<item>/), or None for shallow keys."""
     prefix = os.getenv('ASSET_S3_PREFIX', 'assets').strip('/')
-    return location[1] in _keys(location[0], prefix+'/' if prefix else '')
+    depth = (len(prefix.split('/')) if prefix else 0) + 3
+    parts = key.split('/')
+    return '/'.join(parts[:depth]) + '/' if len(parts) > depth else None
 
 
-def _is_working(path):
-    return any(LocalPath(path).absolute().is_relative_to(root) for root in _working.get())
-
-
-def _head(path):
-    location = _location(path)
-    if not location or not _listed(path):
-        return None
+def _head_object(location):
     with _cache_lock:
         cached = _cache.get(location)
         if cached and time.monotonic() - cached[0] < 2:
@@ -113,6 +141,28 @@ def _head(path):
     return result
 
 
+def _listed(path):
+    location = _location(path)
+    if not location:
+        return False
+    # Index one job's keys, not the whole bucket; shallow files are checked directly.
+    scope = _scope(location[1])
+    if scope is None:
+        return _head_object(location) is not None
+    return location[1] in _index(location[0], scope)
+
+
+def _is_working(path):
+    return any(LocalPath(path).absolute().is_relative_to(root) for root in _working.get())
+
+
+def _head(path):
+    location = _location(path)
+    if not location or not _listed(path):
+        return None
+    return _head_object(location)
+
+
 def _content_type(path):
     # Windows MIME registrations do not consistently include WebP or glTF.
     known = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
@@ -122,6 +172,14 @@ def _content_type(path):
 
 
 def _put(path, content, *, exclusive=False):
+    mark_changed(path)
+    try:
+        _put_object(path, content, exclusive=exclusive)
+    finally:
+        mark_changed(path)  # A reader that started before completion must not cache the old value.
+
+
+def _put_object(path, content, *, exclusive=False):
     bucket, key = _location(path)
     digest = hashlib.sha256(content).digest()
     mime = _content_type(path)
@@ -140,11 +198,13 @@ def _put(path, content, *, exclusive=False):
 
 def write_json(path, value):
     """Return True only after the complete JSON was durably committed to S3."""
+    mark_changed(path)
     if not _location(path):
         return False
     content = json.dumps(value, ensure_ascii=False, indent=2).encode('utf-8')
     if _is_working(path):
         LocalPath(path).write_bytes(content)
+        mark_changed(path)
     else:
         _put(path, content)
     return True
@@ -198,7 +258,11 @@ class StoredPath(type(LocalPath())):
     def write_bytes(self, data):
         content = bytes(data)
         if not _location(self) or _is_working(self):
-            return LocalPath(self).write_bytes(content)
+            mark_changed(self)
+            try:
+                return LocalPath(self).write_bytes(content)
+            finally:
+                mark_changed(self)
         _put(self, content)
         return len(content)
 
@@ -282,6 +346,13 @@ class StoredPath(type(LocalPath())):
         return target
 
     def unlink(self, missing_ok=False):
+        mark_changed(self)
+        try:
+            return self._unlink(missing_ok)
+        finally:
+            mark_changed(self)
+
+    def _unlink(self, missing_ok):
         location = _location(self)
         if not location or _is_working(self):
             return LocalPath(self).unlink(missing_ok=missing_ok)
@@ -298,12 +369,81 @@ class StoredPath(type(LocalPath())):
                     keys.discard(location[1])
 
 
+def child_names(path):
+    """Immediate child directory names, local and stored, without listing their contents."""
+    path = StoredPath(path)
+    local = LocalPath(path)
+    names = {child.name for child in local.iterdir() if child.is_dir()} if local.is_dir() else set()
+    location = _location(path)
+    if location and not _is_working(path):
+        prefix = location[1].rstrip('/')+'/'
+        for page in _s3().get_paginator('list_objects_v2').paginate(Bucket=location[0], Prefix=prefix, Delimiter='/'):
+            names.update(item['Prefix'][len(prefix):].rstrip('/') for item in page.get('CommonPrefixes', []))
+    return sorted(names)
+
+
 def copy_file(source, target):
-    target = StoredPath(target)
+    source, target = StoredPath(source), StoredPath(target)
     if not _location(target) or _is_working(target):
         target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(StoredPath(source).read_bytes())
+    if _server_copy(source, target):
+        return target
+    target.write_bytes(source.read_bytes())
     return target
+
+
+def _server_copy(source, target):
+    """Copy inside S3 without moving the bytes through this host; False to fall back."""
+    origin, destination = _location(source), _location(target)
+    if not origin or not destination or _is_working(source) or _is_working(target) or not _listed(source):
+        return False
+    from botocore.exceptions import BotoCoreError, ClientError
+    mark_changed(target)
+    try:
+        _s3().copy_object(Bucket=destination[0], Key=destination[1],
+                          CopySource={'Bucket': origin[0], 'Key': origin[1]},
+                          MetadataDirective='COPY', ServerSideEncryption='AES256', ChecksumAlgorithm='SHA256')
+    except (BotoCoreError, ClientError):
+        return False
+    finally:
+        mark_changed(target)
+    bucket, key = destination
+    with _cache_lock:
+        _cache.pop((bucket, key), None)
+        _content_cache.pop((bucket, key), None)
+        _generations[bucket, key] = _generations.get((bucket, key), 0) + 1
+        _written_keys.setdefault(bucket, set()).add(key)
+        for (indexed_bucket, prefix), (_, keys) in _key_index.items():
+            if bucket == indexed_bucket and key.startswith(prefix):
+                keys.add(key)
+    return True
+
+
+def read_byte_range(path, start, length, *, etag=None):
+    """Read bounded metadata bytes without downloading a mesh or falling back from S3."""
+    if start < 0 or not 0 < length <= 4 * 1024 * 1024:
+        raise ValueError('Invalid metadata range')
+    location = _location(path)
+    if location and not _is_working(path):
+        response = _s3().get_object(Bucket=location[0], Key=location[1],
+            Range=f'bytes={start}-{start + length - 1}', **({'IfMatch': etag} if etag else {}))
+        with response['Body'] as body:
+            content = body.read(length + 1)
+        total = int(response['ContentRange'].rsplit('/', 1)[1])
+        identity = response['ETag']
+        checksum = response.get('Metadata', {}).get('sha256')
+    else:
+        local = LocalPath(path)
+        stat = local.stat()
+        total, identity, checksum = stat.st_size, f'{stat.st_mtime_ns}:{stat.st_size}', None
+        if etag and identity != etag:
+            raise ValueError('Model changed during metadata read')
+        with local.open('rb') as stream:
+            stream.seek(start)
+            content = stream.read(length)
+    if len(content) != length:
+        raise ValueError('Incomplete model metadata')
+    return content, total, identity, checksum
 
 
 def publish_checkpoint(path):
@@ -365,13 +505,16 @@ def local_workspace(directory, *, inputs=()):
     if not _location(directory) or _is_working(directory):
         yield directory
         return
+    local = LocalPath(directory).resolve()
     with _workspace_lock:
-        local = LocalPath(directory).resolve()
+        directory_lock = _directory_locks.setdefault(local, RLock())
+    # One workspace per directory; different jobs run their Blender workers in parallel.
+    with directory_lock:
         input_paths = [StoredPath(path) for path in inputs]
         input_locals = [LocalPath(path).resolve() for path in input_paths]
         local.mkdir(parents=True, exist_ok=True)
         original = {p.resolve() for p in local.rglob('*') if p.is_file()}
-        original.update(p for p in input_locals if p.is_file())
+        downloaded = {}
         for path in directory.rglob('*'):
             if 'provider-inputs' in path.parts or '-provider.' in path.name or path.name.startswith('guide-'):
                 continue
@@ -380,12 +523,24 @@ def local_workspace(directory, *, inputs=()):
                 target = LocalPath(path)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(content)
+                downloaded[target.resolve()] = hashlib.sha256(content).digest()
+        shared = [p for p in input_locals if not p.is_relative_to(local)]
         for path, target in zip(input_paths, input_locals):
             content = path.read_bytes()
-            if target.is_file() and target.read_bytes() != content:
-                raise ValueError('Existing local input differs from the saved assembly input')
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content)
+            with _workspace_lock:
+                # Another workspace may be using the same shared input right now.
+                entry = _materialized.get(target) if target in shared else None
+                if target.is_file() and target.read_bytes() != content:
+                    raise ValueError('Existing local input differs from the saved assembly input')
+                if target in shared:
+                    if entry is None:
+                        entry = _materialized[target] = [0, not target.is_file()]
+                    entry[0] += 1
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if not target.is_file():
+                    target.write_bytes(content)
+            if target.is_relative_to(local):
+                downloaded.setdefault(target, hashlib.sha256(content).digest())
         token = _working.set((*_working.get(), local, *input_locals))
         try:
             yield directory
@@ -393,16 +548,25 @@ def local_workspace(directory, *, inputs=()):
             _working.reset(token)
             # Keep scratch files if any upload fails; never discard the only copy.
             files = [p for p in local.rglob('*') if p.is_file() and _location(p)]
+            # Upload what the worker wrote or changed; skip bytes that came from S3 unchanged.
+            changed = [p for p in files if downloaded.get(p.resolve()) != hashlib.sha256(p.read_bytes()).digest()]
             # Publish completion only after its artifacts and evidence are durable.
             final_records = {'job.json', 'record.json', 'current.json', 'delivery.json', 'worker.json'}
-            for path in sorted(files, key=lambda p: 2 if p.name in final_records else 1 if p.suffix == '.json' else 0):
+            for path in sorted(changed, key=lambda p: 2 if p.name in final_records else 1 if p.suffix == '.json' else 0):
                 _put(path, path.read_bytes())
             for path in files:
                 resolved = path.resolve()
                 if resolved not in original and resolved.is_relative_to(local):
                     path.unlink()
-            # Explicit Blender inputs may live outside the output directory.
-            # Remove only the exact new files we materialized after S3 success.
-            for path in input_locals:
-                if path not in original and path.is_file():
-                    path.unlink()
+            # Explicit Blender inputs may live outside the output directory. Remove a
+            # shared input only when the last workspace that materialized it is done.
+            with _workspace_lock:
+                for path in shared:
+                    entry = _materialized.get(path)
+                    if entry is None:
+                        continue
+                    entry[0] -= 1
+                    if entry[0] <= 0:
+                        _materialized.pop(path, None)
+                        if entry[1] and path not in original and path.is_file():
+                            path.unlink()

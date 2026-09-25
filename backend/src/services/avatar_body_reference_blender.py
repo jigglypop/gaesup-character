@@ -7,7 +7,7 @@ import bpy
 from mathutils import Matrix, Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.services.avatar_standard_blender import load, skeleton, body_meshes, bounds, camera_setup, render, sha
+from src.services.avatar_blender_common import load, skeleton, body_meshes, bounds, camera_setup, render, sha
 from src.services.avatar_equipment import equipment_spec
 from src.services.avatar_garment_geometry import measure_body_profile
 
@@ -66,7 +66,7 @@ def run(payload):
     scene.render.film_transparent = True
     scene.render.image_settings.file_format = 'PNG'; scene.render.image_settings.color_mode = 'RGBA'
     output = Path(payload['output'])
-    directions = {'front': (0, -1, 0), 'side': (1, 0, 0), 'back': (0, 1, 0)}
+    directions = {'front': (0, -1, 0), 'side': (1, 0, 0), 'back': (0, 1, 0), 'opposite': (-1, 0, 0)}
     rendered_views = [view for view in spec['generated_views'] if view in directions]
     for view in rendered_views:
         direction = directions[view]

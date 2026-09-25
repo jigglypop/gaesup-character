@@ -20,8 +20,15 @@ export class ApiError extends Error {
   constructor(public code: string, message: string, public status: number) { super(message); }
 }
 
+const transportCodes = new Set(['request_failed', 'connection', 'timeout', 'incomplete_response', 'cancelled']);
+
+// A coded server error (including 409 conflicts and 503 configuration errors) means the
+// request was not accepted, so its saved identity can be discarded. Connection losses,
+// timeouts and uncoded 5xx responses stay pending for an idempotent replay.
 export function isDefinitiveRejection(error: unknown): error is ApiError {
-  return error instanceof ApiError && [400, 401, 403, 404, 422].includes(error.status);
+  if (!(error instanceof ApiError)) return false;
+  if ([400, 401, 403, 404, 409, 422].includes(error.status)) return true;
+  return error.status >= 400 && !transportCodes.has(error.code);
 }
 
 export async function request<T>(url: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {

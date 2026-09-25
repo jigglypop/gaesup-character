@@ -1,4 +1,6 @@
-"""Single-owner administrative deployment, reachable only through SSM."""
+"""Single-owner deployment: SSM port forwarding, or a password-protected public site when configured."""
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,7 +11,8 @@ import time
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape
 
-allowed = {'OPENAI_API_KEY', 'MESHY_API_KEY', 'OPENAI_API_BASE', 'AVATAR_IMAGE_MODEL'}
+allowed = {'OPENAI_API_KEY', 'MESHY_API_KEY', 'OPENAI_API_BASE', 'AVATAR_IMAGE_MODEL', 'TRIPO_API_KEY',
+           'AVATAR_3D_PROVIDER', 'BLENDER_CONCURRENCY'}
 values = json.loads(Path('/run/studio-secrets.json').read_text())
 if not values.get('OPENAI_API_KEY') or not values.get('MESHY_API_KEY'):
     raise SystemExit('Provider credentials are not configured')
@@ -55,6 +58,35 @@ if site_origin:
         '</urlset>\n',
         encoding='utf-8',
     )
+# Port 80: closed API by default; the whole studio behind a password when a login is configured.
+login_user = str(values.get('STUDIO_LOGIN_USER', '')).strip()
+login_password = str(values.get('STUDIO_LOGIN_PASSWORD', ''))
+public_rules = [
+    'location /api/ { return 404; }',
+    'location = /health { return 404; }',
+]
+if login_user or login_password:
+    if not re.fullmatch(r'[A-Za-z0-9._-]{3,64}', login_user) or len(login_password) < 12:
+        raise SystemExit('STUDIO_LOGIN_USER must be 3-64 of [A-Za-z0-9._-] and STUDIO_LOGIN_PASSWORD at least 12 characters')
+    salt = os.urandom(8)
+    digest = base64.b64encode(hashlib.sha1(login_password.encode() + salt).digest() + salt).decode()
+    htpasswd = Path('/etc/nginx/studio.htpasswd')
+    htpasswd.write_text(f'{login_user}:{{SSHA}}{digest}\n', encoding='utf-8')
+    htpasswd.chmod(0o644)  # read by the unprivileged nginx workers; holds only the salted hash
+    public_rules = [
+        'auth_basic "Gaesup studio";',
+        f'auth_basic_user_file {htpasswd};',
+        'location /api/ {',
+        '  proxy_pass http://127.0.0.1:8000;',
+        '  proxy_set_header X-User-Id 1;',
+        '  proxy_set_header Authorization "";',
+        '  proxy_set_header Host $host;',
+        '  proxy_read_timeout 65s;',
+        '  proxy_buffering off;',
+        '}',
+        'location = /health { return 404; }',
+    ]
+Path('/etc/nginx/studio-public.conf').write_text('\n'.join(public_rules) + '\n', encoding='utf-8')
 children = [subprocess.Popen(['python', '-m', 'uvicorn', 'src.api.server:app', '--host', '127.0.0.1', '--port', '8000', '--workers', '1', '--no-proxy-headers']),
             subprocess.Popen(['nginx', '-g', 'daemon off;'])]
 def stop(*_):

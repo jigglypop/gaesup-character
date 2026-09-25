@@ -3,27 +3,17 @@ import json
 
 from src.services.avatar_production_spec import bounds_pixels, envelope_pixels, project
 
-PROMPT_REVISION = 'measured-views-v21-head-cavity-fit'
+PROMPT_REVISION = 'visual-parts-v22'
 AXIS_LOCK = (
-    'MANDATORY ZERO-TILT REST POSE: object roll=0 degrees, pitch=0 degrees, yaw=0 degrees in world coordinates. '
-    'Torso centerline, sternum, navel and crotch lie on world X=0; shoulders and pelvis are level. '
-    'Both upper arms and forearms are straight along world +X/-X: shoulder abduction exactly 90 degrees, '
-    'elbow flexion 0 degrees, wrist bend 0 degrees. Shoulder, elbow, wrist and cuff centerlines share exactly '
-    'the same Y and Z coordinates; front-image sleeve centerline slope is 0, not a shallow A-pose. '
-    'Both legs are straight along -Y: knee flexion 0 degrees, no hip lean, no contrapposto. '
-    'Both ankle centers have the same Y and Z; both soles lie flat on Y=0. '
-    'Foot longitudinal axes are parallel to +Z: toe-out=0 degrees, toe-in=0 degrees, heel lift=0 degrees. '
-    'The collar center, zipper/button centerline and trouser fly are vertical; waistband, shirt hem, '
-    'paired cuffs and paired trouser hems are level, with left/right corresponding landmarks on identical pixel rows. '
-    'Do not tilt the top, trousers, skirt or shoe pair to imitate the source pose or make a pleasing product display. '
-    'Only the camera rotates for the side view; the body, clothing and feet remain fixed. '
-    'Intentional asymmetric decoration does not change these structural angles. '
+    'Use the body guide T-pose: upright torso, level shoulders and hips, straight horizontal arms, '
+    'straight legs and flat forward-facing feet. Clothing follows this worn pose. '
+    'For another view move only the camera; keep the object and its intentional design asymmetry fixed. '
 )
 PART_CONTENT = {
     'weapon': 'Only one stylized weapon matching the requested design. Complete the grip, guard and blade or head. Exclude the hand, person, stand and effects.',
     'tool': 'Only one requested handheld tool with its complete handle and working end. Exclude the hand, person, stand and spare objects.',
     'glasses': 'Only one pair of wearable glasses: connected lenses, bridge and two complete temples. Exclude face, eyes, hair and hat. Keep the eye openings clear.',
-    'hair': 'ONE complete voluminous hairstyle: front bangs, both side locks, full crown, rear hair and nape form one continuous hair-only component. Reconstruct the complete hair hidden under the original hat. Exclude ALL headwear, hats, caps, brims, rabbit ears, ear flaps, hoods, headbands and hat-colored patches. Exclude face, scalp skin, anatomical ears, neck, body and clothes. Leave the face opening and a generous hollow cavity for the shared head.',
+    'hair': 'One complete hairstyle with its original bangs, side locks, crown, rear hair and nape. Complete any hair hidden by headwear in the same style. Exclude headwear, face, scalp skin, ears, neck, body and clothes. Keep the hair-colored root backing and an open head cavity.',
     'hairBack': 'One separate sculpted rear-hair component for a stylized game figurine, covering the crown, back and nape. Output hair strands and their hair-colored scalp backing only. Remove ALL headwear from the reference: no hat, cap, brim, rabbit ears, ear flaps, hood, headband or hat-colored patches. Reconstruct the hair that was hidden beneath the hat. Exclude the figurine, bangs and clothing.',
     'hairFront': 'One separate sculpted front-hair and bangs component for the same game figurine. Preserve the face opening; output hair only, without the figurine, rear hair, hat, cap, rabbit ears, ear flaps or headband.',
     'hat': 'ONE separate removable HEAD ACCESSORY of the exact type in the reference: headband, hairband, bow, hair ornament, crown, cap or hat. Preserve its original thin bands, open spaces, attached ornaments and silhouette. A headband stays an open narrow band; never add a hat crown, brim, cap shell or closed head covering unless the original actually has them. Exclude ALL hair, bangs, side locks, rear hair, scalp, face and body. The hairstyle is a different independently generated part, never part of this object.',
@@ -32,8 +22,8 @@ PART_CONTENT = {
     'shoes': 'Only the original matching pair of shoes at the two feet positions, including ankle openings; exclude feet and legs. In profile the far shoe may be occluded; do not spread shoes for display.',
 }
 
-# This is the user-editable design layer. Metric placement, camera, isolation,
-# pose and fitting remain in build_prompt() and are deliberately not editable.
+# The editable design layer is separate from the shared camera/body frame.
+# The full metric fitting contract stays in layout_contract() and the receipt.
 from src.services.studio_prompts import DEFAULTS as STUDIO_PROMPTS
 
 DEFAULT_DESIGN_PROMPTS = {key: STUDIO_PROMPTS['parts'][key]
@@ -44,18 +34,11 @@ PART_FIT = {
     'tool': 'The handle grip is at the left wrist socket in equipment. Long axis points +Y; the grip center is 20 percent up from the lowest point. Preserve the requested silhouette and thickness. No wrist geometry.',
     'glasses': 'The bridge is centered on the facial centerline at the specified eye height. Both lens centers are level. Temples extend backward along -Z around the head with open ends. No solid face plate or opaque lens fill.',
     'hair': (
-        'Build the hairstyle as one continuous volume around the entire head, not separate front and back panels. '
-        'Keep generous volume at the temples, sides, crown and rear, with detailed overlapping locks in every view. '
-        'Preserve the ORIGINAL hair-to-face width and hair-tip-to-body-height ratio, including the complete long lower locks. '
-        'For long hair reaching the boot tops in the original, carry the rear and side hair down beside the torso to the boot tops; never shorten it to shoulder length. '
-        'Seat the inner hair cavity around the measured shared head with 25mm clearance. Preserve the original outer strand volume without imposing a fixed head-width multiplier. '
-        'Keep the crown centered on the body centerline and the root mass balanced on both sides. Preserve intentional asymmetric locks only. '
-        'Preserve the original overall hairstyle proportions; do not stretch its depth or squash its height to fill a rectangle. '
-        'Allow 25mm clearance from the bald head; do not compress the hair onto the scalp. '
-        'The entire crown must be finished hair even though the art reference hides it under a hat. '
-        'The hair must remain complete when worn without a hat; never cut its crown at a hat brim. '
-        'The hat is a separate removable part and MUST NOT appear in this hair image. '
-        'No cap, rabbit ears, bare scalp patch, flat smooth rear plate, detached hair panel or visible front/back seam.'),
+        'Keep the original hair volume, parting and locks around the shared head. '
+        'Join the roots with a continuous HAIR-COLORED backing across the crown, sides and back down to the nape. '
+        'This backing is hair, not skin: keep it when excluding the head. A normal parting may remain visible. '
+        'The face and neck openings stay open; the inside is a head cavity, not a hole through the rear hair. '
+        'Continue any hat-hidden hair in the same style. Preserve asymmetric locks and the outer silhouette.'),
     'hairBack': (
         'Own the rear scalp, rear crown and nape only. Leave the forehead, face and bangs region empty. '
         'Follow the skull surface with a hollow inner cavity; never fill that cavity with a solid head. '
@@ -151,10 +134,12 @@ def reference_roles(slot, view, *, hair_reference=False, design_from_body_templa
         roles.append('ORIGINAL ART: plain skin color and stylized proportions only. Omit all facial features and use the geometry template pose.'
                      if slot == 'body' else
                      'ORIGINAL ART: colors and requested part design only. Its framing, pose and body proportions are not the layout template.')
-    if view in ('side', 'back'):
+    if view in ('side', 'back', 'opposite'):
         roles.append('ACCEPTED FRONT VIEW OF THE SAME OBJECT: preserve its identity, shape, top and bottom pixel rows. Rotate it; do not redesign it.')
-    if view == 'back':
+    if view in ('back', 'opposite'):
         roles.append('ACCEPTED RIGHT-SIDE VIEW OF THE SAME OBJECT: preserve its depth, rear extent and top and bottom pixel rows. Rotate it to the rear; do not redesign it.')
+    if view == 'opposite':
+        roles.append('ACCEPTED BACK VIEW OF THE SAME OBJECT: preserve rear roots and asymmetry; rotate to the other side, never mirror it.')
     return roles
 
 
@@ -170,7 +155,7 @@ def hair_length_prompt(spec, *, source_reference=True):
                 'Read the hair tips relative to the face, shoulders, waist and boots in the original art. '
                 'Preserve short hair as short and long hair as long; do not lengthen or shorten it to fill the template.')
     return (f' SELECTED LENGTH MODE: {mode}. Crown-to-tip length is {ratio:g} times the bald crown-to-neck head height. '
-            'Use the specified target lower bound for the tips. This explicit length selection overrides only the '
+            'Measure that length from the shared body guide. This explicit length selection overrides only the '
             + ('original length; retain its color and hairstyle details.' if source_reference else
                'length implied by the design brief; retain the brief color and hairstyle details.'))
 
@@ -181,8 +166,7 @@ def garment_fit_prompt(slot, profile, *, source_reference=True):
     ease = profile['ease']
     region_ease = profile.get('region_ease') or {}
     lines = [
-        f'GARMENT FIT PROFILE {profile["revision"]}: all anchor source/target coordinates use metres in the same world frame as body_landmarks_m.',
-        'Use the listed anchors as correspondence points. A missing target means resolve it against the same-named frozen-body landmark.',
+        'Match the named attachment points to the supplied body guide.',
         (('Preserve the source garment length and its relationship to the body landmarks.' if source_reference else
           'Choose the garment length described by the design brief; if omitted, choose a coherent length for that design.') if length is None else
          f'End the garment at length_ratio={length:g} along the '
@@ -230,13 +214,13 @@ def garment_part_content(slot, *, source_reference=True):
     if slot == 'top':
         return (
             'Place the collar and shoulders at their named frozen-body anchors. Keep the neck, arm and hem cavities open. '
-            'Follow the sleeve setting in garment_fit_profile; sleeve ends are not always wrist cuffs. '
+            'Follow the sleeve setting described below; sleeve ends are not always wrist cuffs. '
             + ('Preserve the source garment width, depth, folds and design while maintaining clearance from the torso and arms. ' if source_reference else
                'Create the width, depth, folds and design from the design brief while maintaining clearance from the torso and arms. ') +
             'Do not enlarge the garment to cover protruding base clothing; that base layer is cropped during assembly. '
             'Do not embed hands, torso or neck geometry.')
     return (
-        'Place the waistband at the frozen waist and follow garment_fit_profile for kind, length and ease. '
+        'Place the waistband at the frozen waist and follow the kind, length and ease described below. '
         'For trousers keep distinct left and right hollow leg openings. For a skirt keep one continuous hollow hem. '
         'Where the top covers the waistband, use separate nested surfaces with clearance, never crossing surfaces. '
         + ('Preserve the source width, depth, silhouette and hem construction. ' if source_reference else
@@ -250,7 +234,7 @@ def body_template_part_content(slot):
         'weapon': 'Only one new stylized weapon specified by the design brief. Complete its grip, guard and blade or head. Exclude the hand, person, stand and effects.',
         'tool': 'Only one new handheld tool specified by the design brief, with its complete handle and working end. Exclude the hand, person, stand and spare objects.',
         'glasses': 'Only one new pair of wearable glasses specified by the design brief: connected lenses, bridge and two complete temples. Exclude face, eyes, hair and hat. Keep the eye openings clear.',
-        'hair': 'Create ONE complete new hairstyle specified by the design brief: front bangs, side locks, crown, rear hair and nape as one continuous hair-only component. Exclude scalp, face, headwear, body and clothes. Leave the face opening and a generous hollow cavity for the shared bald head.',
+        'hair': 'Create one complete hairstyle from the design brief: bangs, side locks, crown, rear hair and nape. Exclude scalp skin, face, headwear, body and clothes. Retain the hair-colored root backing around the open head cavity.',
         'hairBack': 'Create one new rear-hair component specified by the design brief, covering the crown, back and nape. Output hair strands and hair-colored scalp backing only. Exclude the figurine, bangs, headwear and clothing.',
         'hairFront': 'Create one new front-hair and bangs component specified by the design brief. Preserve the face opening; exclude the figurine, rear hair and headwear.',
         'hat': 'Create ONE separate removable head accessory of the type specified by the design brief. Preserve intentional open spaces and complete its attachment opening. Exclude hair, scalp, face and body.',
@@ -263,159 +247,91 @@ def body_template_part_content(slot):
 
 def build_prompt(spec, slot, view, *, previous_qc=None, accepted_front_qc=None, accepted_side_qc=None,
                  notes='', hair_reference=False):
-    layout = layout_contract(spec, slot, view)
+    """Describe visible design; keep the full metric contract in the receipt.
+
+    The image model receives the body/template and a small set of relevant pixel
+    anchors. It is not asked to solve a 3D fitting table or obey body-pose rules
+    for an isolated wig. Previously submitted prompts are replayed by the caller.
+    """
+    c = spec['canvas']
     fit_profile = spec.get('fit_profiles', {}).get(slot)
     template_design = spec.get('design_from_body_template') is True and slot != 'body'
     if template_design and not notes:
-        default_slot = 'hair' if slot in ('hairBack', 'hairFront') else slot
-        notes = DEFAULT_DESIGN_PROMPTS.get(default_slot, '')
-    c = spec['canvas']
-    roles = '\n'.join(
-        f'Input image {i}: {role}'
-        for i, role in enumerate(reference_roles(
-            slot, view, hair_reference=hair_reference,
-            design_from_body_template=template_design), 1))
+        notes = DEFAULT_DESIGN_PROMPTS.get('hair' if slot in ('hairBack', 'hairFront') else slot, '')
+    roles = '\n'.join(f'Input image {i}: {role}' for i, role in enumerate(reference_roles(
+        slot, view, hair_reference=hair_reference, design_from_body_template=template_design), 1))
     camera = {
-        'front': 'FRONT ONLY. Camera on character +Z, optical axis toward -Z, up +Y. Face and torso face the camera in the symmetric template pose. Preserve asymmetrical design details on their original anatomical side; do not mirror them. No three-quarter turn.',
-        'side': 'SIDE PROFILE ONLY. Camera on character +X, optical axis toward -X. Front of the head and toes point IMAGE-LEFT. Preserve the horizontal T-pose in 3D; arms point along the camera axis and overlap at shoulder height. Do not lower or bend them to reveal the hands. Do not rotate the head toward the camera or spread the legs.',
-        'back': 'BACK ONLY. Camera on character -Z, optical axis toward +Z, up +Y. Show the exact rear of the same object. Preserve anatomical left/right: world +X appears IMAGE-LEFT in this rear view. Keep the body and object fixed in the symmetric template pose. No three-quarter turn, front features or mirrored redesign.',
+        'front': 'Orthographic FRONT, camera on +Z, up +Y. Preserve anatomical left/right and design asymmetry.',
+        'side': 'Orthographic RIGHT PROFILE, camera on +X, up +Y. The front of the object points IMAGE-LEFT.',
+        'back': 'Orthographic BACK, camera on -Z, up +Y. Anatomical left (+X) appears IMAGE-LEFT. Show the rear of the same object, without front facial details.',
+        'opposite': 'Orthographic OPPOSITE PROFILE, camera on -X, up +Y. The front points IMAGE-RIGHT. Rotate the same object; do not mirror the other profile.',
     }[view]
     if slot == 'body':
         content = (
-            'Edit the geometry template IN PLACE into one complete bald chibi base body. '
-            'Preserve its crown, chin/neck, shoulders, wrists, waist, ankles and sole positions. '
-            'Use a completely featureless smooth egg-shaped head with uniform skin color. '
-            'No eyes, eyebrows, eyelashes, nose, mouth, lips, ears, eye sockets, facial relief or painted features. '
-            'Do not transfer the reference face; expressions are separate textures added later. '
-            'Include bald blank head, neck, torso, both arms, hands, legs and bare feet as one intact figure. '
-            'The base figure is fully clothed in ONE thin opaque matte WHITE fitted underlayer from neck to wrists and ankles. '
-            'Use a quiet neutral white fabric, never blue, teal, cyan, a saturated color or skin-colored fabric. '
-            'This is a slender internal wardrobe mannequin, NOT a sweatshirt and trousers. '
-            'Use the specified narrow torso width/depth and thin arm/leg diameters around the unchanged joint positions. '
-            'Use a straight horizontal T-pose: both shoulders, elbows and wrists share the same height, palms face down. '
-            'Keep wrists and ankles tapered to the specified thin joint diameters, continuous with the hands and feet. '
-            'No padded torso, baggy sleeves, puffed shoulders, cuffs, waistband, folds, inflated thighs or extra clothing thickness. '
-            'The underlayer is completely opaque; the blank head and hands have plain skin color. '
-            'Keep the original large head size, hands, feet, joint positions and limb lengths; reduce only the clothed torso and limb thickness. '
-            'Include the base clothing; exclude hair, hat, accessories, outer costume layers and shoes. '
-            f'The bald crown touches y={c["scalp_y"]}; the soles touch y={c["sole_y"]}. '
-            f'Full body height is {layout["body_height_px"]}px; head crown-to-neck height is {layout["head_height_px"]}px. '
-            f'Keep the {c["scalp_y"]}px upper margin and {c["height"]-c["sole_y"]}px lower margin EMPTY. '
-            'The head is much larger than the tiny torso and short legs; follow the template landmarks instead of conventional child proportions.'
-            ' Keep the head-to-body junction, limb lengths, foot spacing and torso depth identical across both views. '
-            'Hands remain separate from the torso; fingers stay together in a neutral riggable pose. '
-            'No elongated legs, narrow adult head, enlarged chest, extra joints, missing limbs or hair painted onto the scalp.'
+            'One complete bald chibi wardrobe body matching the body guide proportions and joint positions. '
+            'The head is a smooth blank egg with uniform skin color, without facial features, ears or facial relief. '
+            'The torso and limbs wear one thin opaque matte white fitted underlayer. '
+            'Keep the large head, hands and bare feet; exclude hair, headwear, outer clothes and accessories. '
+            'Keep the neck and every limb connected; hands remain separate from the torso. '
+            f'Crown row {c["scalp_y"]}, sole row {c["sole_y"]}; match the visual guide head size.'
         )
     else:
-        part_content = (garment_part_content(slot, source_reference=not template_design)
-                        if fit_profile and slot in ('top', 'bottom') else
-                        body_template_part_content(slot) if template_design else PART_CONTENT[slot])
-        content = (
-            part_content + (' The body-template image contains no existing requested part. Its fitted underlayer is body reference, not clothing to extract. '
-                             'Create the requested part from the USER-EDITABLE DESIGN BRIEF. '
-                             if template_design else
-                             ' The requested design replaces the old part; original art supplies the character style only. '
-                                 if spec.get('frozen_body') and notes else ' Reproduce the visible design in the original art. ') +
-            'Fit the object onto the frozen body at its current WORN POSITION, then hide the body without moving the object. '
-            'Keep its full-character canvas position even when most of the output canvas is empty. ' +
-            (('Use target_part_bounds_m for hair width and crown position. Create the rounded silhouette and proportional depth from the design brief. '
-              if template_design else
-              'Use target_part_bounds_m for hair width and crown position. Preserve the original rounded silhouette and proportional depth. ')
-             if slot == 'hair' else
-             ('Use target_part_bounds_m as the head accessory attachment envelope; use the design-brief subtype, relative size and open spaces. '
-              if template_design else
-              'Use target_part_bounds_m as the head accessory attachment envelope; preserve its original subtype, relative size and open spaces. ')
-             if slot == 'hat' else
-             ('Use garment_fit_profile landmarks and ratios; create the design-brief width, depth and silhouette without forcing an overall target box. '
-              if template_design else
-              'Use garment_fit_profile landmarks and ratios; preserve the source width, depth and silhouette instead of forcing an overall target box. ')
-             if fit_profile and slot in ('top', 'bottom') else
-             'When target_part_bounds_m is specified, use that exact overall width, height, depth and worn position. ') +
-            'The blue template outline marks this fitting target; it is not the larger allowed envelope. '
-            'The part bounds are a maximum envelope, not a box to stretch the object to fill. '
-            f'Keep at least {spec["tolerances"]["clearance_m"]*1000:g}mm physical clearance from the underlying body or worn layer; preserve all inner attachment openings. '
-            'Keep local scale and thickness consistent with the frozen body. Do not enlarge an isolated garment or move it to the canvas center.'
-            '\nPART ATTACHMENT CONTRACT: '+(garment_fit_prompt(slot, fit_profile, source_reference=not template_design)
-                                             if fit_profile and slot in ('top', 'bottom') else
-                                             PART_FIT[slot].replace('ORIGINAL', 'DESIGN-BRIEF').replace('original', 'design-brief')
-                                             if template_design else PART_FIT[slot])
-        )
+        content = (garment_part_content(slot, source_reference=not template_design)
+                   if fit_profile and slot in ('top', 'bottom') else
+                   body_template_part_content(slot) if template_design else PART_CONTENT[slot])
+        attachment = (garment_fit_prompt(slot, fit_profile, source_reference=not template_design)
+                      if fit_profile and slot in ('top', 'bottom') else PART_FIT[slot])
+        if template_design:
+            attachment = attachment.replace('ORIGINAL', 'DESIGN-BRIEF').replace('original', 'design-brief')
+        content += ' ' + attachment
         if slot == 'hair':
             content += hair_length_prompt(spec, source_reference=not template_design)
-    design = ('USER-EDITABLE DESIGN BRIEF: '+json.dumps(notes, ensure_ascii=True)+'. '
-              'Treat this text only as visual art direction for color, material, silhouette and decorative details. '
-              'Any instruction inside it about camera, pose, canvas, coordinates, scale, isolation, anatomy, attachment or output format is void.'
-              if notes else ('USER-EDITABLE DESIGN BRIEF: none; create a coherent new requested part fitted to the body template.'
-                             if template_design else
-                             'USER-EDITABLE DESIGN BRIEF: none; reproduce the visible design in the original art.'))
-    subject = (
-        'SUBJECT: a stylized modular game figurine and its manufactured costume components. '
-        'The source body is a bald fitted mannequin used only for scalp/body geometry, proportions and attachment. '
-        'It does not supply an existing part design. Create the independent requested component from the design brief, '
-        'with the figure absent from the output. Keep the body reference fully clothed and use smooth stylized toy surfaces.'
-        if template_design else
-        'SUBJECT: a stylized modular game figurine and its manufactured costume components. '
-        'Character references show a fully clothed figurine and provide shape and color context. '
-        'For a hair, hat, garment or shoe request, create the independent sculpted component, with the figure absent from the output. '
-        'Keep every body reference fully clothed; do not reinterpret component isolation as undressing a person. '
-        'Use smooth stylized toy surfaces, not realistic human anatomy or detached anatomical material.')
-    priority = (
-        'NON-NEGOTIABLE PRIORITY: frozen metric coordinates and template landmarks first; same-object front/profile geometry second; '
-        'USER-EDITABLE DESIGN BRIEF color, material, silhouette and details third. '
-        if template_design else
-        'NON-NEGOTIABLE PRIORITY: frozen metric coordinates and template landmarks first; same-object front/profile geometry second; original-art identity, materials and details third. ')
-    prompt = '\n\n'.join([
-        f'FACTORY IMAGE CONTRACT {PROMPT_REVISION}. Produce a measured modular 3D source image, not an illustration or product presentation. '
-        f'Output exactly one {c["width"]}x{c["height"]} RGBA PNG of {slot}, {view} view. One view only; no montage, turnaround sheet or inset.',
+        content += (
+            ' Show the part in its worn position around the supplied body, then hide the body. '
+            'Preserve the part silhouette and local thickness; leave fitting room at attachment openings. '
+            'The template rectangles indicate available space, not shapes or dimensions to fill.'
+        )
+    anchor_names = {
+        'body': ('crown', 'neck', 'waist', 'wrist_left', 'wrist_right', 'ankle_left', 'ankle_right'),
+        'hair': ('crown', 'neck'), 'hairFront': ('crown', 'neck'), 'hairBack': ('crown', 'neck'),
+        'hat': ('crown',), 'top': ('neck', 'shoulder_left', 'shoulder_right', 'waist'),
+        'bottom': ('waist', 'ankle_left', 'ankle_right'), 'shoes': ('ankle_left', 'ankle_right'),
+        'weapon': ('wrist_right',), 'tool': ('wrist_left',), 'glasses': ('crown', 'neck'),
+    }.get(slot, ())
+    anchors = {name: [round(n, 1) for n in project(spec['anchors'][name], view, spec)]
+               for name in anchor_names}
+    design = (
+        'USER-EDITABLE DESIGN BRIEF: ' + json.dumps(notes, ensure_ascii=False) + '. '
+        'Use it for appearance, material, silhouette and details; the view and output format follow this request.'
+        if notes else 'Preserve the requested part design, colors and materials in the original art.'
+    )
+    sections = [
+        f'PART REFERENCE {PROMPT_REVISION}: one {slot}, {view} view, {c["width"]}x{c["height"]} RGBA PNG.',
         roles,
-        subject,
         design,
-        priority +
-        'Never solve a conflict by changing body proportions, object scale, camera, pose, crop or attachment position. '
-        'The allowed bounds are maximum limits, not a target size. Keep intentional empty canvas space. '
-        'Every generation in this factory shares the same body, origin, units, camera magnification and attachment anchors.',
-        camera,
-        AXIS_LOCK,
-        'EXACT PIXEL LAYOUT (same values used by the assembly fitter):\n'+json.dumps(layout, ensure_ascii=True, indent=2),
         content,
-        'ASSEMBLY RULES: skin/body is the innermost layer; clothes and hair are outside it; the hat is outside the worn hair. '
-        'Separate surfaces may cover one another in a 2D projection, but must not cross or occupy the same volume in 3D. '
-        'Preserve the same front/back depth, left/right placement, material boundaries and openings when rotating to profile. '
-        'No fused body/garment surfaces, duplicated overlap shells, solid plugs in attachment holes or hidden spare body parts. '
-        'Do not add geometry to make an isolated part look complete as a standalone character.',
-        'No crop, auto-framing, camera zoom, perspective, tilt or extra objects. Preserve the entire square canvas. '
-        'No text, rulers, grid, colored guide lines, floor, backdrop, checkerboard, cast shadow, glow, halo, bloom or vignette. '
-        'Background pixels must have alpha 0. Object interiors are opaque; alpha transitions are limited to the antialiased contour. Use neutral flat illumination, no rim light.',
-        'BEFORE RETURNING THE IMAGE: align crown, neck, waist, wrists, ankles and soles with the supplied landmarks; '
-        + ('retain the design-brief part silhouette within its metric envelope; preserve all empty attachment openings; ' if template_design else
-           'retain the original part silhouette within its metric envelope; preserve all empty attachment openings; ') +
-        'keep only the requested part; remove every measurement mark and background pixel. '
-        'Return the image only, without captions or claims about validation.',
-    ])
+        camera,
+        'Keep the common canvas, camera magnification and worn placement from the body guide. '
+        'Do not center or enlarge an isolated part. Preserve the designed silhouette instead of stretching it to a box. '
+        'Relevant body reference points [x,y] in pixels, measured from top-left: ' + json.dumps(anchors),
+    ]
+    if slot in ('body', 'top'):
+        sections.append(AXIS_LOCK)
+        if view == 'side':
+            sections.append('Horizontal arms and sleeves overlap along the camera axis; do not lower them to expose the hands.')
+    elif slot in ('bottom', 'shoes'):
+        sections.append('Keep the waist level, legs straight and feet flat facing forward in the body guide pose.')
     if accepted_front_qc and accepted_front_qc.get('bounds_px'):
         box = accepted_front_qc['bounds_px']
-        if view == 'back':
-            side_box = (accepted_side_qc or {}).get('bounds_px')
-            prompt += (f'\n\nSAME-OBJECT REAR: accepted front top={box[1]}px and bottom={box[3]}px. '
-                       f'The back must use those same rows within {layout["paired_view_height_tolerance_px"]}px. '
-                       + (f'Accepted side rear extent is x={side_box[0]}..{side_box[2]}px; preserve that depth.' if side_box else '') +
-                       ' Keep the SAME object fixed in world coordinates; move only the orthographic camera 180 degrees from +Z to -Z around world +Y. '
-                       'No object translation, rotation, pose change, scale change or front-facing facial detail. '
-                       'Preserve hem, cuff, collar, brim, rear hair volume, hair tip and sole heights.')
-            if fit_profile and slot in ('top', 'bottom') and fit_profile.get('length_ratio') is None:
-                prompt += (' SOURCE GARMENT LENGTH: the accepted front top and bottom rows are the measured source length. '
-                           'Preserve those rows in the rear view; do not replace them with a factory default hem length.')
-        else:
-            prompt += (f'\n\nSAME-OBJECT PAIR: accepted front top={box[1]}px and bottom={box[3]}px. '
-                       f'The profile must use those same rows within {layout["paired_view_height_tolerance_px"]}px; depth changes, height does not. '
-                       'Keep the SAME object fixed in world coordinates; move only the orthographic camera 90 degrees from +Z to +X around world +Y. '
-                       'No object translation, rotation, pose change or scale change. '
-                       'Preserve hem, cuff, collar, brim, hair tip and sole heights. Do not reveal hidden limbs by moving them.')
-    if previous_qc:
-        prompt += ('\n\nCORRECTION OF THE PREVIOUS REJECTED ATTEMPT: '+json.dumps({
-            'issues': previous_qc.get('issues'), 'layout_warnings': previous_qc.get('warnings'),
-            'actual_bounds_px': previous_qc.get('bounds_px'),
-            'required_envelope_px': layout['allowed_part_bounds_px'],
-            'required_body_top_bottom_px': [c['scalp_y'], c['sole_y']] if slot == 'body' else None,
-        }, ensure_ascii=True)+'. Re-render using the specified template placement and empty margins. Do not repeat the rejected framing.')
-    return prompt
+        sections.append(f'The saved front image places this part between rows {box[1]} and {box[3]}. '
+                        'Keep those heights and the same design in this view. Move only the camera.')
+    if view == 'back' and accepted_side_qc and accepted_side_qc.get('bounds_px'):
+        sections.append('Use the saved side image to continue the rear volume and silhouette; do not redesign the back.')
+    # Legacy QC records remain readable, but removed quality checks must not
+    # inject contradictory correction demands into a newly requested image.
+    sections.append(
+        'One view only, complete and uncropped. Transparent background; opaque material surfaces with antialiased edges. '
+        'Neutral diffuse illumination. No text, measurement marks, grid, floor, cast shadow, extra objects or inset views. '
+        'Return only the image.'
+    )
+    return '\n\n'.join(sections)

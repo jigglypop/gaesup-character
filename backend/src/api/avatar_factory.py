@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request
 from src.services.object_storage import artifact_response as FileResponse
@@ -24,21 +24,6 @@ router = APIRouter(prefix='/avatar-factory', tags=['avatar-factory'])
 @lru_cache
 def get_factory():
     return AvatarFactory(data_root())
-
-
-class Selection(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    node_index: int = Field(ge=0)
-    primitive_index: int = Field(ge=0)
-    role: Literal['body', 'head', 'hair', 'hat', 'top', 'pants', 'skirt', 'dress', 'shoes', 'outfit_base', 'accessory', 'eyes', 'other']
-    faces: list[int] = Field(min_length=1, max_length=500000)
-
-
-class ProductionInput(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    character_id: str = Field(min_length=1, max_length=100)
-    source_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
-    selections: list[Selection] = Field(default_factory=list, max_length=100)
 
 
 class FitAnchorInput(BaseModel):
@@ -82,6 +67,8 @@ class ImageProductionInput(BaseModel):
     base_version: str | None = Field(default=None, pattern=r'^[a-f0-9]{24}$')
     fit_profiles: dict[Literal['top', 'bottom'], FitProfileInput] | None = None
     meshy_options: MeshyPartOptions | None = None
+    part_methods: dict[Literal['hair', 'hat', 'top', 'bottom'], Literal['isolated', 'body_shell', 'worn']] | None = None
+    model_provider: Literal['meshy', 'tripo'] | None = None
 
 
 class RecoverPartInput(BaseModel):
@@ -208,6 +195,15 @@ class VariantInput(BaseModel):
     descriptions: dict[str, str] = Field(default_factory=dict, max_length=8)
     fit_profiles: dict[Literal['top', 'bottom'], FitProfileInput] | None = None
     meshy_options: MeshyPartOptions | None = None
+    part_methods: dict[Literal['hair', 'hat', 'top', 'bottom'], Literal['isolated', 'body_shell', 'worn']] | None = None
+    model_provider: Literal['meshy', 'tripo'] | None = None
+
+
+class HairRedrawInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    notes: str = Field(default='', max_length=2000)
+    source_side_facing: Literal['left', 'right'] = 'right'
+    worn: bool = False
 
 
 class SinglePartVariantInput(BaseModel):
@@ -221,7 +217,10 @@ class SinglePartVariantInput(BaseModel):
     fit_profile: FitProfileInput | None = None
     meshy_options: MeshyPartOptions | None = None
     uploaded_views: dict[Literal['front', 'side', 'back'], str] | None = None
+    redraw: HairRedrawInput | None = None
     part_name: str | None = Field(default=None, max_length=100)
+    part_method: Literal['isolated', 'body_shell', 'worn'] | None = None
+    model_provider: Literal['meshy', 'tripo'] | None = None
 
 
 @router.get('/meshy-options')
@@ -264,7 +263,10 @@ def create_single_part_variant(body: SinglePartVariantInput, background: Backgro
                                user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from src.services.avatar_variants import AvatarVariants
     service = AvatarVariants(factory)
-    job, created = service.create_single_part(user.user_id, idempotency_key, body.model_dump(exclude_none=True))
+    payload = body.model_dump(exclude_none=True)
+    if payload.get('redraw') and not payload['redraw'].get('worn'):
+        payload['redraw'].pop('worn', None)  # Same fingerprint as requests made before worn redraws.
+    job, created = service.create_single_part(user.user_id, idempotency_key, payload)
     if created or job['status'] == 'pipeline_queued':
         background.add_task(AvatarImagePipeline(factory).execute, user.user_id, job['id'])
     return job
@@ -272,8 +274,8 @@ def create_single_part_variant(body: SinglePartVariantInput, background: Backgro
 
 class RetryImageInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    slot: ImageSlot
-    view: Literal['front', 'side', 'back']
+    slot: ImageSlot | Literal['reference']
+    view: Literal['front', 'side', 'back', 'opposite']
     failure_id: str = Field(pattern=r'^[a-f0-9]{12}$')
 
 
@@ -306,12 +308,22 @@ class NativeOutfitInput(BaseModel):
     hair_color: str | None = Field(default=None, pattern='^#[0-9a-fA-F]{6}$')
 
 
+class GarmentShapeInput(BaseModel):
+    """Body-shell garment shape: sleeve 0 (none)..1 (wrist); hem top waist..crotch, bottom shorts..ankle."""
+    model_config = ConfigDict(extra='forbid')
+    sleeve: float | None = Field(default=None, ge=0, le=1)
+    hem: float | None = Field(default=None, ge=0, le=1)
+    fit: Literal['tight', 'normal', 'loose'] | None = None
+
+
 class NativePartRefitInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     source_version: str = Field(pattern=r'^[a-f0-9]{24}$')
     slot: Literal['hair', 'head', 'hairBack', 'hairFront', 'hat', 'top', 'bottom', 'shoes',
                   'weapon', 'tool', 'glasses']
     fit_profile: FitProfileInput | None = None
+    part_method: Literal['isolated', 'body_shell'] | None = None
+    shape: GarmentShapeInput | None = None
 
 
 class CommonBodyInput(BaseModel):
@@ -337,6 +349,109 @@ def common_body(user: UserContext = Depends(get_current_user), factory=Depends(g
 def set_common_body(body: CommonBodyInput, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from src.services.avatar_fitting_management import FittingManagement
     return FittingManagement(factory, user.user_id).save_body_default(body.job_id, body.version, body.expected_revision)
+
+
+class WardrobeBodyInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    version: str = Field(pattern=r'^[a-f0-9]{24}$')
+    expected_revision: str = Field(min_length=1, max_length=64)
+
+
+@router.get('/wardrobe/bodies')
+def wardrobe_bodies(user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return Wardrobe(factory, user.user_id).bodies()
+
+
+@router.put('/wardrobe/bodies/{job_id}')
+def register_wardrobe_body(job_id: str, body: WardrobeBodyInput, user: UserContext = Depends(get_current_user),
+                           factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return Wardrobe(factory, user.user_id).register(job_id, body.version, body.expected_revision)
+
+
+@router.delete('/wardrobe/bodies/{job_id}')
+def unregister_wardrobe_body(job_id: str, if_match: str = Header(alias='If-Match'),
+                             user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return Wardrobe(factory, user.user_id).unregister(job_id, if_match)
+
+
+@router.get('/wardrobe/bodies/{job_id}/parts')
+def wardrobe_parts(job_id: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return Wardrobe(factory, user.user_id).parts(job_id)
+
+
+@router.get('/wardrobe/bodies/{body_job_id}/coverage/{job_id}/{slot}')
+def wardrobe_coverage(body_job_id: str, job_id: str, slot: str, version: str,
+                      user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return Wardrobe(factory, user.user_id).coverage(body_job_id, job_id, slot, version)
+
+
+@router.get('/wardrobe/colors/{job_id}/{slot}')
+def wardrobe_colors(job_id: str, slot: str, version: str, user: UserContext = Depends(get_current_user),
+                    factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return Wardrobe(factory, user.user_id).colors(job_id, slot, version)[0]
+
+
+@router.get('/wardrobe/colors/{job_id}/{slot}/mask')
+def wardrobe_color_mask(job_id: str, slot: str, version: str, user: UserContext = Depends(get_current_user),
+                        factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return FileResponse(Wardrobe(factory, user.user_id).colors(job_id, slot, version)[1], media_type='image/png')
+
+
+@router.get('/wardrobe/previews/{job_id}/{slot}')
+def wardrobe_preview(job_id: str, slot: str, version: str, user: UserContext = Depends(get_current_user),
+                     factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return FileResponse(Wardrobe(factory, user.user_id).preview(job_id, slot, version), media_type='image/png')
+
+
+class WardrobeRef(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    job_id: str = Field(pattern=r'^[a-f0-9]{24}$')
+    version: str = Field(pattern=r'^[a-f0-9]{24}$')
+
+
+class WardrobePartRef(WardrobeRef):
+    sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class WardrobeOutfitInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(min_length=1, max_length=60)
+    body: WardrobeRef
+    parts: dict[Literal['hair', 'hairFront', 'hairBack', 'hat', 'top', 'bottom', 'shoes', 'weapon', 'tool', 'glasses'],
+                WardrobePartRef] = Field(max_length=10)
+    hair_color: str | None = Field(default=None, pattern='^#[0-9a-fA-F]{6}$')
+    # Region colours per worn slot: {slot: {"0".."3": "#RRGGBB"}}.
+    colors: dict[Literal['hat', 'top', 'bottom', 'shoes', 'weapon', 'tool', 'glasses'],
+                 dict[Literal['0', '1', '2', '3'], Annotated[str, Field(pattern='^#[0-9a-fA-F]{6}$')]]] = Field(default_factory=dict, max_length=7)
+
+
+@router.get('/wardrobe/outfits')
+def wardrobe_outfits(user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return Wardrobe(factory, user.user_id).outfits()
+
+
+@router.put('/wardrobe/outfits/{outfit_id}')
+def save_wardrobe_outfit(outfit_id: str, body: WardrobeOutfitInput, if_match: str = Header(alias='If-Match'),
+                         idempotency_key: str = Header(alias='Idempotency-Key'),
+                         user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return Wardrobe(factory, user.user_id).save_outfit(outfit_id, body.model_dump(), if_match, idempotency_key)
+
+
+@router.delete('/wardrobe/outfits/{outfit_id}')
+def delete_wardrobe_outfit(outfit_id: str, if_match: str = Header(alias='If-Match'),
+                           user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    from src.services.avatar_wardrobe import Wardrobe
+    return Wardrobe(factory, user.user_id).delete_outfit(outfit_id, if_match)
 
 
 @router.get('/jobs/{job_id}/fit-profile/{slot}')
@@ -469,9 +584,12 @@ def recover_part(job_id: str, body: RecoverPartInput, user: UserContext = Depend
 @router.get('/capabilities')
 def provider_capabilities(user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from src.services.studio_prompts import StudioPrompts
+    from src.services.meshy_status import PART_CREDITS, RIG_CREDITS, meshy_balance
     result = capabilities()
     saved = StudioPrompts(factory, user.user_id).values('parts')
     result['design_prompt_defaults'] = {key: saved[key] for key in result['design_prompt_defaults']}
+    result['meshy_balance'] = meshy_balance() if result['meshy_configured'] else None
+    result['meshy_credit_estimate'] = {'part': PART_CREDITS, 'rig': RIG_CREDITS}
     return result
 
 
@@ -532,11 +650,13 @@ def refit_one_native_part(job_id: str, body: NativePartRefitInput, background: B
         ensure_stage_idle(factory, user.user_id, job_id)
         state, created = service.start_refit(
             user.user_id, job_id, body.source_version, body.slot, idempotency_key,
-            fit_profile=body.fit_profile.model_dump(exclude_none=True) if body.fit_profile is not None else None)
+            fit_profile=body.fit_profile.model_dump(exclude_none=True) if body.fit_profile is not None else None,
+            part_method=body.part_method,
+            shape=body.shape.model_dump(exclude_none=True) if body.shape is not None else None)
     from src.services.avatar_expression_reuse import expression_reuse_state
     expressions = expression_reuse_state(factory.directory(user.user_id, job_id))
     current_version = service.get(user.user_id, job_id).get('version')
-    if (state.get('version') == current_version and not state.get('incomplete_parts') and
+    if (state.get('version') == current_version and
             (created or state.get('status') in ('accepted', 'recovery_required')
              or (state.get('status') == 'review_required' and expressions and expressions['status'] != 'complete'))):
         background.add_task(service.execute_refit, user.user_id, job_id)
@@ -572,27 +692,9 @@ def profiles(user: UserContext = Depends(get_current_user)):
     return {'profiles': [PROFILE]}
 
 
-@router.post('/jobs/{job_id}/rebuild', status_code=202)
-def rebuild_images(job_id: str, background: BackgroundTasks, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
-    ensure_stage_idle(factory, user.user_id, job_id)
-    service = AvatarImagePipeline(factory)
-    job = service.rebuild(user.user_id, job_id)
-    background.add_task(service.execute, user.user_id, job['id'])
-    return job
-
-
 @router.get('/jobs')
 def jobs(user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return {'jobs': factory.listing(user.user_id)}
-
-
-@router.post('/jobs', status_code=202)
-def create(body: ProductionInput, background: BackgroundTasks, idempotency_key: str = Header(),
-           user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
-    job, created = factory.create(user.user_id, idempotency_key, body.model_dump())
-    if created:
-        background.add_task(factory.execute, user.user_id, job['id'])
-    return job
 
 
 @router.get('/jobs/{job_id}')
@@ -603,3 +705,10 @@ def job(job_id: str, user: UserContext = Depends(get_current_user), factory=Depe
 @router.get('/jobs/{job_id}/artifacts/{filename}')
 def artifact(job_id: str, filename: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return FileResponse(factory.artifact(user.user_id, job_id, filename))
+
+
+@router.get('/jobs/{job_id}/model-stats')
+def model_stats(job_id: str, name: str, version: str | None = None,
+                user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    from src.services.avatar_model_stats import model_stats as read_model_stats
+    return read_model_stats(factory, user.user_id, job_id, name, version)

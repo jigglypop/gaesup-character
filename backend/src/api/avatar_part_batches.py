@@ -4,7 +4,7 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, Header
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from src.api.avatar_factory import get_factory
+from src.api.avatar_factory import HairRedrawInput, get_factory
 from src.auth import UserContext, get_current_user
 from src.services.avatar_part_batches import PartBatches, split_sheet
 from src.services.meshy_options import MeshyPartOptions
@@ -28,7 +28,7 @@ class SheetInput(BaseModel):
     view_edges: list[list[float]] | None = None
     view_order: list[Literal['front', 'side', 'back']] = Field(
         default_factory=lambda: ['front', 'back', 'side'])
-    remove_skin: bool = True
+    remove_skin: bool = False
     detect_view_seams: bool = False
 
     @model_validator(mode='after')
@@ -71,6 +71,7 @@ class BatchInput(BaseModel):
     items: list[BatchItem] = Field(min_length=1, max_length=48)
     concurrency: int = Field(default=4, ge=1, le=4, strict=True)
     meshy_options: MeshyPartOptions = Field(default_factory=MeshyPartOptions)
+    redraw: HairRedrawInput | None = None
 
 
 @router.post('/split-sheet')
@@ -87,7 +88,12 @@ def listing(user: UserContext = Depends(get_current_user), factory=Depends(get_f
 def create(body: BatchInput, background: BackgroundTasks, idempotency_key: str = Header(),
            user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     service = PartBatches(factory)
-    record, dispatch = service.create(user.user_id, idempotency_key, body.model_dump(mode='json'))
+    payload = body.model_dump(mode='json')
+    if payload['redraw'] is None:
+        payload.pop('redraw')  # Preserve the fingerprint of saved three-view requests.
+    elif not payload['redraw'].get('worn'):
+        payload['redraw'].pop('worn', None)  # Same fingerprint as requests made before worn redraws.
+    record, dispatch = service.create(user.user_id, idempotency_key, payload)
     if dispatch:
         background.add_task(service.execute, user.user_id, record['id'])
     return record

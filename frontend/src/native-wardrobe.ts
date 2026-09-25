@@ -1,10 +1,14 @@
-import { Group, Matrix4, MeshStandardMaterial, Skeleton, Vector3, type Bone, type Object3D, type SkinnedMesh, type Material } from 'three';
+import { BufferAttribute, Group, Matrix4, MeshStandardMaterial, Skeleton, Vector3, type Bone, type Object3D, type SkinnedMesh, type Material, type Texture } from 'three';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { disposeObjectResources } from './assets/gpu-resources';
 import { prepareExpressionMaterial } from './texture-expressions';
 import { hairColorControl } from './hair-color';
+import { regionColorControl } from './region-color';
+import { matteCharacter } from './matte-materials';
 
 export type Wearable = { id: string; slot: string; url: string; sha256: string };
+/** Depth bias of outer garment layers (more negative draws in front). */
+const OUTER_LAYERS: Record<string, number> = { top: -2, hat: -2, shoes: -1 };
 type Entry = { spec: Wearable; group: Group; source: GLTF; skeletons: Set<Skeleton>; touched: number };
 type RestBone = { bone: Bone; matrix: Matrix4; parent: string | null };
 
@@ -48,7 +52,54 @@ export class NativeWardrobe {
     this.hairControls.forEach(update => update(color));
   }
 
-  constructor(private body: Object3D) {
+  private originalIndex = new Map<SkinnedMesh, BufferAttribute | null>();
+  private regionControls = new Map<Material, { mask: Texture; update: (colors: (string | null)[]) => void }>();
+
+  /** Region colours of the part worn in a slot; null entries keep the original colour.
+   * index: the glTF material whose UV layout the mask follows. */
+  setRegionColors(slot: string, index: number, mask: Texture, lights: number[], colors: (string | null)[]) {
+    const entry = this.active.get(slot);
+    if (!entry) return;
+    const materials = new Set<Material>();
+    entry.group.traverse(object => {
+      const mesh = object as SkinnedMesh;
+      if (mesh.isSkinnedMesh) (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).forEach(material => materials.add(material));
+    });
+    materials.forEach(material => {
+      const association = entry.source.parser.associations.get(material) as { materials?: number } | undefined;
+      if (!(material instanceof MeshStandardMaterial) || association?.materials !== index) return;
+      let control = this.regionControls.get(material);
+      if (!control || control.mask !== mask) {
+        control = { mask, update: regionColorControl(material, mask, lights) };
+        this.regionControls.set(material, control);
+        material.addEventListener('dispose', () => this.regionControls.delete(material));
+      }
+      control.update(colors);
+    });
+  }
+
+  /** Hide body triangles under the worn garments: {"mesh:primitive": bitset (bit t = triangle t)}. */
+  hideTriangles(hidden: Record<string, Uint8Array> | null) {
+    for (const mesh of this.baseMeshes) {
+      const geometry = mesh.geometry;
+      if (!this.originalIndex.has(mesh)) this.originalIndex.set(mesh, geometry.index);
+      const original = this.originalIndex.get(mesh)!;
+      const key = this.primitiveKeys.get(mesh);
+      const bits = key && hidden ? hidden[key] : undefined;
+      if (!bits || geometry.groups.length > 1) { if (geometry.index !== original) geometry.setIndex(original); continue; }
+      const count = original ? original.count/3 : geometry.attributes.position.count/3;
+      const kept: number[] = [];
+      for (let t = 0; t < count; t++) {
+        if ((bits[t >> 3] >> (t & 7)) & 1) continue;
+        if (original) kept.push(original.getX(3*t), original.getX(3*t+1), original.getX(3*t+2));
+        else kept.push(3*t, 3*t+1, 3*t+2);
+      }
+      const large = geometry.attributes.position.count > 65535;
+      geometry.setIndex(new BufferAttribute(large ? new Uint32Array(kept) : new Uint16Array(kept), 1));
+    }
+  }
+
+  constructor(private body: Object3D, private primitiveKeys: Map<Object3D, string> = new Map()) {
     body.updateMatrixWorld(true); this.baseInverse = body.matrixWorld.clone().invert();
     const rigs = new Set<Skeleton>();
     body.traverse(object => {
@@ -87,6 +138,7 @@ export class NativeWardrobe {
       const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).map(v => v.toString(16).padStart(2, '0')).join('');
       if (digest !== spec.sha256) throw new Error('의상 파일이 검수한 버전과 다릅니다.');
       const source = await new GLTFLoader().parseAsync(bytes, '');
+      matteCharacter(source.scene);
       const entry: Entry = { spec, source, group: new Group(), skeletons: new Set(), touched: performance.now() };
       try {
         if (this.disposed) throw new Error('옷장 화면이 닫혔습니다.');
@@ -105,6 +157,14 @@ export class NativeWardrobe {
         if (spec.slot === 'faceHead') {
           const materials = new Set(meshes.flatMap(mesh => Array.isArray(mesh.material) ? mesh.material : [mesh.material]));
           materials.forEach(material => { if (material instanceof MeshStandardMaterial) prepareExpressionMaterial(material); });
+        }
+        if (spec.slot in OUTER_LAYERS) {
+          // Parts fitted in different jobs can touch within millimetres; the outer
+          // layer (top over bottom, hat over hair) wins the depth test there.
+          const offset = OUTER_LAYERS[spec.slot];
+          new Set(meshes.flatMap(mesh => Array.isArray(mesh.material) ? mesh.material : [mesh.material])).forEach(material => {
+            Object.assign(material, { polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset*4 });
+          });
         }
         for (const mesh of meshes) {
           const native = mesh.skeleton;
@@ -223,6 +283,7 @@ export class NativeWardrobe {
   dispose() {
     this.disposed = true; this.generation++; this.headGeneration++; this.lifetime.abort();
     this.baseMaterials.forEach((visible, material) => { material.visible = visible; }); this.baseMaterials.clear();
+    this.originalIndex.forEach((index, mesh) => { if (mesh.geometry.index !== index) mesh.geometry.setIndex(index); }); this.originalIndex.clear();
     this.loaded.forEach(disposeEntry); this.loaded.clear(); this.active.clear(); this.head = undefined;
   }
 }

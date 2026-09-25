@@ -7,7 +7,7 @@ import bpy
 from mathutils import Matrix, Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.services.avatar_standard_blender import load, skeleton, body_meshes, bounds, bind, export, sha
+from src.services.avatar_blender_common import load, skeleton, body_meshes, bounds, bind, export, sha
 from src.services.glb import parse_glb
 
 

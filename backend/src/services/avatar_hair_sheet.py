@@ -1,5 +1,4 @@
 """Separate adjacent sheet views in original pixel coordinates, without rescaling."""
-from collections import deque
 from PIL import Image
 
 
@@ -27,33 +26,6 @@ def _seam(alpha, width, height, anchor, radius):
     return result
 
 
-def _trim_fragments(tile):
-    alpha = bytearray(tile.getchannel('A').tobytes())
-    width, height = tile.size
-    visited = bytearray(width*height)
-    components = []
-    for start, value in enumerate(alpha):
-        if value == 0 or visited[start]:
-            continue
-        queue, component = deque([start]), []
-        visited[start] = 1
-        while queue:
-            index = queue.popleft(); component.append(index)
-            x, y = index % width, index // width
-            for other in (index-1 if x else -1, index+1 if x+1 < width else -1,
-                          index-width if y else -1, index+width if y+1 < height else -1):
-                if other >= 0 and alpha[other] and not visited[other]:
-                    visited[other] = 1; queue.append(other)
-        components.append(component)
-    minimum = max((len(component) for component in components), default=0)*.03
-    for component in components:
-        if len(component) < minimum:
-            for index in component:
-                alpha[index] = 0
-    tile.putalpha(Image.frombytes('L', tile.size, bytes(alpha)))
-    return tile
-
-
 def _crop_views(source, xedges):
     width, height = source.size
     alpha = source.getchannel('A').tobytes()
@@ -72,14 +44,16 @@ def _crop_views(source, xedges):
             masked[offset:offset+left[y]-x0] = bytes(left[y]-x0)
             masked[offset+right[y]-x0:offset+x1-x0] = bytes(x1-right[y])
         tile.putalpha(Image.frombytes('L', tile.size, bytes(masked)))
-        tiles.append(_trim_fragments(tile))
+        # Disconnected locks are still hair. Component size is not evidence
+        # that pixels belong to a neighbouring view.
+        tiles.append(tile)
     return tiles
 
 
-def crop_rows(image, yedges, xedges_by_row):
+def crop_rows(image, yedges, xedges_by_row, *, remove_skin=False):
     """Separate rows as well as columns; long hair can extend past a row anchor."""
     from src.services.avatar_part_batches import isolate_hair
-    source = isolate_hair(image)
+    source = isolate_hair(image) if remove_skin else image.convert('RGBA')
     width, height = source.size
     horizontal = source.getchannel('A').transpose(Image.Transpose.TRANSPOSE).tobytes()
     seams = [[0]*width]
@@ -102,6 +76,7 @@ def crop_rows(image, yedges, xedges_by_row):
     return rows
 
 
-def crop_row(image, y0, y1, xedges):
+def crop_row(image, y0, y1, xedges, *, remove_skin=False):
     from src.services.avatar_part_batches import isolate_hair
-    return _crop_views(isolate_hair(image.crop((0, y0, image.width, y1))), xedges)
+    row = image.crop((0, y0, image.width, y1)).convert('RGBA')
+    return _crop_views(isolate_hair(row) if remove_skin else row, xedges)

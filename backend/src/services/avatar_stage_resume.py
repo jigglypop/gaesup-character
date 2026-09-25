@@ -5,11 +5,12 @@ from threading import Lock
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
+from src.services.character_jobs import RETRYABLE
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.object_storage import copy_file
 from src.services.process_identity import identity, state as process_state
 from src.services.avatar_equipment import is_native_part_set
-from src.services.meshy_status import BLOCKED, saved_problem
+from src.services.meshy_status import saved_problem
 
 STAGES = ('images', 'models', 'rig', 'assemble', 'expressions')
 _WORKERS = {}
@@ -46,6 +47,12 @@ def saved_image(directory, image):
 
 def model_problem(directory, part, pipeline, *, verify=False):
     run = directory/'parts'/part['slot']
+    if part.get('part_method') == 'body_shell':
+        # Built from the frozen body at assembly: the saved views are its only inputs.
+        for image in image_inputs(part, pipeline):
+            if image.get('status') != 'succeeded' or not saved_image(directory, image):
+                return '저장된 파츠 이미지가 필요합니다.'
+        return None
     generated = read_json(run/'generation-artifacts.json').get('generated')
     if generated:
         if not (run/'generated.glb').is_file():
@@ -54,10 +61,11 @@ def model_problem(directory, part, pipeline, *, verify=False):
             return '저장된 3D 파일이 변경되었습니다.'
         return None
     task = read_json(run/'character.json')
-    if task:
-        if not task.get('task_id') or task.get('status') in BLOCKED:
+    if task and task.get('status') not in RETRYABLE:
+        if not task.get('task_id'):
             return '기존 3D 요청의 응답 확인이 필요합니다.'
         return None  # Poll the known task; image generation is not a prerequisite.
+    # A new or explicitly repeated request needs the saved part images.
     for image in image_inputs(part, pipeline):
         if image.get('status') != 'succeeded' or not saved_image(directory, image):
             return '저장된 파츠 이미지가 필요합니다.'
@@ -77,6 +85,8 @@ def publish_saved_models(directory, pipeline):
     """Recover output publication after a download, without any provider call."""
     job = read_json(directory/'job.json')
     for part in pipeline['parts']:
+        if part.get('part_method') == 'body_shell':
+            continue
         name = f'generated-{part["slot"]}.glb'
         output = directory/'output'/name
         expected = job.get('files', {}).get(name)
@@ -115,6 +125,9 @@ class AvatarStageResume:
         models = []
         for part in parts:
             slot = part['slot']; run = directory/'parts'/slot
+            if part.get('part_method') == 'body_shell':
+                models.append(model_problem(directory, part, pipeline) is None)
+                continue
             stored = read_json(run/'generation-artifacts.json').get('generated')
             exported = job.get('artifacts', [])
             models.append(bool(stored and (run/'generated.glb').is_file()) or
@@ -142,8 +155,9 @@ class AvatarStageResume:
         reasons = {
             'images': None if image_resume else '기존 이미지 응답 확인 또는 실패 이미지 재요청이 필요합니다.',
             'models': model_error,
+            # A failed or unaccepted rig/animation request can be repeated by an explicit run.
             'rig': '저장된 3D 파츠가 필요합니다.' if not models_ready else
-                   rig_problem['message'] if rig_problem else None,
+                   rig_problem['message'] if rig_problem and rig_problem.get('status') not in RETRYABLE else None,
             'assemble': '저장된 3D 파츠가 필요합니다.' if not models_ready else
                         '저장된 리깅 결과가 필요합니다.' if not rig_ready else None,
             'expressions': '이 작업에는 기본 표정 생성이 접수되지 않았습니다.' if not expressions else
@@ -173,6 +187,15 @@ class AvatarStageResume:
                     'reason': '진행 중인 작업이 있습니다.' if busy else reasons[stage] if valid else '저장된 파츠 작업이 필요합니다.',
                     'paid': stages_paid[stage]}
                    for stage in STAGES if stage != 'expressions' or expressions]
+        # An explicit run re-sends a request whose acceptance was never confirmed.
+        uncertain_models = any(read_json(directory/'parts'/p['slot']/'character.json').get('status') == 'submission_uncertain'
+                               and not read_json(directory/'parts'/p['slot']/'generation-artifacts.json').get('generated')
+                               for p in parts)
+        for action in actions:
+            if action['stage'] in ('images', 'models') and uncertain_models:
+                action['warning'] = '접수 불명 3D 요청 재전송 · 중복 과금 가능'
+            elif action['stage'] == 'rig' and rig_problem and rig_problem.get('status') == 'submission_uncertain':
+                action['warning'] = '접수 불명 리깅 요청 재전송 · 중복 과금 가능'
         recommended = next((a['stage'] for a in reversed(actions) if a['enabled']), None)
         public_operation = {k: operation.get(k) for k in ('id', 'stage', 'status', 'error', 'created_at', 'updated_at')} if operation else None
         if public_operation and operation['status'] in ('accepted', 'running') and not active_run(operation):
@@ -185,12 +208,15 @@ class AvatarStageResume:
                 'saved': {'images': image_count, 'images_total': len(images), 'models': sum(models),
                           'models_total': len(parts), 'rig': rig_ready}, 'operation': public_operation}
 
-    def start(self, owner, job_id, stage, key):
+    def start(self, owner, job_id, stage, key, *, explicit=True):
+        """explicit: an operator run, which may repeat failed or unaccepted paid requests of this stage."""
         if stage not in STAGES or not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
             raise PipelineError('invalid_request', '시작 단계와 요청 식별자가 필요합니다.', 422)
         directory = self.factory.directory(owner, job_id)
         request_id = hashlib.sha256(key.encode()).hexdigest()
         path = directory/'stage-runs'/f'{request_id}.json'
+        if explicit and stage in ('images', 'models', 'rig') and not read_json(path):
+            self._require_credits(directory, stage)
         with _LOCK:
             state = self.get(owner, job_id)  # Also enforces ownership.
             previous = read_json(path)
@@ -199,14 +225,39 @@ class AvatarStageResume:
                     raise PipelineError('idempotency_conflict', '같은 요청의 시작 단계가 다릅니다.', 409)
                 # Replays recover the receipt, never restart a paid stage.
                 return state, None
-            action = next(a for a in state['actions'] if a['stage'] == stage)
-            if not action['enabled']:
-                raise PipelineError('stage_unavailable', action['reason'] or '현재 실행할 수 없는 단계입니다.', 409)
+            action = next((a for a in state['actions'] if a['stage'] == stage), None)
+            if action is None or not action['enabled']:
+                raise PipelineError('stage_unavailable', (action or {}).get('reason') or '현재 실행할 수 없는 단계입니다.', 409)
             record = {'id': request_id, 'stage': stage, 'status': 'accepted', 'process': identity(),
-                      'created_at': now(), 'updated_at': now(), 'error': None}
+                      'explicit': explicit, 'created_at': now(), 'updated_at': now(), 'error': None}
             _write_json(path, record)
             _write_json(directory/'stage-runs/current.json', {'id': request_id})
         return self.get(owner, job_id), request_id
+
+    @staticmethod
+    def _require_credits(directory, stage):
+        """An explicit run must be affordable before it sends new Meshy requests."""
+        from src.services.meshy_status import require_credits
+        pipeline = read_json(directory/'pipeline.json')
+        if pipeline.get('uploaded_glb'):
+            return
+        reused = set(pipeline.get('reuse', {}).get('slots', []))
+        parts = 0
+        if stage in ('images', 'models'):
+            for part in pipeline.get('parts', []):
+                run = directory/'parts'/part['slot']
+                if (part['slot'] in reused or part.get('part_method') == 'body_shell'
+                        or read_json(run/'generation-artifacts.json').get('generated')):
+                    continue
+                task = read_json(run/'character.json')
+                if task.get('task_id') and task.get('status') not in RETRYABLE:
+                    continue  # A known task is only polled.
+                parts += 1
+        rig_source = pipeline.get('base_body') or (pipeline.get('base_body_setup') or {}).get('rig_source')
+        needs_rig = not read_json(directory/'meshy/delivery.json').get('version') and not rig_source
+        if pipeline.get('model_provider', 'meshy') != 'meshy':
+            parts = 0  # Meshy credits cover only Meshy work; the rig stays on Meshy.
+        require_credits(parts, rig=needs_rig)
 
     def execute(self, owner, job_id, request_id):
         directory = self.factory.directory(owner, job_id)
@@ -223,20 +274,22 @@ class AvatarStageResume:
             _write_json(path, record)
             try:
                 stage = record['stage']
+                explicit = record.get('explicit', True)
                 pipeline = read_json(directory/'pipeline.json')
                 if stage in ('images', 'models'):
                     from src.services.avatar_image_pipeline import AvatarImagePipeline
                     service = AvatarImagePipeline(self.factory)
-                    service.resume(owner, job_id, stage=stage)
+                    service.resume(owner, job_id, stage=stage, retry_failed=explicit)
                     service.execute(owner, job_id)
                 elif stage == 'expressions':
                     from src.services.avatar_expression_pipeline import execute as expressions_execute, summary
                     pointer = read_json(directory/'native-parts/current.json')
-                    if pipeline.get('expression_reuse'):
+                    from src.services.avatar_expression_reuse import reuse_contract
+                    if reuse_contract(pipeline):
                         from src.services.avatar_expression_reuse import reuse_saved_expressions
                         result = reuse_saved_expressions(self.factory, owner, job_id, pointer['version'])
                     else:
-                        expressions_execute(self.factory, owner, job_id, pointer['version'])
+                        expressions_execute(self.factory, owner, job_id, pointer['version'], retry_blocked=explicit)
                         result = summary(directory, pointer['version'])
                     job_record = read_json(directory/'job.json')
                     job_record['error'] = (result.get('error') or '기본 표정 텍스처 처리 대기') if result and result['status'] != 'complete' else None
@@ -245,6 +298,9 @@ class AvatarStageResume:
                     publish_saved_models(directory, pipeline)
                     if stage == 'rig':
                         from src.services.avatar_character_flow import continue_character
+                        if explicit:
+                            from src.services.avatar_meshy import AvatarMeshy
+                            AvatarMeshy(self.factory).reset_failed(owner, job_id)
                         continue_character(self.factory, owner, job_id)
                     else:
                         from src.services.avatar_character_flow import assemble_character

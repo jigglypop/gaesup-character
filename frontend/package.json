@@ -7,9 +7,7 @@
     "dev": "vite --host 127.0.0.1 --port 5273 --strictPort",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 5273 --strictPort",
-    "test:e2e": "playwright test",
-    "assets:avatar": "node scripts/build-avatar-fixtures.mjs",
-    "check:studio": "node scripts/check-studio.mjs"
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@dimforge/rapier3d": "0.17.3",

@@ -130,7 +130,7 @@ class AvatarGlbBodies(AvatarBaseBodies):
                         'reference_preparation': None, 'default_expressions': None, 'hair_length': 'source',
                         'design_prompts': {}, 'image_provider': 'uploaded', 'image_model': None,
                         'image_base': None, 'meshy_base': os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/'),
-                        'motion_actions': motion_actions, 'rig_with_meshy': rerig, 'meshy_preserve_geometry': True,
+                        'motion_actions': motion_actions, 'motion_actions_explicit': False, 'rig_with_meshy': rerig, 'meshy_preserve_geometry': True,
                         'reuse': {'source_job_id': None, 'slots': []}, 'body_purpose': 'wardrobe_base', 'body_height_m': 1.2}
             _write_json(directory/'pipeline.json', pipeline)
             if not rerig and asset['rigged']:

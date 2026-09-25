@@ -4,7 +4,7 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from copy import deepcopy
 
-from src.services.avatar_standard_blender import bounds, blender_to_gltf
+from src.services.avatar_blender_common import bounds, blender_to_gltf
 
 
 def target_box(value):

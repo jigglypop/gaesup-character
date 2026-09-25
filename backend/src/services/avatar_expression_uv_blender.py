@@ -3,6 +3,8 @@ import numpy as np
 import bpy
 from mathutils import Vector
 
+from src.services.avatar_blender_common import MATTE_ROUGHNESS
+
 
 UV_NAME = 'FactoryExpressionBaseColorUV'
 ATLAS_REGION_EDGE = 2048
@@ -185,7 +187,7 @@ def prepare_expression_uv(body):
                 shader, _ = _image_node(material)
                 if shader is None:
                     continue
-                for name, value in [('Emission Strength', 0), ('Metallic', 0), ('Roughness', .85)]:
+                for name, value in [('Emission Strength', 0), ('Metallic', 0), ('Roughness', MATTE_ROUGHNESS)]:
                     socket = shader.inputs.get(name)
                     if socket is not None:
                         for link in list(socket.links):

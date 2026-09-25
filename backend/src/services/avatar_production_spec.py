@@ -55,7 +55,7 @@ def production_spec(hair_length='source', generated_views=None, *, fit_profiles=
     spec = json.loads(raw)
     if generated_views is not None:
         views = list(generated_views)
-        if views not in (['front', 'side'], ['front', 'side', 'back']):
+        if views not in (['front', 'side'], ['front', 'side', 'back'], ['front', 'side', 'back', 'opposite']):
             raise PipelineError('invalid_generated_views', '지원하지 않는 이미지 뷰 계약입니다.', 422)
         spec['generated_views'] = views
     profiles = spec['fitting']['hair_length_profiles']
@@ -97,6 +97,7 @@ def refresh_fitting_spec(saved, hair_length='source', *, fit_profiles=None, body
     result['fitting'] = fitting
     result['tolerances'] = deepcopy(current['tolerances'])
     result['revision'] = current['revision']
+    result['runtime'] = deepcopy(current['runtime'])
     if inherited_profiles is not None:
         profiles = normalize_fit_profiles(inherited_profiles, slots=tuple(inherited_profiles))
         result['fit_profiles'] = profiles

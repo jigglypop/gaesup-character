@@ -163,6 +163,44 @@ class AvatarMeshy:
                 _write_json(run/'worker.json', {'status': 'accepted', 'process': identity(), 'error': None})
         return self.get(owner, job_id)
 
+    def reset_failed(self, owner, job_id):
+        """Explicit run: allow a new rig or animation request after a failed or unaccepted attempt.
+
+        Only a provider problem that still blocks this job is reset; a job recovered with a
+        saved local rig keeps its receipts. start() admits the worker afterwards.
+        """
+        run = self.directory(owner, job_id)
+        with _LOCK:
+            if self.get(owner, job_id)['busy'] or not saved_problem(run):
+                return False
+            if (read_json(run/'worker.json').get('origin') == 'rig_transfer'
+                    or read_json(run/'delivery.json').get('origin') in ('transferred_meshy_rig', 'frozen_body', 'uploaded_glb')):
+                return False
+            contract = read_json(run/'input.json')
+            task = read_json(run/'character.json')
+            changed = False
+            if task.get('stage') == 'rigging' and task.get('status') in character_jobs.RETRYABLE:
+                provider = {}
+                if contract.get('input_kind') != 'model':
+                    provider = read_json(run.parent/'parts/body/character.json')
+                    if provider.get('stage') != 'generation' or provider.get('status') != 'SUCCEEDED':
+                        raise PipelineError('generation_required', '성공한 Meshy 전신 생성 작업이 필요합니다.', 422)
+                character_jobs.archive_attempt(run, 'explicit')
+                if provider:
+                    _write_json(run/'character.json', {**provider, 'height_meters': contract.get('height_meters', 1.2)})
+                changed = True
+            elif task.get('stage') == 'rigging' and task.get('status') == 'SUCCEEDED':
+                for path in sorted((run/'actions').glob('*/motion-pack.json')):
+                    pack = read_json(path)
+                    clip = pack.get('tasks', {}).get('clip')
+                    if clip and clip.get('status') in character_jobs.RETRYABLE:
+                        pack.setdefault('previous_tasks', []).append(clip)
+                        pack['tasks'].pop('clip')
+                        pack['max_new_tasks'] = pack.get('submitted_tasks', 0) + 1
+                        _write_json(path, pack)
+                        changed = True
+            return changed
+
     def _verify_source(self, run):
         contract = read_json(run/'input.json')
         if not contract or digest(run.parent/'output/generated-body.glb') != contract['source_sha256']:

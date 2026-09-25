@@ -10,6 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.services.character_pipeline import PipelineError
 
+# Wearable budgets of production-v1 runtime.part_triangles (hair less its rear backing reserve).
+SHARED_PART_POLYCOUNT = {'body': 24000, 'hair': 30000, 'hat': 8000, 'top': 18000, 'bottom': 12000, 'shoes': 8000,
+                         'weapon': 8000, 'tool': 6000, 'glasses': 3000}
+
 
 class MeshyPartOptions(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -17,10 +21,10 @@ class MeshyPartOptions(BaseModel):
     geometry_resolution: Literal['standard', '2k'] = '2k'
     should_texture: bool = True
     enable_pbr: bool = True
-    texture_resolution: Literal['2k', '4k', '8k'] = '4k'
+    texture_resolution: Literal['2k', '4k', '8k'] = '2k'
     texture_mode: Literal['source', 'prompt', 'image', 'images'] = 'source'
     texture_image_assets: list[str] = Field(default_factory=list, max_length=4)
-    should_remesh: bool = False
+    should_remesh: bool = True
     topology: Literal['triangle', 'quad'] = 'triangle'
     target_polycount: int = Field(default=30000, ge=100, le=300000, strict=True)
     decimation_mode: Literal[1, 2, 3, 4] | None = None
@@ -64,12 +68,22 @@ def upload_texture(factory, owner, content):
     return AvatarBlueprints(factory.data).upload(owner, output.getvalue())
 
 
-def freeze_options(factory, owner, value, slot, prompts):
+def freeze_options(factory, owner, value, slot, prompts, *, shared=False):
+    """shared: one submitted setting covers a whole part set, so each slot keeps its own budget and pose."""
     from src.services.avatar_blueprints import AvatarBlueprints
     options = MeshyPartOptions.model_validate(value or {}).model_dump()
     if value is None and slot == 'body':
         options['pose_mode'] = 't-pose'
         options['texture_mode'] = 'prompt' if prompts.get(slot) else 'source'
+    elif shared and value is not None:
+        if slot == 'body' and not options['pose_mode']:
+            options['pose_mode'] = 't-pose'
+        elif slot != 'body':
+            options['pose_mode'] = ''
+    if (slot != 'body' and options['should_remesh'] and options['decimation_mode'] is None
+            and slot in SHARED_PART_POLYCOUNT):
+        # The provider remeshes to the wearable budget: smaller downloads and no local decimation.
+        options['target_polycount'] = min(options['target_polycount'], SHARED_PART_POLYCOUNT[slot])
     frozen = {'options': options, 'texture_prompt': None, 'texture_images': []}
     if not options['should_texture']:
         return frozen
@@ -120,4 +134,12 @@ def provider_options(factory, owner, frozen):
                 raise PipelineError('texture_source_changed', '접수한 텍스처 참조 원본이 변경되었습니다.', 409)
             urls.append('data:'+image['mime']+';base64,'+base64.b64encode(content).decode('ascii'))
         options['texture_image_url' if mode == 'image' else 'texture_image_urls'] = urls[0] if mode == 'image' else urls
+    return options
+
+
+def worn_polycount(options, slot):
+    """A worn request returns the mannequin too; give the whole figure twice the part budget."""
+    options = deepcopy(options)
+    if options.get('should_remesh') and 'target_polycount' in options:
+        options['target_polycount'] = min(300000, 2*SHARED_PART_POLYCOUNT.get(slot, options['target_polycount']))
     return options

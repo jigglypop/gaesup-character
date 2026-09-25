@@ -38,7 +38,8 @@ def saved_expression_valid(directory, expression_id):
 
 def summary(directory, version=None):
     pipeline = read_json(directory/'pipeline.json')
-    if pipeline.get('expression_reuse'):
+    from src.services.avatar_expression_reuse import reuse_contract
+    if reuse_contract(pipeline):
         return None
     contract = pipeline.get('default_expressions')
     if not contract:
@@ -67,8 +68,12 @@ def summary(directory, version=None):
             'default_selected': bool(selected and selected == baked.get('neutral'))}
 
 
-def execute(factory, owner, job, version):
-    """Only called by an admitted production/resume command, never by a GET."""
+def execute(factory, owner, job, version, *, retry_blocked=False):
+    """Only called by an admitted production/resume command, never by a GET.
+
+    retry_blocked is an explicit operator run: an expression whose request was refused
+    or left unconfirmed is requested again under a new key, keeping the old receipt.
+    """
     from src.services.avatar_expression_generation import AvatarExpressionGeneration
     from src.services.avatar_expressions import AvatarExpressions
 
@@ -76,7 +81,8 @@ def execute(factory, owner, job, version):
     pipeline = read_json(directory/'pipeline.json')
     # A part-only/refit intent freezes the existing faces and never falls back
     # to the original job's paid default-expression generation contract.
-    if pipeline.get('expression_reuse'):
+    from src.services.avatar_expression_reuse import reuse_contract
+    if reuse_contract(pipeline):
         return
     contract = pipeline.get('default_expressions')
     if not contract:
@@ -108,6 +114,14 @@ def execute(factory, owner, job, version):
                     record['generations'][name] = generation
                     _write_json(path, record)
                 item = source.get(generation)
+                if retry_blocked and item['status'] != 'complete' and not item['can_resume'] and item['status'] not in ('accepted', 'running'):
+                    previous = record.setdefault('previous_generations', {}).setdefault(name, [])
+                    previous.append(generation)
+                    item, _ = source.create(f'default-expression-{name}-v1-r{len(previous)}', {
+                        'name': name, 'prompt': contract['prompts'][name]})
+                    generation = item['id']
+                    record['generations'][name] = generation
+                    _write_json(path, record)
                 if item['status'] != 'complete' and item['can_resume']:
                     _, admitted = source.resume(generation)
                     if admitted:
@@ -132,7 +146,8 @@ def execute(factory, owner, job, version):
             except Exception as exc:
                 errors.append(exc.message if isinstance(exc, PipelineError) else f'{name}: 표정 텍스처 저장 중단')
                 # Finished expressions remain usable while the other requests are attempted.
-        record.update(status='paused' if errors else 'complete', error=' / '.join(errors) or None, updated_at=now())
+        # The same local failure for several expressions is reported once.
+        record.update(status='paused' if errors else 'complete', error=' / '.join(dict.fromkeys(errors)) or None, updated_at=now())
         _write_json(path, record)
     except Exception as exc:
         record = read_json(path)

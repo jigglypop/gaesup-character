@@ -7,8 +7,8 @@ const stages: Record<string, string> = {
 const failedModels = ['FAILED', 'CANCELED', 'failed', 'submission_rejected'];
 const failedImages = ['failed', 'rejected', 'not_sent'];
 
-export function AssetProductionStatus({ job, slot, hasModel, hasAssembly }: {
-  job: FactoryJob; slot?: string; hasModel: boolean; hasAssembly: boolean;
+export function AssetProductionStatus({ job, slot, hasModel, hasAssembly, compact = false }: {
+  job: FactoryJob; slot?: string; hasModel: boolean; hasAssembly: boolean; compact?: boolean;
 }) {
   const part = slot ? job.parts?.find(item => item.slot === slot) : undefined;
   const parts = slot ? (part ? [part] : []) : job.parts || [];
@@ -46,7 +46,7 @@ export function AssetProductionStatus({ job, slot, hasModel, hasAssembly }: {
   const detail = blocked ? job.error || flow?.message : undefined;
   return <div className="asset-production-status" aria-label={slot ? '파츠 생성 상태' : '캐릭터 생성 상태'}>
     <strong className={`asset-state-badge ${tone}`}>{label}</strong>
-    <div className="asset-stage-counts"><span>이미지 {imagesReady}/{images.length}</span><span>3D {slot && hasModel ? 1 : modelsReady}/{parts.length || (slot ? 1 : 0)}</span><span>조립 {assembly}</span></div>
-    {detail && <p className="asset-state-detail">{detail}</p>}
+    {!compact && <div className="asset-stage-counts"><span>이미지 {imagesReady}/{images.length}</span><span>3D {slot && hasModel ? 1 : modelsReady}/{parts.length || (slot ? 1 : 0)}</span><span>조립 {assembly}</span></div>}
+    {!compact && detail && <p className="asset-state-detail">{detail}</p>}
   </div>;
 }

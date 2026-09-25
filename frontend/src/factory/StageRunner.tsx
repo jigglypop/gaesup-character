@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ApiError } from '../api';
+import { isDefinitiveRejection } from '../api';
 import { usePolling } from '../use-polling';
 import { factoryApi, type FactoryStage } from './api';
 
@@ -17,7 +17,7 @@ function readPending(storage: string): Pending | null {
 export function StageRunner({ jobId, onChange }: { jobId: string; onChange: () => void }) {
   const storage = `gaesup.factory.stage:${jobId}`;
   const read = useCallback((signal: AbortSignal) => factoryApi.stages(jobId, signal), [jobId]);
-  const polling = usePolling(read, 3000), state = polling.value;
+  const polling = usePolling(read, value => value?.busy ? 3000 : 15000), state = polling.value;
   const [pending, setPending] = useState<Pending | null>(() => readPending(storage));
   const [sending, setSending] = useState(false), [error, setError] = useState('');
   const locked = useRef(false), alive = useRef(true);
@@ -36,8 +36,8 @@ export function StageRunner({ jobId, onChange }: { jobId: string; onChange: () =
       clearPending(intent);
       if (alive.current) { setPending(null); polling.setValue(result); onChange(); }
     } catch (e) {
-      // Only a definitive client rejection may discard the request identity.
-      if (e instanceof ApiError && e.status >= 400 && e.status < 500) {
+      // Only a definitive server rejection may discard the request identity.
+      if (isDefinitiveRejection(e)) {
         clearPending(intent);
         if (alive.current) setPending(null);
       }
@@ -51,7 +51,7 @@ export function StageRunner({ jobId, onChange }: { jobId: string; onChange: () =
         data-recommended={state.recommended_stage === action.stage} onClick={() => void start(action.stage)}>
         {labels[action.stage]}부터 실행
       </button>
-      <small>{action.reason || (action.paid ? '미완료 유료 작업 포함' : '저장된 결과 재사용')}</small>
+      <small>{action.reason || action.warning || (action.paid ? '미완료 유료 작업 포함' : '저장된 결과 재사용')}</small>
     </div>)}</div>
     {!state && !polling.error && <p role="status">저장된 단계 불러오는 중…</p>}
     {pending && <button disabled={sending} onClick={() => void start(pending.stage)}>{sending ? '접수 중…' : `${labels[pending.stage]} 실행 응답 복구`}</button>}

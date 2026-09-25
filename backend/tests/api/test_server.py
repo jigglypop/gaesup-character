@@ -11,7 +11,7 @@ def test_app_preserves_world_routes_and_adds_character_control():
     assert "/api/health" in paths
     assert "/api/world/generate" in paths
     assert all(
-        path in {"/health", "/api/health", "/api/characters"} or path.startswith(("/api/world/", "/api/characters/", "/api/avatars/", "/api/avatar-factory/", "/api/avatar-blueprints/", "/api/avatar-standard/"))
+        path in {"/health", "/api/health", "/api/characters"} or path.startswith(("/api/world/", "/api/characters/", "/api/avatars/", "/api/avatar-factory/", "/api/avatar-blueprints/"))
         for path in paths
     )
 
@@ -22,30 +22,6 @@ def test_app_preserves_world_routes_and_adds_character_control():
         if method in {"get", "post", "put", "patch", "delete"}
     }
     assert operations == {
-        ("GET", "/api/avatar-standard/items"),
-        ("GET", "/api/avatar-standard/items/{item}"),
-        ("GET", "/api/avatar-standard/outfits/{base_id}"),
-        ("PUT", "/api/avatar-standard/outfits/{base_id}"),
-        ("GET", "/api/avatar-standard/batches"),
-        ("POST", "/api/avatar-standard/batches"),
-        ("GET", "/api/avatar-standard/batches/{item}"),
-        ("GET", "/api/avatar-standard/batches/{item}/reference"),
-        ("POST", "/api/avatar-standard/batches/{item}/resume"),
-        ("GET", "/api/avatar-standard/items/{item}/artifacts/{filename}"),
-        ("POST", "/api/avatar-standard/uploads/{kind}"),
-        ("POST", "/api/avatar-standard/bases"),
-        ("POST", "/api/avatar-standard/parts"),
-        ("POST", "/api/avatar-standard/assemblies"),
-        ("POST", "/api/avatar-standard/images"),
-        ("POST", "/api/avatar-standard/shapes"),
-        ("POST", "/api/avatar-standard/designs"),
-        ("POST", "/api/avatar-standard/items/{item}/resume-design"),
-        ("POST", "/api/avatar-standard/items/{item}/align-design"),
-        ("POST", "/api/avatar-standard/items/{item}/poll"),
-        ("POST", "/api/avatar-standard/items/{item}/recover-task"),
-        ("POST", "/api/avatar-standard/items/{item}/resume-submission"),
-        ("POST", "/api/avatar-standard/items/{item}/review"),
-        ("POST", "/api/avatar-standard/items/{item}/recover"),
         ("GET", "/api/avatar-factory/profiles"),
         ("GET", "/api/avatar-factory/capabilities"),
         ("GET", "/api/avatar-factory/motion-library"),
@@ -63,11 +39,9 @@ def test_app_preserves_world_routes_and_adds_character_control():
         ("GET", "/api/avatar-factory/jobs/{job_id}/meshy/artifacts/{version}/{name}"),
         ("GET", "/api/avatar-factory/jobs/{job_id}/meshy/provider/{name}"),
         ("GET", "/api/avatar-factory/jobs"),
-        ("POST", "/api/avatar-factory/jobs"),
         ("POST", "/api/avatar-factory/image-jobs"),
         ("GET", "/api/avatar-factory/jobs/{job_id}"),
         ("POST", "/api/avatar-factory/jobs/{job_id}/resume"),
-        ("POST", "/api/avatar-factory/jobs/{job_id}/rebuild"),
         ("POST", "/api/avatar-factory/jobs/{job_id}/recover-task"),
         ("GET", "/api/avatar-factory/jobs/{job_id}/artifacts/{filename}"),
         ("GET", "/api/avatar-blueprints/assets/{asset_id}"),

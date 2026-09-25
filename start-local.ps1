@@ -50,12 +50,36 @@ function Wait-LocalHttp([string]$Url) {
     throw "Local server did not respond: $Url. Check logs in $logRoot"
 }
 
-# Reuse only this workspace's current code. Preserve unidentified or older processes.
+function Test-IdleApi($Health) {
+    return $null -ne $Health.activity -and $Health.activity.paid_requests -eq 0 -and $Health.activity.running_tasks -eq 0
+}
+
+# Reuse this workspace's current code. An older revision of this workspace is replaced on the
+# same port only once it reports no paid requests and no running work. A busy, silent or
+# unidentified process is preserved and a new port is selected.
 while (Test-PortListening $ApiPort) {
     $existing = $null
-    try { $existing = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 3 } catch {}
-    if ($existing.runtime.workspace -eq $expectedRuntime.workspace -and
-        $existing.runtime.revision -eq $expectedRuntime.revision) { break }
+    try { $existing = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 10 } catch {}
+    if ($existing.runtime.workspace -eq $expectedRuntime.workspace) {
+        if ($existing.runtime.revision -eq $expectedRuntime.revision) { break }
+        $drainDeadline = (Get-Date).AddMinutes(5)
+        while ($null -ne $existing.activity -and -not (Test-IdleApi $existing) -and (Get-Date) -lt $drainDeadline) {
+            Write-Host "Waiting for the previous API on port $ApiPort (paid requests $($existing.activity.paid_requests), running $($existing.activity.running_tasks))."
+            Start-Sleep -Seconds 2
+            $probe = $null
+            try { $probe = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 5 } catch {}
+            if ($probe) { $existing = $probe }
+        }
+        $previousPid = [int]$existing.runtime.pid
+        $listeners = (Get-NetTCPConnection -State Listen -LocalPort $ApiPort -ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique
+        if ((Test-IdleApi $existing) -and $previousPid -gt 0 -and $listeners -contains $previousPid) {
+            Write-Host "Replacing the idle previous API revision on port $ApiPort (PID $previousPid)."
+            Stop-Process -Id $previousPid -ErrorAction Stop
+            $releaseDeadline = (Get-Date).AddSeconds(15)
+            while ((Test-PortListening $ApiPort) -and (Get-Date) -lt $releaseDeadline) { Start-Sleep -Milliseconds 300 }
+            if (-not (Test-PortListening $ApiPort)) { break }
+        }
+    }
     $ownerIds = (Get-NetTCPConnection -State Listen -LocalPort $ApiPort).OwningProcess | Sort-Object -Unique
     Write-Host "Preserving API port $ApiPort (PID $($ownerIds -join ',')). Selecting an available port."
     do { $ApiPort++ } while ($ApiPort -eq $UiPort)

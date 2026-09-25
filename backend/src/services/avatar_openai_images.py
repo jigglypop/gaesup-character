@@ -1,4 +1,4 @@
-"""One recorded OpenAI image edit per part. No retries or model fallback."""
+"""One recorded OpenAI image edit per part. No model fallback; only unprocessed attempts retry."""
 import base64
 from contextlib import closing
 import hashlib
@@ -17,15 +17,24 @@ from PIL import Image
 from src.services.character_pipeline import PipelineError
 from src.services.asset_editor import _write_json
 from src.services.object_storage import provider_image
+from src.services.runtime_activity import paid_request
 
 DEFAULT_MODEL = 'gpt-image-2.5-sunburst'
 DEFAULT_BASE = 'https://api.openai.com/v1'
 ERROR_RESPONSE_LIMIT = 64 * 1024
+AUTO_RETRIES = 2
+# The provider rejected our TLS records, so it never parsed the HTTP request.
+TLS_REJECTIONS = ('BAD_RECORD_MAC', 'DECRYPTION_FAILED')
+ATTEMPT_FIELDS =('phase', 'events', 'request_started', 'transport_event', 'first_failed_event', 'failed_event',
+                  'transport_error_type', 'socket_errno', 'tls_reason', 'tls_version', 'tls_cipher',
+                  'request_body_complete', 'body_complete_seconds', 'elapsed_seconds', 'http_status', 'request_id',
+                  'error_type', 'submission', 'cause_type', 'diagnostic_id', 'provider_error',
+                  'provider_error_category', 'response_bytes', 'response_sha256')
 
 
 def image_transport():
     # Allow a verified TLS 1.2 connection on hosts with failing TLS 1.3 uploads.
-    # Never retry an image POST or disable certificate/hostname verification.
+    # Transport retries cover connection setup only; never disable certificate/hostname verification.
     context = httpx.create_ssl_context()
     maximum = os.getenv('AVATAR_IMAGE_TLS_MAX_VERSION', 'auto').strip()
     if maximum == '1.2':
@@ -46,6 +55,47 @@ class OpenAIImageHTTPError(httpx.HTTPStatusError):
         response = httpx.Response(status_code, request=request)
         super().__init__(f'OpenAI image request rejected; diagnostic {diagnostic_id}',
                          request=request, response=response)
+
+
+class _RetryableRejection(Exception):
+    """A rate-limit or overload refusal: the provider generated nothing."""
+
+    def __init__(self, delay):
+        super().__init__('Retryable image provider rejection')
+        self.delay = delay
+
+
+def _unprocessed(metadata, exc):
+    """Why the provider cannot have processed this attempt, or None when it may have (and billed it)."""
+    if isinstance(exc, _RetryableRejection):
+        return 'provider_busy'
+    if isinstance(exc, (OpenAIImageHTTPError, httpx.ReadTimeout)) or not isinstance(exc, httpx.TransportError):
+        return None
+    if metadata.get('phase') not in ('prepared', 'sending', 'awaiting_response'):
+        return None
+    if not metadata.get('request_started'):
+        return 'not_sent'
+    if not metadata.get('request_body_complete'):
+        return 'incomplete_upload'  # The provider waits for the whole body before it starts.
+    if any(token in (metadata.get('tls_reason') or '') for token in TLS_REJECTIONS):
+        return 'tls_rejected'
+    # A connection lost after a complete upload stays unconfirmed: never replayed automatically.
+    return None
+
+
+def _retry_delay(metadata, exc, attempt):
+    """Seconds before another attempt of an unprocessed request, or None."""
+    if attempt >= AUTO_RETRIES or not _unprocessed(metadata, exc):
+        return None
+    return exc.delay if isinstance(exc, _RetryableRejection) else 1.5 * (attempt + 1)
+
+
+def _retry_after(response, attempt):
+    value = (response.headers.get('retry-after') or '').strip()
+    try:
+        return min(60.0, max(1.0, float(value)))
+    except ValueError:
+        return 10.0 * (attempt + 1)
 
 
 def _safe_token(value):
@@ -163,19 +213,23 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
         request_args = {'data': fields, 'files': uploads}
     else:
         request_args = {'json': payload}
-    started = time.monotonic()
+    clock = {'started': time.monotonic()}
     metadata = {'transport': 's3-regional-image-urls-v2' if input_sha256 else 'buffered-multipart-v4' if multipart else 'buffered-json-v3', 'endpoint': endpoint, 'model': payload['model'], 'n': payload['n'],
                 'phase': 'prepared', 'events': [],
                 'client_request_id': previous.get('client_request_id') or uuid.uuid4().hex, 'request_started': False}
+    # The multipart boundary is part of the request bytes; it stays fixed across attempts and resumes.
+    metadata['boundary_id'] = previous.get('boundary_id') or previous.get('client_request_id') or metadata['client_request_id']
     if input_sha256:
         metadata['input_sha256'] = input_sha256
     def record():
         if receipt:
             _write_json(receipt.with_suffix('.request.json'), metadata)
+    def elapsed():
+        return round(time.monotonic()-clock['started'], 3)
     def trace(event, info):
         # Persist event names only: trace payloads can contain credentials.
         metadata['transport_event'] = event
-        metadata['events'].append({'event': event, 'at_seconds': round(time.monotonic()-started, 3)})
+        metadata['events'].append({'event': event, 'at_seconds': elapsed()})
         if event == 'connection.start_tls.complete':
             stream = info.get('return_value')
             tls = stream.get_extra_info('ssl_object') if stream else None
@@ -202,11 +256,12 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
         elif event.endswith('send_request_body.complete'):
             metadata['phase'] = 'awaiting_response'
             metadata['request_body_complete'] = True
-        metadata['elapsed_seconds'] = round(time.monotonic()-started, 3)
+            metadata['body_complete_seconds'] = elapsed()
+        metadata['elapsed_seconds'] = elapsed()
         record()
     headers = {'Authorization': 'Bearer '+key, 'X-Client-Request-Id': metadata['client_request_id']}
     if multipart:
-        headers['Content-Type'] = 'multipart/form-data; boundary=factory-'+metadata['client_request_id']
+        headers['Content-Type'] = 'multipart/form-data; boundary=factory-'+metadata['boundary_id']
     request = client.build_request('POST', base.rstrip('/')+endpoint, headers=headers,
                                    extensions={'trace': trace}, **request_args)
     # Finish encoding before opening the connection. Send a single replayable byte
@@ -224,55 +279,77 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
         metadata['previous_connections'] = previous.get('previous_connections', []) + [
             {k: previous.get(k) for k in ('client_request_id', 'phase', 'submission', 'elapsed_seconds', 'socket_errno')}]
     record()
-    try:
-        with closing(client.send(request, stream=True)) as response:
-            metadata.update(phase='response_headers', http_status=response.status_code,
-                            request_id=response.headers.get('x-request-id'))
-            record()
-            if response.is_error:
-                provider_error, body = _read_error_response(response)
-                diagnostic_id = uuid.uuid4().hex[:12]
-                category = _error_category(response.status_code, provider_error)
-                error_record = {
-                    'diagnostic_id': diagnostic_id,
-                    'http_status': response.status_code,
-                    'request_id': response.headers.get('x-request-id'),
-                    'category': category,
-                    'provider_error': provider_error,
-                    **body,
-                }
-                metadata.update(phase='response_rejected', diagnostic_id=diagnostic_id,
-                                provider_error=provider_error, provider_error_category=category,
-                                response_bytes=body['body_bytes'], response_sha256=body['body_sha256'])
-                if error_path:
-                    _write_json(error_path, error_record)
+    attempt = 0
+    while True:
+        try:
+            with paid_request(), closing(client.send(request, stream=True)) as response:
+                metadata.update(phase='response_headers', http_status=response.status_code,
+                                request_id=response.headers.get('x-request-id'))
                 record()
-                raise OpenAIImageHTTPError(response.status_code, category, diagnostic_id,
-                                           provider_error)
-            if response_path:
-                partial = receipt.with_suffix('.response.partial')
-                with partial.open('wb') as output:
-                    for chunk in response.iter_bytes():
-                        output.write(chunk)
-                partial.replace(response_path)
-                raw = response_path.read_bytes()
-            else:
-                raw = response.read()
-            metadata.update(phase='response_saved', response_bytes=len(raw), elapsed_seconds=round(time.monotonic()-started, 3))
+                if response.is_error:
+                    provider_error, body = _read_error_response(response)
+                    diagnostic_id = uuid.uuid4().hex[:12]
+                    category = _error_category(response.status_code, provider_error)
+                    if (response.status_code in (429, 503) and category in ('rate_limit', 'provider_unavailable')
+                            and attempt < AUTO_RETRIES):
+                        metadata.update(phase='response_retryable', provider_error=provider_error,
+                                        provider_error_category=category)
+                        raise _RetryableRejection(_retry_after(response, attempt))
+                    error_record = {
+                        'diagnostic_id': diagnostic_id,
+                        'http_status': response.status_code,
+                        'request_id': response.headers.get('x-request-id'),
+                        'category': category,
+                        'provider_error': provider_error,
+                        **body,
+                    }
+                    metadata.update(phase='response_rejected', diagnostic_id=diagnostic_id,
+                                    provider_error=provider_error, provider_error_category=category,
+                                    response_bytes=body['body_bytes'], response_sha256=body['body_sha256'])
+                    if error_path:
+                        _write_json(error_path, error_record)
+                    record()
+                    raise OpenAIImageHTTPError(response.status_code, category, diagnostic_id,
+                                               provider_error)
+                if response_path:
+                    partial = receipt.with_suffix('.response.partial')
+                    with partial.open('wb') as output:
+                        for chunk in response.iter_bytes():
+                            output.write(chunk)
+                    partial.replace(response_path)
+                    raw = response_path.read_bytes()
+                else:
+                    raw = response.read()
+                metadata.update(phase='response_saved', response_bytes=len(raw), elapsed_seconds=elapsed())
+                record()
+                return json.loads(raw)
+        except Exception as exc:
+            metadata.update(error_type=type(exc).__name__, elapsed_seconds=elapsed())
+            delay = _retry_delay(metadata, exc, attempt)
+            if delay is not None:
+                # Keep each unprocessed attempt in the receipt, then send the same bytes again.
+                metadata.setdefault('auto_retries', []).append({'reason': _unprocessed(metadata, exc), **{key: metadata.get(key) for key in (
+                    'client_request_id', 'phase', 'error_type', 'transport_error_type', 'socket_errno', 'tls_reason',
+                    'http_status', 'provider_error_category', 'request_body_complete', 'elapsed_seconds')}})
+                for field in ATTEMPT_FIELDS:
+                    metadata.pop(field, None)
+                metadata.update(phase='prepared', events=[], request_started=False, client_request_id=uuid.uuid4().hex)
+                request.headers['X-Client-Request-Id'] = metadata['client_request_id']
+                record()
+                time.sleep(delay)
+                clock['started'] = time.monotonic()
+                attempt += 1
+                continue
+            event = metadata.get('failed_event', '')
+            not_sent = not metadata['request_started'] and (
+                isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)) or
+                event in ('connection.connect_tcp.failed', 'connection.start_tls.failed'))
+            metadata['submission'] = 'not_sent' if not_sent else 'rejected' if isinstance(exc, OpenAIImageHTTPError) else 'unknown'
+            cause = exc.__cause__
+            if cause is not None:
+                metadata['cause_type'] = type(cause).__name__
             record()
-            return json.loads(raw)
-    except Exception as exc:
-        metadata.update(error_type=type(exc).__name__, elapsed_seconds=round(time.monotonic()-started, 3))
-        event = metadata.get('failed_event', '')
-        not_sent = not metadata['request_started'] and (
-            isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)) or
-            event in ('connection.connect_tcp.failed', 'connection.start_tls.failed'))
-        metadata['submission'] = 'not_sent' if not_sent else 'rejected' if isinstance(exc, OpenAIImageHTTPError) else 'unknown'
-        cause = exc.__cause__
-        if cause is not None:
-            metadata['cause_type'] = type(cause).__name__
-        record()
-        raise
+            raise
 
 
 def reference_data_url(source):

@@ -12,6 +12,16 @@ _WORKERS = {}
 _GUARD = Lock()
 
 
+def reuse_contract(pipeline):
+    """The saved-expression snapshot of a refit, or None when it froze nothing.
+
+    An empty snapshot (for example after the face bake never succeeded) must not
+    hide the job's own default expressions, whose images are already generated.
+    """
+    contract = pipeline.get('expression_reuse')
+    return contract if contract and contract.get('expressions') else None
+
+
 def snapshot_saved_expressions(factory, owner, source_job, source_version, target_directory):
     """Freeze reusable face inputs and the selected expression at acceptance."""
     source_root = factory.directory(owner, source_job)/'native-parts'/source_version/'expressions'
@@ -54,7 +64,7 @@ def reuse_saved_expressions(factory, owner, job, target_version):
 
 def _reuse_saved_expressions(factory, owner, job, target_version):
     directory = factory.directory(owner, job)
-    contract = read_json(directory/'pipeline.json').get('expression_reuse')
+    contract = reuse_contract(read_json(directory/'pipeline.json'))
     if not contract:
         return None
     source_job = contract['source_job_id']
@@ -112,7 +122,7 @@ def _reuse_saved_expressions(factory, owner, job, target_version):
 
 
 def expression_reuse_state(directory):
-    contract = read_json(directory/'pipeline.json').get('expression_reuse')
+    contract = reuse_contract(read_json(directory/'pipeline.json'))
     if not contract:
         return None
     record = read_json(directory/'expression-reuse.json')

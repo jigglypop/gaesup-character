@@ -1,5 +1,6 @@
 """File-backed character control, public views, and durable action receipts."""
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -17,6 +18,9 @@ from src.services.asset_editor import _retry_file_io, _write_json
 from src.services.character_audit import inspect_character
 from src.services.glb import parse_glb
 from src.services.wardrobe import _digest, run_lock
+
+# Character details are read-only; bounded parallel reads keep the list responsive on S3.
+_LISTING_READERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='character-listing')
 
 
 class PipelineError(Exception):
@@ -249,7 +253,8 @@ class CharacterPipeline:
                 "review": review, "body_coverage": control.get("body_coverage", "unknown")}
 
     def listing(self, user_id: int) -> list[dict]:
-        return [self.detail(e["id"], user_id) for e in self.records() if e.get("owner_id", self.owner) == user_id]
+        ids = [e["id"] for e in self.records() if e.get("owner_id", self.owner) == user_id]
+        return list(_LISTING_READERS.map(lambda character_id: self.detail(character_id, user_id), ids))
 
     def check_revision(self, entry, run, control, revision):
         if self.revision(entry, run, control) != revision:

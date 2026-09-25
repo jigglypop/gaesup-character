@@ -91,50 +91,62 @@ class AnimalRig:
 
     def execute(self, animal_id):
         directory = self.directory(animal_id); output = directory/'output'
-        with _QUEUE:
-            record = read_json(directory/'record.json')
-            if record.get('status') != 'accepted' or record.get('executor') != self.factory.instance:
-                return
-            try:
-                if digest(directory/'source.glb') != record['source_sha256']:
-                    raise ValueError('Source changed')
-                output.mkdir(exist_ok=True)
-                _write_json(output/'input.json', {'source':str(directory/'source.glb'), 'output':str(output),
-                    'species':record['species'], 'rig_profile':RIG_PROFILE,
-                    'source_sha256':record['source_sha256']})
-                record.update(status='running', executor=self.factory.instance, process=identity(), updated_at=now())
-                _write_json(directory/'record.json', record)
-                with local_workspace(output, inputs=[directory/'source.glb']):
-                    with (output/'blender.log').open('wb') as log:
-                        process = subprocess.Popen([blender_executable(), '--background', '--factory-startup',
-                            '--disable-autoexec', '--python-exit-code', '1', '--threads', '2', '--python',
-                            str(Path(__file__).with_name('animal_rig_blender.py')), '--', str(output/'input.json')],
-                            stdout=log, stderr=subprocess.STDOUT, env={**os.environ,'ASSET_STORAGE_WORKER_LOCAL':'1'},
-                            creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
-                        _write_json(output/'runner.json', {'process':identity(process.pid), 'phase':'blender'})
-                        publish_checkpoint(output/'runner.json')
-                        try: code=process.wait(timeout=600)
-                        except subprocess.TimeoutExpired:
-                            process.terminate(); process.wait(timeout=10); raise
-                        if code: raise ValueError('Blender rig failed')
-                    seal=read_json(output/'complete.json')
-                    if (seal.get('input_sha256') != digest(output/'input.json') or
-                            seal.get('source_sha256') != record['source_sha256'] or
-                            seal.get('rig_profile') != RIG_PROFILE):
-                        raise ValueError('Input changed')
-                    files = seal.get('files')
-                    if set(files or {}) != {'rigged.glb', 'master.blend'}:
-                        raise ValueError('Incomplete rig artifacts')
-                    for name, expected in files.items():
-                        if Path(name).name != name or digest(output/name) != expected:
-                            raise ValueError('Artifact changed')
-                    if type(seal.get('bones')) is not int or seal['bones'] < 10:
-                        raise ValueError('Invalid skeleton')
-                    record.update(status='complete', files=files, bones=seal['bones'],
-                                  rig_profile=RIG_PROFILE, visual_review='required', updated_at=now(), error=None)
-            except Exception:
+        output.mkdir(exist_ok=True)
+        record = None
+        try:
+            # Same order as part assembly (storage workspace, then the Blender queue) so they cannot deadlock.
+            with local_workspace(output, inputs=[directory/'source.glb']), _QUEUE:
+                record = read_json(directory/'record.json')
+                if record.get('status') != 'accepted' or record.get('executor') != self.factory.instance:
+                    record = None
+                    return
+                self._run(directory, output, record)
+        except Exception:
+            # The workspace could not publish its files: this attempt failed and keeps its source.
+            if record is not None:
                 record.update(status='failed', updated_at=now(), error='사족 리깅 중단 · 원본 보존')
-            _write_json(directory/'record.json',record)
+        # Publish the outcome only after the workspace has uploaded its artifacts.
+        if record is not None:
+            _write_json(directory/'record.json', record)
+
+    def _run(self, directory, output, record):
+        try:
+            if digest(directory/'source.glb') != record['source_sha256']:
+                raise ValueError('Source changed')
+            _write_json(output/'input.json', {'source':str(directory/'source.glb'), 'output':str(output),
+                'species':record['species'], 'rig_profile':RIG_PROFILE,
+                'source_sha256':record['source_sha256']})
+            record.update(status='running', executor=self.factory.instance, process=identity(), updated_at=now())
+            _write_json(directory/'record.json', record)
+            with (output/'blender.log').open('wb') as log:
+                process = subprocess.Popen([blender_executable(), '--background', '--factory-startup',
+                    '--disable-autoexec', '--python-exit-code', '1', '--threads', '2', '--python',
+                    str(Path(__file__).with_name('animal_rig_blender.py')), '--', str(output/'input.json')],
+                    stdout=log, stderr=subprocess.STDOUT, env={**os.environ,'ASSET_STORAGE_WORKER_LOCAL':'1'},
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+                _write_json(output/'runner.json', {'process':identity(process.pid), 'phase':'blender'})
+                publish_checkpoint(output/'runner.json')
+                try: code=process.wait(timeout=600)
+                except subprocess.TimeoutExpired:
+                    process.terminate(); process.wait(timeout=10); raise
+                if code: raise ValueError('Blender rig failed')
+            seal=read_json(output/'complete.json')
+            if (seal.get('input_sha256') != digest(output/'input.json') or
+                    seal.get('source_sha256') != record['source_sha256'] or
+                    seal.get('rig_profile') != RIG_PROFILE):
+                raise ValueError('Input changed')
+            files = seal.get('files')
+            if set(files or {}) != {'rigged.glb', 'master.blend'}:
+                raise ValueError('Incomplete rig artifacts')
+            for name, expected in files.items():
+                if Path(name).name != name or digest(output/name) != expected:
+                    raise ValueError('Artifact changed')
+            if type(seal.get('bones')) is not int or seal['bones'] < 10:
+                raise ValueError('Invalid skeleton')
+            record.update(status='complete', files=files, bones=seal['bones'],
+                          rig_profile=RIG_PROFILE, visual_review='required', updated_at=now(), error=None)
+        except Exception:
+            record.update(status='failed', updated_at=now(), error='사족 리깅 중단 · 원본 보존')
 
     def artifact(self, animal_id, name):
         directory=self.directory(animal_id); self.get(animal_id)

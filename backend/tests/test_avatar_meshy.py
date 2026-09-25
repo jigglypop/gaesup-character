@@ -73,29 +73,6 @@ def test_rig_preserves_provider_skin_and_defaults_do_not_submit(setup):
     with pytest.raises(PipelineError): service.artifact(1, jid, '../other', 'model.glb')
 
 
-def test_native_model_imports_as_source_bound_standard_candidate_without_legacy_catalog(setup, monkeypatch):
-    from src.services.avatar_standard import AvatarStandard
-    from src.services.avatar_standard_models import BaseInput
-    from src.services.avatar_factory import factory_records
-    service, jid, directory, calls, _ = setup
-    pipeline = read_json(directory/'pipeline.json'); pipeline['body_height_m'] = 1.2
-    _write_json(directory/'pipeline.json', pipeline)
-    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
-    assert calls[0][1]['height_meters'] == 1.2
-    current = service.get(1, jid)
-    monkeypatch.setattr('src.services.avatar_standard.blender_executable', lambda: 'fixture-blender')
-    standard = AvatarStandard(service.factory.data)
-    payload = BaseInput(factory_job_id=jid, factory_version=current['version'], source_sha256=current['model_sha256'], name='Native candidate').model_dump()
-    base, _ = standard.create(1, 'base', 'native-body-base-test', payload)
-    inputs = read_json(standard.directory(1, base['id'])/'input.json')
-    assert inputs['provenance']['rig_origin'] == 'meshy'
-    assert inputs['source_sha256'] == current['model_sha256']
-    assert not factory_records(service.factory.data, 1)
-    assert base['review']['decision'] == 'pending'
-    with pytest.raises(PipelineError): standard.create(2, 'base', 'native-body-base-test', payload)
-    with pytest.raises(PipelineError): standard.create(1, 'base', 'native-wrong-hash', {**payload, 'source_sha256': '0'*64})
-
-
 def test_selected_walk_uses_exact_library_action_and_reuses_download(setup):
     service, jid, directory, calls, _ = setup
     service.start(1, jid); service.execute(1, jid, poll_seconds=0)

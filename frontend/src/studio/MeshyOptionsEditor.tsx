@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { request } from '../api';
-import type { MeshyOptions } from './meshy-options';
+import { meshyBudgetFor, sharedMeshyScope, type MeshyOptions } from './meshy-options';
 import './meshy-options.css';
 
-type Props = { value: MeshyOptions; disabled?: boolean; onChange: (value: MeshyOptions) => void; onUploading: (value: boolean) => void };
-export function MeshyOptionsEditor({ value, disabled, onChange, onUploading }: Props) {
+type Props = { value: MeshyOptions; scope: string; disabled?: boolean; onChange: (value: MeshyOptions) => void; onUploading: (value: boolean) => void };
+export function MeshyOptionsEditor({ value, scope, disabled, onChange, onUploading }: Props) {
+  const budget = meshyBudgetFor(scope);
+  const budgetLabel = scope === sharedMeshyScope ? '파츠별 면 수' : `${budget.toLocaleString()} 면`;
   const [uploading, setUploading] = useState(false), [error, setError] = useState('');
   const controller = useRef<AbortController | null>(null);
   useEffect(() => () => { controller.current?.abort(); onUploading(false); }, [onUploading]);
@@ -26,8 +28,13 @@ export function MeshyOptionsEditor({ value, disabled, onChange, onUploading }: P
     } catch (reason) { if (!signal.aborted) setError((reason as Error).message); }
     finally { if (!signal.aborted) { setUploading(false); onUploading(false); } }
   }
-  return <details className="meshy-generation-options">
-    <summary>Meshy 7.1 설정 · {value.geometry_resolution === '2k' ? 'Ultra 2K' : 'Standard'} · {value.should_remesh ? value.decimation_mode ? `자동 폴리곤 ${value.decimation_mode}` : Number.isFinite(value.target_polycount) ? `${value.target_polycount.toLocaleString()} 폴리곤` : '폴리곤 입력 필요' : '리메시 끔'}</summary>
+  const light = value.geometry_resolution === 'standard' && value.should_remesh && value.target_polycount === budget && value.decimation_mode === null && value.texture_resolution === '2k';
+  const high = value.geometry_resolution === '2k' && !value.should_remesh && value.texture_resolution === '4k';
+  return <div className="meshy-generation-settings"><div className="meshy-presets" role="group" aria-label="3D 출력 설정">
+    <button type="button" disabled={locked} aria-pressed={light} onClick={() => update({geometry_resolution:'standard', should_remesh:true, target_polycount:budget, decimation_mode:null, texture_resolution:'2k'})}>가벼운 출력<small>Standard · {budgetLabel} · 2K</small></button>
+    <button type="button" disabled={locked} aria-pressed={high} onClick={() => update({geometry_resolution:'2k', should_remesh:false, texture_resolution:'4k'})}>고해상도 출력<small>Ultra · 원본 면 · 4K</small></button>
+  </div><details className="meshy-generation-options">
+    <summary>세부 설정 · {value.geometry_resolution === '2k' ? 'Ultra 2K' : 'Standard'} · {value.should_remesh ? value.decimation_mode ? `자동 폴리곤 ${value.decimation_mode}` : Number.isFinite(value.target_polycount) ? `${value.target_polycount.toLocaleString()} 면` : '폴리곤 입력 필요' : '원본 면'}</summary>
     <fieldset disabled={locked}><legend>메시</legend><div className="meshy-option-grid">
       <label>형상 해상도<select value={value.geometry_resolution} onChange={event => update({ geometry_resolution: event.target.value as MeshyOptions['geometry_resolution'] })}><option value="standard">Standard</option><option value="2k">Ultra 2K</option></select></label>
       <label>자세<select value={value.pose_mode} onChange={event => update({ pose_mode: event.target.value as MeshyOptions['pose_mode'] })}><option value="">원본 자세</option><option value="t-pose">T 포즈</option><option value="a-pose">A 포즈</option></select></label>
@@ -56,5 +63,5 @@ export function MeshyOptionsEditor({ value, disabled, onChange, onUploading }: P
       {check('alpha_thumbnail', '투명 배경 미리보기')}{check('multi_view_thumbnails', '앞·오른쪽·뒤·왼쪽 미리보기')}
     </fieldset>
     {error && <p role="alert">{error}</p>}
-  </details>;
+  </details></div>;
 }

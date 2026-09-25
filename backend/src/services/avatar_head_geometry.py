@@ -135,8 +135,26 @@ def prepare_rear_hair(meshes, body, hat_palette, spec):
     return report
 
 
-def fit_hat(meshes, target, width_scale=1.0):
+def fit_reference_frame(meshes, reference_bounds, slot):
+    """Register metric reference images without stretching the source mesh."""
+    lo, hi = bounds(meshes); a, b = target_box(reference_bounds)
+    size, desired = hi-lo, b-a
+    if min(size) <= 1e-8 or min(desired) <= 1e-8:
+        raise ValueError('Part reference has no measurable extent')
+    scale = float(np.median([desired[i]/size[i] for i in range(3)]))
+    source, destination = (lo+hi)/2, (a+b)/2
+    transform = Matrix.Translation(destination) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-source)
+    return transform, [], {'method': f'uniform_{slot}_on_shared_image_frame_v2', 'scale': scale,
+                           'reference_bounds_gltf': reference_bounds,
+                           'source_proportions_preserved': True}
+
+
+def fit_hat(meshes, target, width_scale=1.0, reference_bounds=None):
     """Uniformly fit headwear to the measured body head and crown seat."""
+    if reference_bounds is not None:
+        # A bow or hair clip must retain its reference size and offset instead
+        # of being expanded to the entire head width like a cap.
+        return fit_reference_frame(meshes, reference_bounds, 'hat')
     lo, hi = bounds(meshes); a, b = target_box(target)
     scale = (b.x-a.x)/(hi.x-lo.x)*width_scale
     source = Vector(((lo.x+hi.x)/2, (lo.y+hi.y)/2, hi.z))
@@ -181,23 +199,69 @@ def hat_target_over_hair(target, hair, spec):
                     'target_width_before_clearance_m': width}
 
 
-def fit_hair(meshes, target, spec):
-    """Uniformly contain the measured head; strand length never sets the scale."""
+def hair_scalp_frame(meshes, target):
+    """Estimate the attachment region separately from tips and hanging locks.
+
+    This is an inferred frame, not a measurement of a hidden head cavity. A
+    bounded number of passes estimates the head-height band from the measured
+    target head aspect ratio. Percentiles keep isolated spikes out of its pivot.
+    All source geometry, including those spikes, keeps the same uniform scale.
+    """
+    points = np.array([list(obj.matrix_world @ vertex.co)
+                       for obj in meshes for vertex in obj.data.vertices], dtype=float)
+    a, b = target_box(target)
+    crown = float(np.percentile(points[:, 2], 99))
+    lower, upper = np.percentile(points, [2, 98], axis=0)
+    target_span = b-a
+    for _ in range(3):
+        width, depth = upper[:2]-lower[:2]
+        scale = max(target_span.x/max(width, 1e-8), target_span.y/max(depth, 1e-8))
+        floor = crown-target_span.z/max(scale, 1e-8)
+        band = points[(points[:, 2] >= floor) & (points[:, 2] <= crown)]
+        if len(band) < 8:
+            break
+        lower, upper = np.percentile(band, [2, 98], axis=0)
+    # Only X/Y and the crown are used to register the attachment frame. Lower
+    # strand length must not move its center or change the scalp scale.
+    upper[2] = crown
+    return Vector(lower), Vector(upper)
+
+
+def fit_hair(meshes, target, spec, slot='hair', head_bounds=None, reference_bounds=None):
+    """Uniform fit, with a versioned scalp frame for complete hairstyles."""
     lo, hi = bounds(meshes); a, b = target_box(target)
+    scalp_frame = slot == 'hair' and spec['fitting'].get('hair_surface_fit') in (
+        'scalp-frame-v2-bounded', 'cavity-reference-v3', 'cavity-reference-v4')
+    if scalp_frame and reference_bounds is not None:
+        # Generated views share the measured body's canvas. Their saved image
+        # bounds retain the designed hair-to-head ratio, unlike a skull box.
+        # Uploaded/tightly cropped views are never treated as metric references.
+        transform, anchors, report = fit_reference_frame(meshes, reference_bounds, slot)
+        report['hair_length'] = spec['fitting'].get('hair_length', 'source')
+        return transform, anchors, report
+    if scalp_frame:
+        # hair_length controls tips, not the height of the attachment region.
+        frame_target = [list(target[0]), list(target[1])]
+        if head_bounds:
+            frame_target[0][1] = head_bounds[0].z
+            frame_target[1][1] = head_bounds[1].z
+        lo, hi = hair_scalp_frame(meshes, frame_target)
     source_width, source_depth = hi.x-lo.x, hi.y-lo.y
     target_width, target_depth = b.x-a.x, b.y-a.y
     if min(source_width, source_depth, target_width, target_depth) <= 1e-8:
         raise ValueError('Hair has no measurable scalp footprint')
     width_scale = target_width/source_width
     depth_scale = target_depth/source_depth
-    # One uniform scale preserves the authored silhouette. The larger required
-    # axis keeps the shell outside both measured head axes; bounded clearance
-    # handles only local intersections instead of reshaping the whole asset.
+    # An outer frame cannot prove cavity fit or rear coverage. Preserve the
+    # silhouette with one scale; only small local clearance is applied later.
     scale = max(width_scale, depth_scale)
     source = Vector(((lo.x+hi.x)/2, (lo.y+hi.y)/2, hi.z))
     destination = Vector(((a.x+b.x)/2, (a.y+b.y)/2, b.z))
     transform = Matrix.Translation(destination) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-source)
-    return transform, [], {'method': 'uniform_hair_scale_on_measured_head', 'scale': scale,
+    return transform, [], {'method': ('uniform_hair_scalp_frame_v2' if scalp_frame
+                                      else 'uniform_hair_scale_on_measured_head'), 'scale': scale,
+                           'source_attachment_bounds_blender': [list(lo), list(hi)],
+                           'attachment_frame_inferred': scalp_frame,
                            'width_scale_required': width_scale,
                            'depth_scale_required': depth_scale,
                            'target_head_width_m': target_width,
@@ -206,7 +270,7 @@ def fit_hair(meshes, target, spec):
                            'hair_length': spec['fitting'].get('hair_length', 'source')}
 
 
-def fit_hair_length(meshes, target, spec):
+def fit_hair_length(meshes, target, spec, scalp_floor=None):
     """Adjust hanging strands below the crown, retaining scalp width and depth."""
     ratio = spec['fitting'].get('hair_length_head_ratio')
     if ratio is None:
@@ -218,6 +282,12 @@ def fit_hair_length(meshes, target, spec):
     # Keep the crown dome unchanged. Only the lower strands are extended or
     # shortened, with a continuous mapping at the protected scalp boundary.
     protected = min(source_length, target_length)*.35
+    if spec['fitting'].get('hair_surface_fit') in ('scalp-frame-v2-bounded', 'cavity-reference-v3', 'cavity-reference-v4') and scalp_floor is not None:
+        protected = max(0., hi.z-scalp_floor)
+        if source_length <= protected+1e-8 or target_length <= protected+1e-8:
+            return {'method': 'preserve_scalp_no_resizable_strands',
+                    'source_length_m': source_length, 'requested_length_m': target_length,
+                    'protected_crown_m': protected}
     shoulder = hi.z-protected
     strand_scale = (target_length-protected)/(source_length-protected)
     for obj in meshes:
@@ -271,6 +341,53 @@ def fit_hair_scalp(meshes, body, rig, spec):
     return {'method': 'measured_skull_surface_fit_v1', 'adjusted_vertices': adjusted,
             'scalp_adjusted_vertices': scalp_adjusted, 'head_floor_m': head_lo.z,
             'maximum_adjustment_m': maximum_applied, 'lower_strand_limit_m': lower_limit,
+            'topology_preserved': True, 'uv_preserved': True, 'added_faces': 0}
+
+
+def fit_hair_scalp_bounded(meshes, body, rig, spec):
+    """Apply small radial clearance without nearest-face direction flips.
+
+    Deep intersections and missing rear faces cannot be repaired by projecting
+    each vertex onto the skull. Keep displacement bounded and preserve the
+    actual topology; adjustment counts describe the operation, not approval.
+    """
+    lo, hi, _ = head_region(body, rig, spec)
+    center = (lo+hi)/2
+    tree, _, _ = surface(body)
+    minimum = spec['fitting'].get('scalp_clearance_m', .003)
+    maximum = spec['tolerances'].get('max_surface_adjustment_m', .015)
+    adjusted = limited = 0
+    maximum_applied = 0.
+    for obj in meshes:
+        inverse = obj.matrix_world.inverted()
+        for vertex in obj.data.vertices:
+            point = obj.matrix_world @ vertex.co
+            if point.z < lo.z:
+                continue
+            ray = point-center
+            distance = ray.length
+            if distance <= 1e-8:
+                continue
+            direction = ray/distance
+            hit, _, _, radius = tree.ray_cast(center, direction)
+            if hit is None or hit.z < lo.z:
+                continue
+            required = radius+minimum-distance
+            if required <= 0:
+                continue
+            # Blend into untouched hanging strands at the head floor.
+            blend = min(1., (point.z-lo.z)/max((hi.z-lo.z)*.15, 1e-8))
+            amount = min(required, maximum)*blend*blend*(3-2*blend)
+            limited += int(required > amount+1e-8)
+            if amount <= 1e-8:
+                continue
+            vertex.co = inverse @ (point+direction*amount)
+            adjusted += 1
+            maximum_applied = max(maximum_applied, amount)
+        obj.data.update()
+    return {'method': 'bounded_radial_scalp_clearance_v2', 'adjusted_vertices': adjusted,
+            'limited_vertices': limited, 'maximum_adjustment_m': maximum_applied,
+            'maximum_allowed_m': maximum, 'bounded': True,
             'topology_preserved': True, 'uv_preserved': True, 'added_faces': 0}
 
 

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { texture, uniform } from 'three/tsl';
 import type { GLTF } from 'three/addons/loaders/GLTFLoader.js';
+import { matteMaterial } from './matte-materials';
 
 export const expressionNames = { neutral: '기본', smile: '웃음', cry: '울음', angry: '화남', surprise: '놀람', blink: '눈 감기' };
 export type ExpressionName = keyof typeof expressionNames;
@@ -14,12 +15,7 @@ export function prepareExpressionMaterial(material: THREE.MeshStandardMaterial) 
   Object.assign(material, { colorNode: texture(material.map).rgb.mul(uniform(material.color)) });
   const originalProgramKey = material.customProgramCacheKey.bind(material);
   material.customProgramCacheKey = () => `${originalProgramKey()}:expression:${material.uuid}`;
-  material.emissive.set(0);
-  material.emissiveMap = null;
-  material.metalness = 0;
-  material.metalnessMap = null;
-  material.roughness = .85;
-  material.needsUpdate = true;
+  matteMaterial(material);
 }
 
 /** Use the server's rest-pose UV atlases unchanged in the studio and the world. */

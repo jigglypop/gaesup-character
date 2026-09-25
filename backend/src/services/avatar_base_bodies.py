@@ -194,7 +194,7 @@ class AvatarBaseBodies:
                 'meshy_preserve_geometry': preserve_geometry,
                 'meshy_quality_profile': quality_profile,
                 'reuse': {'source_job_id': None, 'slots': []}, 'rig_with_meshy': True,
-                'motion_actions': motion_actions, 'body_purpose': 'wardrobe_base',
+                'motion_actions': motion_actions, 'motion_actions_explicit': False, 'body_purpose': 'wardrobe_base',
                 'body_prompt': 'Preserve the supplied base-body views exactly.', 'body_height_m': 1.2,
                 'base_body_setup': setup, 'uploaded_views': list(VIEWS),
                 'image_provider': 'uploaded', 'image_model': None,

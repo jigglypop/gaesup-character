@@ -124,6 +124,11 @@ def _receipt(output, view='front', *, legacy=False):
     return output/name
 
 
+def view_receipt(output, view, image):
+    """An explicit retry sends under its own receipt; the first attempt keeps the fixed name."""
+    return output/image['receipt'] if image.get('receipt') else _receipt(output, view)
+
+
 def _recoverable(image, receipt):
     status = image.get('status')
     if status in ('pending', 'not_sent', 'received'):
@@ -145,7 +150,7 @@ def can_resume(directory, state):
         image = views.get(view, {})
         if image.get('status') == 'succeeded':
             continue
-        return _recoverable(image, _receipt(output, view))
+        return _recoverable(image, view_receipt(output, view, image))
     return True
 
 
@@ -235,7 +240,7 @@ def _execute_view(service, owner, job_id, state, job, reference, view, image, *,
                 or not raw_path.is_file() or hashlib.sha256(raw_path.read_bytes()).hexdigest() != image.get('raw_sha256')):
             raise PipelineError('reference_changed', '저장된 공통 규격 원본 이미지가 변경되었습니다.', 409)
         return
-    receipt = _receipt(output, view, legacy=legacy)
+    receipt = _receipt(output, view, legacy=True) if legacy else view_receipt(output, view, image)
     if not _recoverable(image, receipt):
         raise PipelineError('reference_recovery_required', '공통 규격 원본 이미지 응답을 확인해야 합니다.', 409)
     spec = state['production_spec']

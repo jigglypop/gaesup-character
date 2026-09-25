@@ -1,7 +1,11 @@
 """Continue one photo-to-character job through its final local assembly."""
+import logging
+
 from src.services.asset_editor import _write_json
-from src.services.character_pipeline import read_json
+from src.services.character_pipeline import PipelineError, read_json
 from src.services.meshy_status import saved_problem
+
+LOGGER = logging.getLogger(__name__)
 
 
 def character_flow(directory, job):
@@ -91,14 +95,14 @@ def assemble_character(factory, owner, job_id):
         if state['status'] == 'review_required':
             from src.services.avatar_glb_bodies import publish_import_views
             publish_import_views(factory, owner, job_id, state['version'])
+            from src.services.avatar_expression_reuse import reuse_saved_expressions
+            reuse_saved_expressions(factory, owner, job_id, state['version'])
             if state.get('incomplete_parts'):
                 _write_json(directory/'output/progress.json', {'stage': 'assemble', 'message': '일부 파츠 피팅 기준점 보정 필요'})
                 record = read_json(directory/'job.json')
                 record['error'] = '일부 파츠 피팅 기준점 보정 필요'
                 _write_json(directory/'job.json', record)
                 return
-            from src.services.avatar_expression_reuse import reuse_saved_expressions
-            reuse_saved_expressions(factory, owner, job_id, state['version'])
             from src.services.avatar_expression_pipeline import execute, summary
             execute(factory, owner, job_id, state['version'])
             expressions = summary(directory, state['version'])
@@ -109,8 +113,10 @@ def assemble_character(factory, owner, job_id):
                 'stage': 'expressions' if error else 'complete', 'message': error or '조립 완료'})
         else:
             error = state.get('error') or '조립 작업을 이어서 확인해야 합니다.'
-    except Exception:
-        error = '파츠 조립이 중단되었습니다. 생성된 파츠와 몸·동작은 보존했으며 계속 만들기로 이어갈 수 있습니다.'
+    except Exception as exc:
+        LOGGER.exception('Character assembly stopped job=%s', job_id)
+        error = (exc.message if isinstance(exc, PipelineError) else
+                 f'파츠 조립 중단 ({type(exc).__name__}) · 생성한 파츠와 몸·동작은 보존했습니다.')
     record = read_json(directory / 'job.json')
     record['error'] = error
     _write_json(directory / 'job.json', record)

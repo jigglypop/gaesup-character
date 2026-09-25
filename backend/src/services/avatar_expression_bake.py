@@ -138,6 +138,17 @@ def _wrap(value, mode):
     return value % 1.0
 
 
+def _wrap_triangle(uv, wrap_s, wrap_t):
+    """Wrap a triangle as one piece: a vertex exactly on the 1.0 edge (the chin of a
+    projected face) must stay beside its neighbours instead of jumping to 0.0."""
+    def axis(values, mode):
+        if mode == 10497:  # REPEAT
+            shift = math.floor(min(values) + 1e-9)
+            return [value - shift for value in values]
+        return [_wrap(value, mode) for value in values]
+    return list(zip(axis([point[0] for point in uv], wrap_s), axis([point[1] for point in uv], wrap_t)))
+
+
 @dataclass
 class _Triangle:
     material: int
@@ -242,8 +253,7 @@ def _paint(atlas, face, triangles, wrap_s, wrap_t):
     # UV overlap is safe only when it addresses the same projected face point.
     owners = {}
     for triangle in triangles:
-        uv = [(_wrap(point[0], wrap_s) * atlas.width,
-               _wrap(point[1], wrap_t) * atlas.height) for point in triangle.uv]
+        uv = [(u * atlas.width, v * atlas.height) for u, v in _wrap_triangle(triangle.uv, wrap_s, wrap_t)]
         area = ((uv[1][0] - uv[0][0]) * (uv[2][1] - uv[0][1])
                 - (uv[2][0] - uv[0][0]) * (uv[1][1] - uv[0][1]))
         if abs(area) < 1e-8:

@@ -41,7 +41,7 @@ def _material_signature(material):
             tuple(material.diffuse_color), node_value(outputs[0]))
 
 
-def prepare_materials(meshes, slot):
+def prepare_materials(meshes, slot, *, preserve_appearance=False):
     originals, canonical = {}, {}
     before = {material for obj in meshes for material in obj.data.materials if material}
     for obj in meshes:
@@ -52,7 +52,7 @@ def prepare_materials(meshes, slot):
                 continue
             if original not in originals:
                 material = original.copy()
-                if material.use_nodes and slot in MATTE_ROUGHNESS:
+                if not preserve_appearance and material.use_nodes and slot in MATTE_ROUGHNESS:
                     for node in material.node_tree.nodes:
                         if node.type == 'BSDF_PRINCIPLED':
                             roughness = node.inputs.get('Roughness')
@@ -78,7 +78,7 @@ def prepare_materials(meshes, slot):
                 face.material_index = index
     after = {material for obj in meshes for material in obj.data.materials if material}
     return {'source_materials': len(before), 'runtime_materials': len(after),
-            'shader_profile': 'matte-pbr' if slot in MATTE_ROUGHNESS else 'source-pbr'}
+            'shader_profile': 'matte-pbr' if not preserve_appearance and slot in MATTE_ROUGHNESS else 'source-pbr'}
 
 
 def consolidate_part(meshes):
@@ -93,22 +93,25 @@ def consolidate_part(meshes):
     meshes[:] = [bpy.context.view_layer.objects.active]
 
 
-def optimize_part(meshes, slot):
+def optimize_part(meshes, slot, *, target_triangles=None, texture_max_edge=None, preserve_appearance=False, merge=True):
     def triangles(obj):
         return sum(max(0, len(p.vertices)-2) for p in obj.data.polygons)
     before = sum(triangles(obj) for obj in meshes)
     source_objects = len(meshes)
-    material_report = prepare_materials(meshes, slot)
-    if slot != 'body':
+    material_report = prepare_materials(meshes, slot, preserve_appearance=preserve_appearance)
+    if slot != 'body' and merge:
         consolidate_part(meshes)
-    target = PART_TRIANGLES.get(slot, 2000)
-    texture_edge = TEXTURE_EDGES.get(slot, 512)
+    target = max(100, int(target_triangles if target_triangles is not None else PART_TRIANGLES.get(slot, 2000)))
+    texture_edge = int(texture_max_edge if texture_max_edge is not None else TEXTURE_EDGES.get(slot, 512))
     texture_count = 0
     resized = {}
+    skipped = []
     # Each object receives its share of the slot budget. Simplify BEFORE skin
     # transfer, so new vertices receive weights on the exact final geometry.
     for obj in meshes:
         count = triangles(obj)
+        if before > target and obj.data.shape_keys:
+            skipped.append({'object': obj.name, 'reason': 'shape_keys_preserved', 'triangles': count})
         if before > target and count > 12 and not obj.data.shape_keys:
             # GLB often duplicates vertices at UV/normal seams. Collapsing these
             # disconnected triangles independently tears the surface. Weld only
@@ -148,4 +151,4 @@ def optimize_part(meshes, slot):
     return {'source_triangles': before, 'runtime_triangles': after, 'target_triangles': target,
             'source_objects': source_objects, 'runtime_objects': len(meshes), **material_report,
             'texture_max_edge': texture_edge, 'resized_textures': texture_count,
-            'budget_met': after <= target, 'source_files_preserved': True}
+            'budget_met': after <= target, 'source_files_preserved': True, 'skipped': skipped}

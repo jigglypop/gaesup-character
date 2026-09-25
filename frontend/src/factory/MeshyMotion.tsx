@@ -10,7 +10,7 @@ const allSlots = Object.keys(motionLabels);
 
 export function MeshyMotion({ jobId, visibleSlots = allSlots, showRigRecovery = true, onRigRecovery }: { jobId: string; visibleSlots?: string[]; showRigRecovery?: boolean; onRigRecovery?: () => void }) {
   const read = useCallback((signal:AbortSignal) => factoryApi.meshy(jobId,signal),[jobId]);
-  const polling = usePolling<MeshyState>(read,2500), state = polling.value, setState = polling.setValue;
+  const polling = usePolling<MeshyState>(read, value => value?.busy ? 2500 : 15000), state = polling.value, setState = polling.setValue;
   const [library, setLibrary] = useState<MeshyAction[]>([]);
   const [defaults, setDefaults] = useState<Record<string, number>>({}), [slot, setSlot] = useState(visibleSlots[0] || 'walk');
   const [actionId, setActionId] = useState<number>(), [search, setSearch] = useState(''), [category, setCategory] = useState('');

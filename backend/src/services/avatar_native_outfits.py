@@ -18,8 +18,10 @@ class AvatarNativeOutfits:
         root = self.native.root(owner, job) / version
         record = read_json(root / 'record.json')
         if record.get('status') != 'review_required':
-            raise PipelineError('assembly_not_ready', '검사된 조립 파츠가 필요합니다.', 409)
-        slots = [p['slot'] for p in record['result']['parts'] if p['slot'] != 'body']
+            raise PipelineError('assembly_not_ready', '저장된 조립 파츠가 필요합니다.', 409)
+        slots = [p['slot'] for p in record['result']['parts']
+                 if p['slot'] != 'body' and p.get('available', True)
+                 and f'{p["slot"]}.glb' in record['files']]
         return root, record['files']['body.glb'], slots
 
     def get(self, owner, job, version):

@@ -1,7 +1,51 @@
-"""Public Meshy failures derived from saved receipts, without provider requests."""
-from src.services.character_pipeline import read_json
+"""Public Meshy failures derived from saved receipts, and the account's remaining credits."""
+import os
+from threading import Lock
+import time
 
-BLOCKED = ('submission_uncertain', 'submission_rejected', 'FAILED', 'CANCELED')
+import httpx
+
+from src.services.character_pipeline import PipelineError, read_json
+
+_BALANCE = {'value': None, 'at': 0.0}
+_BALANCE_LOCK = Lock()
+# consumed_credits observed for one textured multi-image part and for one rig task.
+PART_CREDITS = 30
+RIG_CREDITS = 5
+
+
+def require_credits(parts, *, rig=False):
+    """Refuse new Meshy work the account cannot cover, before any image for it is paid for."""
+    need = parts*PART_CREDITS + (RIG_CREDITS if rig else 0)
+    if need <= 0:
+        return
+    balance = meshy_balance(refresh=True)
+    if balance is not None and balance < need:
+        raise PipelineError('insufficient_credits',
+                            f'Meshy 크레딧 부족 · 필요 약 {need} · 잔여 {balance:g} · 충전 후 다시 실행하세요.', 422)
+
+
+def meshy_balance(*, refresh=False):
+    """Remaining Meshy credits from a read-only request, cached for a minute; None when unknown."""
+    with _BALANCE_LOCK:
+        if not refresh and time.monotonic() - _BALANCE['at'] < 60:
+            return _BALANCE['value']
+        value = None
+        key = os.getenv('MESHY_API_KEY', '').strip()
+        if key:
+            try:
+                with httpx.Client(base_url=os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/'),
+                                  headers={'Authorization': 'Bearer '+key}, timeout=5) as client:
+                    response = client.get('/openapi/v1/balance')
+                if response.status_code == 200:
+                    value = response.json().get('balance')
+            except (httpx.HTTPError, ValueError):
+                value = None
+        _BALANCE.update(value=value if isinstance(value, (int, float)) else None, at=time.monotonic())
+        return _BALANCE['value']
+
+
+BLOCKED =('submission_uncertain', 'submission_rejected', 'submission_not_sent', 'FAILED', 'CANCELED')
 
 
 def task_problem(task, stage):
@@ -29,8 +73,10 @@ def task_problem(task, stage):
         else:
             message = f'Meshy가 {label} 요청을 거절했습니다{suffix}. 요청 입력을 확인해 주세요.'
         message += ' 저장된 이미지와 3D 파일은 유지됩니다.'
+    elif status == 'submission_not_sent':
+        message = f'Meshy 연결 실패로 {label} 요청이 전송되지 않았습니다. 다시 실행할 수 있습니다.'
     elif status == 'submission_uncertain':
-        message = f'Meshy {label} 요청의 접수 여부를 확인하지 못했습니다. 기존 요청의 작업 ID를 확인해야 합니다.'
+        message = f'Meshy {label} 요청의 접수 여부를 확인하지 못했습니다.'
     elif status == 'FAILED':
         message = f'Meshy {label} 작업이 실패했습니다. 저장된 이미지와 3D 파일은 유지됩니다.'
     else:

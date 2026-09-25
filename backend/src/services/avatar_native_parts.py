@@ -18,7 +18,7 @@ from src.services.avatar_production_spec import production_spec, refresh_fitting
 from src.services.avatar_equipment import is_native_part_set
 
 SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes')
-RECIPE = 'native-parts-v13-expression-uv-bake'
+RECIPE = 'native-parts-v14-matte-limb-fit'
 
 
 class AvatarNativeParts:
@@ -36,6 +36,8 @@ class AvatarNativeParts:
             return {'status': 'not_started', 'parts': [], 'artifacts': []}
         version = pointer['version']; directory = root/version
         record = read_json(directory/'record.json')
+        if not record:
+            raise PipelineError('not_found', '조립 버전을 찾을 수 없습니다.', 404)
         status = record['status']
         if status in ('accepted', 'running') and process_state(record.get('process')) == 'exited':
             status = 'recovery_required'
@@ -47,12 +49,16 @@ class AvatarNativeParts:
         expression_contract = pipeline.get('expression_reuse') or {}
         frozen_expressions = expression_contract.get('expressions') or []
         expression_run = read_json(job_directory/'expression-reuse.json') or {}
-        expression_pending = bool(local_refit and local_refit.get('target_version', version) == version
+        expression_version = (local_refit.get('target_version', version) if local_refit
+                              else pipeline.get('native_assembly_version'))
+        expression_pending = bool(expression_version == version
             and frozen_expressions and not (
             expression_run.get('target_version') == version
             and expression_run.get('status') == 'complete'
-            and expression_run.get('expressions')))
+            and all(item['source_id'] in (expression_run.get('expressions') or {})
+                    for item in frozen_expressions)))
         state = {'version': version, 'status': status, 'error': error,
+                'error_stage': record.get('error_stage'), 'error_type': record.get('error_type'),
                 **record.get('result', {}),
                 'expression_pending': expression_pending,
                 'refit_request_key': (local_refit.get('request_key')
@@ -80,12 +86,19 @@ class AvatarNativeParts:
                             for name, value in source_record.get('files', {}).items()]}
         return state
 
-    def start_refit(self, owner, job, source_version, slot, request_key, *, fit_profile=None):
-        """Freeze every other fitted slot, then refit only one saved raw part."""
-        with _LOCK:
-            return self._start_refit_locked(owner, job, source_version, slot, request_key, fit_profile=fit_profile)
+    def start_refit(self, owner, job, source_version, slot, request_key, *, fit_profile=None, part_method=None, shape=None):
+        """Freeze every other fitted slot, then refit only one saved raw part.
 
-    def _start_refit_locked(self, owner, job, source_version, slot, request_key, *, fit_profile=None):
+        part_method='body_shell' rebuilds a top or bottom from the frozen body and its
+        saved views, with no provider request; 'isolated' refits the saved model.
+        shape {'sleeve', 'hem', 'fit'} (body-shell top/bottom) replaces the saved shape;
+        {} returns to the drawing; None keeps the saved shape.
+        """
+        with _LOCK:
+            return self._start_refit_locked(owner, job, source_version, slot, request_key,
+                                            fit_profile=fit_profile, part_method=part_method, shape=shape)
+
+    def _start_refit_locked(self, owner, job, source_version, slot, request_key, *, fit_profile=None, part_method=None, shape=None):
         if not re.fullmatch(r'[a-f0-9]{24}', source_version):
             raise PipelineError('not_found', '기준 조립 버전을 찾을 수 없습니다.', 404)
         if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', request_key):
@@ -95,6 +108,14 @@ class AvatarNativeParts:
         submitted = {'source_version': source_version, 'slot': slot}
         if fit_profile is not None:
             submitted['fit_profile'] = fit_profile
+        if part_method is not None:
+            if part_method not in ('isolated', 'body_shell') or (part_method == 'body_shell' and slot not in ('top', 'bottom')):
+                raise PipelineError('invalid_part_method', '몸 셸 재피팅은 상의와 하의에만 사용할 수 있습니다.', 422)
+            submitted['part_method'] = part_method
+        if shape is not None:
+            if slot not in ('top', 'bottom') or (slot == 'bottom' and shape.get('sleeve') is not None):
+                raise PipelineError('invalid_shape', '소매는 상의에만, 밑단과 품은 상의·하의에만 쓸 수 있습니다.', 422)
+            submitted['shape'] = shape
         fingerprint = hashlib.sha256(json.dumps(submitted, sort_keys=True).encode()).hexdigest()
         receipt_path = directory/'native-parts'/'refit-requests'/f'{hashlib.sha256(request_key.encode()).hexdigest()}.json'
         receipt = read_json(receipt_path)
@@ -130,8 +151,18 @@ class AvatarNativeParts:
         if fit_profile is not None and slot not in ('top', 'bottom'):
             raise PipelineError('invalid_fit_profile', '상의와 하의에만 의상 피팅을 적용할 수 있습니다.', 422)
         selected_part = next(part for part in pipeline['parts'] if part['slot'] == slot)
+        if part_method is not None:
+            if part_method == 'isolated' and not self.factory.directory(owner, job).joinpath('output', f'generated-{slot}.glb').is_file():
+                raise PipelineError('part_model_missing', '이 파츠에는 저장된 3D 모델이 없어 기존 피팅을 사용할 수 없습니다.', 409)
+            if part_method == 'body_shell' and not (selected_part.get('views') or {}).get('front', {}).get('file'):
+                raise PipelineError('part_images_missing', '몸 셸 재피팅에는 저장된 정면 이미지가 필요합니다.', 409)
+            selected_part['part_method'] = part_method
+        if shape is not None:
+            if selected_part.get('part_method') != 'body_shell':
+                raise PipelineError('shape_requires_body_shell', '모양은 몸에 맞춰 만든 상의·하의만 바꿀 수 있습니다.', 422)
+            selected_part['shape'] = shape or None
         selected_profile = None
-        if slot in ('top', 'bottom'):
+        if slot in ('top', 'bottom') and selected_part.get('part_method') != 'body_shell':
             from src.services.avatar_fit_profiles import normalize_fit_profile
             saved_profile = (reports.get(slot, {}).get('fit_profile')
                              or reports.get(slot, {}).get('measurement', {}).get('fit_profile')
@@ -159,6 +190,9 @@ class AvatarNativeParts:
         frozen = {}
         for existing in slots:
             if existing == slot:
+                continue
+            if reports.get(existing, {}).get('available') is False:
+                frozen[existing] = {'available': False, 'report': reports[existing]}
                 continue
             name = f'{existing}.glb'
             expected = record.get('files', {}).get(name)
@@ -217,7 +251,7 @@ class AvatarNativeParts:
     def execute_refit(self, owner, job):
         self.execute(owner, job)
         state = self.get(owner, job)
-        if state.get('status') != 'review_required' or state.get('incomplete_parts'):
+        if state.get('status') != 'review_required':
             return state
         from src.services.avatar_expression_reuse import reuse_saved_expressions
         reuse_saved_expressions(self.factory, owner, job, state['version'])
@@ -249,13 +283,16 @@ class AvatarNativeParts:
         source_slots = tuple(part['slot'] for part in pipeline.get('parts', []) if part['slot'] != 'body')
         if not is_native_part_set(('body', *source_slots)):
             raise PipelineError('parts_required', '저장된 캐릭터 파츠 구성을 확인하세요.', 422)
-        parts, prefit_parts = [], []
+        parts, prefit_parts, unavailable_parts = [], [], []
         garment_kinds = {part['slot']: part.get('garment_kind', 'source') for part in pipeline['parts']}
         part_inputs = {part['slot']: part for part in pipeline['parts']}
         native_reuse = pipeline.get('native_part_reuse', {}).get('parts', {})
         for slot in source_slots:
             frozen = native_reuse.get(slot)
             if frozen:
+                if frozen.get('available') is False:
+                    unavailable_parts.append(deepcopy(frozen['report']))
+                    continue
                 path = self.factory.directory(owner, job)/'prefit-parts'/frozen['file']
                 if digest(path) != frozen['sha256']:
                     raise PipelineError('fitted_part_changed', f'고정한 {slot} 피팅 파츠가 변경되었습니다.', 409)
@@ -264,20 +301,49 @@ class AvatarNativeParts:
                                      'fit_profile': part_inputs[slot].get('fit_profile'),
                                      'garment_kind': garment_kinds[slot]})
                 continue
+            method = part_inputs[slot].get('part_method', 'isolated')
+            if method == 'body_shell':
+                # No provider model: the frozen body and the registered views are the inputs.
+                images, hashes = {}, {}
+                for view, image in part_inputs[slot].get('views', {}).items():
+                    name = image.get('file')
+                    if view in ('front', 'side', 'back', 'opposite') and name and Path(name).name == name:
+                        image_path = job_directory/'output'/name
+                        if image_path.is_file() and digest(image_path) == image.get('sha256'):
+                            images[view] = str(image_path); hashes[view] = image['sha256']
+                if 'front' not in images:
+                    raise PipelineError('part_images_missing', f'{slot}: 몸 셸 의상에는 저장된 정면 이미지가 필요합니다.', 409)
+                shape = part_inputs[slot].get('shape')
+                identity = {'views': hashes, 'shape': shape} if shape else hashes
+                identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+                parts.append({'slot': slot, 'part_method': 'body_shell', 'path': None, 'sha256': identity_hash,
+                              'garment_kind': (part_inputs[slot].get('fit_profile') or {}).get('kind') or garment_kinds[slot],
+                              'fit_profile': part_inputs[slot].get('fit_profile'), 'shape': shape,
+                              'image_paths': images, 'image_sha256': hashes})
+                continue
             path = self.factory.artifact(owner, job, f'generated-{slot}.glb')
-            entry = {'slot': slot, 'path': str(path), 'sha256': digest(path),
+            entry = {'slot': slot, 'path': str(path), 'sha256': digest(path), 'part_method': method,
                      'garment_kind': garment_kinds[slot], 'fit_profile': part_inputs[slot].get('fit_profile')}
-            if entry['fit_profile']:
+            if method == 'worn':
+                from src.services.avatar_part_methods import KEY_COLORS
+                entry['key_rgb'] = list(KEY_COLORS[part_inputs[slot].get('key_color') or 'magenta'])
+            if slot in ('hair', 'hat') and part_inputs[slot].get('target_bounds_m'):
+                views = part_inputs[slot].get('views', {})
+                measured_views = [views.get(view, {}) for view in ('front', 'side')]
+                if all(view.get('origin') != 'uploaded_part'
+                       and (view.get('measurement') or {}).get('bounds_px') for view in measured_views):
+                    entry['reference_bounds_m'] = deepcopy(part_inputs[slot]['target_bounds_m'])
+            if entry['fit_profile'] or slot == 'hair':
                 images = {}
                 for view, image in part_inputs[slot].get('views', {}).items():
                     name = image.get('file')
-                    if view in ('front', 'side', 'back') and name and Path(name).name == name:
+                    if view in ('front', 'side', 'back', 'opposite') and name and Path(name).name == name:
                         image_path = job_directory/'output'/name
                         if image_path.is_file() and digest(image_path) == image.get('sha256'):
                             images[view] = str(image_path)
                 entry['image_paths'] = images
                 entry['image_sha256'] = {view: digest(Path(image_path)) for view, image_path in images.items()}
-                if local_refit:
+                if local_refit and entry['fit_profile']:
                     fallback = job_directory/'native-parts'/local_refit['source_version']/f'{slot}.glb'
                     fallback_sha = source_record.get('files', {}).get(f'{slot}.glb')
                     if fallback_sha and digest(fallback) == fallback_sha:
@@ -288,9 +354,10 @@ class AvatarNativeParts:
             parts.append(entry)
         contract = {'recipe': RECIPE, 'worker_sha256': digest(Path(__file__).with_name('avatar_native_parts_blender.py')),
                     'canonical_pose': canonical_pose,
-                    'binding_worker_sha256': digest(Path(__file__).with_name('avatar_standard_blender.py')),
+                    'binding_worker_sha256': digest(Path(__file__).with_name('avatar_blender_common.py')),
                     'body_layers_sha256': digest(Path(__file__).with_name('avatar_body_layers.py')),
                     'head_geometry_sha256': digest(Path(__file__).with_name('avatar_head_geometry.py')),
+                    'hair_geometry_sha256': digest(Path(__file__).with_name('avatar_hair_geometry.py')),
                     'shoe_geometry_sha256': digest(Path(__file__).with_name('avatar_shoe_geometry.py')),
                     'arm_geometry_sha256': digest(Path(__file__).with_name('avatar_arm_geometry.py')),
                     'render_budget_sha256': digest(Path(__file__).with_name('avatar_render_budget.py')),
@@ -298,11 +365,16 @@ class AvatarNativeParts:
                     'expression_bake_sha256': digest(Path(__file__).with_name('avatar_expression_bake.py')),
                     'expression_uv_sha256': digest(Path(__file__).with_name('avatar_expression_uv_blender.py')),
                     'garment_kinds': garment_kinds,
+                    'part_methods': {p['slot']: p.get('part_method', 'isolated') for p in parts},
+                    'shell_worker_sha256': digest(Path(__file__).with_name('avatar_shell_garment.py')),
+                    'worn_worker_sha256': digest(Path(__file__).with_name('avatar_worn_part.py')),
                     'fit_profiles': {p['slot']: p.get('fit_profile') for p in parts if p.get('fit_profile')},
                     'preserve_generated_detail': [p['slot'] for p in parts if p.get('preserve_generated_detail')],
-                    'fit_images': {p['slot']: p.get('image_sha256', {}) for p in parts if p.get('fit_profile')},
+                    'fit_images': {p['slot']: p.get('image_sha256', {}) for p in parts if p.get('image_paths')},
+                    'head_part_reference_bounds': {p['slot']: p['reference_bounds_m'] for p in parts if p.get('reference_bounds_m')},
                     'body': digest(body), 'parts': [(p['slot'], p['sha256']) for p in parts],
-                    'prefit_parts': [(p['slot'], p['sha256']) for p in prefit_parts]}
+                    'prefit_parts': [(p['slot'], p['sha256']) for p in prefit_parts],
+                    'unavailable_parts': unavailable_parts}
         pipeline = read_json(self.factory.directory(owner, job)/'pipeline.json')
         # Generation keeps its accepted sizing. An explicit refit freezes the
         # current fitting rules separately before dispatching its worker.
@@ -341,7 +413,8 @@ class AvatarNativeParts:
                 raise PipelineError('worker_running', '기존 Blender 작업이 아직 실행 중입니다.', 409)
             directory.mkdir(parents=True, exist_ok=True)
             _write_json(directory/'input.json', {'source': str(body), 'source_sha256': digest(body),
-                        'parts': parts, 'prefit_parts': prefit_parts, 'output': str(directory), 'contract': contract,
+                        'parts': parts, 'prefit_parts': prefit_parts, 'unavailable_parts': unavailable_parts,
+                        'output': str(directory), 'contract': contract,
                         'production_spec': fit_spec, 'source_measurements': measurements,
                         'base_version': previous.get('version') if previous else None,
                         'canonical_pose': canonical_pose})
@@ -364,15 +437,15 @@ class AvatarNativeParts:
         payload = read_json(directory/'input.json')
         # Reassembly needs the saved input GLBs and this output version, not every
         # prior render, provider response, and .blend in the job's history.
-        inputs = [payload['source'], *(part['path'] for part in payload['parts']),
+        inputs = [payload['source'], *(part['path'] for part in payload['parts'] if part.get('path')),
                   *(part['path'] for part in payload.get('prefit_parts', [])),
                   *(path for part in payload['parts'] for path in part.get('image_paths', {}).values()),
                   *(part['fallback_path'] for part in payload['parts'] if part.get('fallback_path'))]
         with local_workspace(directory, inputs=inputs):
-            return self._execute_local(owner, job)
+            return self._execute_local(owner, job, version)
 
-    def _execute_local(self, owner, job):
-        root = self.root(owner, job); version = read_json(root/'current.json')['version']
+    def _execute_local(self, owner, job, version):
+        root = self.root(owner, job)
         directory = root/version
         with _QUEUE:
             record = read_json(directory/'record.json')
@@ -381,6 +454,7 @@ class AvatarNativeParts:
             record.update(status='running', process=identity())
             _write_json(directory/'record.json', record)
             publish_checkpoint(directory/'record.json')
+            phase = 'blender'
             try:
                 command = [blender_executable(), '--background', '--factory-startup', '--disable-autoexec',
                            '--python-exit-code', '1', '--python', str(Path(__file__).with_name('avatar_native_parts_blender.py')),
@@ -399,13 +473,24 @@ class AvatarNativeParts:
                         raise
                 if code:
                     raise ValueError('Blender fitting failed')
+                phase = 'artifacts'
                 seal = read_json(directory/'complete.json')
                 if seal.get('input_sha256') != digest(directory/'input.json'):
                     raise ValueError('Unsealed output')
                 payload = read_json(directory/'input.json')
-                required = {'model.glb', 'master.blend', 'front.png', 'side.png', 'back.png', 'motion.png',
-                            'body.glb', *(f'{p["slot"]}.glb' for p in payload['parts']),
-                            *(f'{p["slot"]}.glb' for p in payload.get('prefit_parts', []))}
+                result = seal.get('result', {})
+                reported = {p['slot']: p for p in result.get('parts', [])}
+                requested = {'body', *(p['slot'] for p in payload['parts']),
+                             *(p['slot'] for p in payload.get('prefit_parts', [])),
+                             *(p['slot'] for p in payload.get('unavailable_parts', []))}
+                if not requested <= reported.keys():
+                    raise ValueError('Missing part receipts')
+                incomplete = {p['slot'] for p in result.get('incomplete_parts', [])}
+                unavailable = {slot for slot in requested if reported[slot].get('available') is False}
+                if 'body' in unavailable or not unavailable <= incomplete:
+                    raise ValueError('Missing incomplete part receipts')
+                required = {'model.glb', 'front.png', 'side.png', 'back.png', 'motion.png',
+                            *(f'{slot}.glb' for slot in requested-unavailable)}
                 production = payload.get('production_spec')
                 if production:
                     required.add('opposite.png')
@@ -414,9 +499,11 @@ class AvatarNativeParts:
                 for name, expected in seal['files'].items():
                     if Path(name).name != name or digest(directory/name) != expected:
                         raise ValueError('Output changed')
-                record.update(status='review_required', files=seal['files'], result=seal['result'], error=None)
+                record.update(status='review_required', files=seal['files'], result=result,
+                              error=None, error_type=None, error_stage=None)
             except Exception as exc:
-                record.update(status='failed', error='파츠 조립 중단', error_type=type(exc).__name__,
+                record.update(status='failed', error='Blender 조립 중단' if phase == 'blender' else '조립 산출물 저장 확인 중단',
+                    error_type=type(exc).__name__, error_stage=phase,
                     files={name: digest(directory/name) for name in ('front.png', 'side.png', 'back.png', 'opposite.png') if (directory/name).is_file()},
                     result={})
             _write_json(directory/'record.json', record)

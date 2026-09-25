@@ -9,7 +9,7 @@ export function isCatalogJobDeleted(job: FactoryJob, catalog?: Catalog) {
   return !!(catalog?.items[job.id]?.deleted || catalog?.characters?.[job.character_id || job.id]?.deleted);
 }
 export type VariantInput = { base_job_id: string; base_version: string; slots: string[]; hair_length: 'source' | 'short' | 'long'; bottom_kind?: 'source' | 'pants' | 'skirt'; descriptions: Record<string, string>; meshy_options?: MeshyOptions };
-export type SinglePartInput = { base_job_id: string; base_version: string; slot: string; hair_length: 'source' | 'short' | 'long'; bottom_kind: 'source' | 'pants' | 'skirt'; view_mode?: 'front_side' | 'front_side_back'; fit_profile?: FitProfile; meshy_options?: MeshyOptions };
+export type SinglePartInput = { base_job_id: string; base_version: string; slot: string; hair_length: 'source' | 'short' | 'long'; bottom_kind: 'source' | 'pants' | 'skirt'; view_mode?: 'front_side' | 'front_side_back'; fit_profile?: FitProfile; meshy_options?: MeshyOptions; part_method?: 'isolated' | 'body_shell' | 'worn'; model_provider?: 'meshy' | 'tripo' };
 export type Tile = { id: string; surface: string; size: number; seed: number; gpu: { estimated_bytes_with_mips: number }; artifacts: { name: string; url: string }[] };
 export type Animal = {id:string;name:string;species:'dog'|'cat'|'dragon';status:string;error?:string;bones?:number;artifacts:{name:string;url:string}[]};
 export type HeadPartAsset = { name: string; sha256: string; url: string };

@@ -48,6 +48,8 @@ def _write_json(path: Path, value: dict) -> None:
         _retry_file_io(lambda: temporary.replace(path))
     finally:
         _retry_file_io(lambda: temporary.unlink(missing_ok=True))
+    from src.services.object_storage import mark_changed
+    mark_changed(path)
 
 
 class AssetEditor:

@@ -14,6 +14,7 @@ from src.services.asset_editor import _write_json
 from src.services.asset_delivery import inspect_glb
 from src.services.wardrobe import _digest, download_glb
 from src.services.meshy_status import BLOCKED
+from src.services.runtime_activity import paid_request
 
 DEFAULT_ACTIONS = {"idle": 0, "walk": 1, "run": 14, "jump": 466, "fall": 502}
 ENDPOINTS = {"rig": "/openapi/v1/rigging", "animation": "/openapi/v1/animations"}
@@ -50,8 +51,14 @@ def _task(run, pack, slot, endpoint, payload, client):
         tasks[slot] = value
         pack["submitted_tasks"] += 1
         _save(run, pack)  # durable intent before every possibly paid POST
-        response = client.post(endpoint, json=payload)
-        if response.status_code in {400, 401, 402, 403, 404, 422, 429}:
+        try:
+            with paid_request():
+                response = client.post(endpoint, json=payload)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+            value.update(status="submission_not_sent")
+            _save(run, pack)
+            raise
+        if response.status_code in character_jobs.NOT_ACCEPTED:
             value.update(status="submission_rejected", http_status=response.status_code)
             _save(run, pack)
         character_jobs.save_submission_response(run, slot, response)

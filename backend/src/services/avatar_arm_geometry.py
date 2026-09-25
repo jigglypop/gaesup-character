@@ -2,7 +2,7 @@
 import bpy
 from mathutils import Matrix, Vector
 
-from src.services.avatar_standard_blender import bounds, blender_to_gltf
+from src.services.avatar_blender_common import bounds, blender_to_gltf
 
 
 def fit_sleeves(meshes, rig, spec):

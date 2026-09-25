@@ -16,15 +16,11 @@ if __name__ == "__main__":
         fixture_root = os.getenv('WORKSPACE_TEST_FACTORY_ROOT')
         if fixture_root:
             shutil.copytree(Path(fixture_root)/'avatar-factory', Path(directory)/'avatar-factory')
-        standard_root = os.getenv('WORKSPACE_TEST_STANDARD_ROOT')
-        if standard_root:
-            shutil.copytree(Path(standard_root)/'avatar-standard', Path(directory)/'avatar-standard')
         os.environ.update(ASSET_DATA_ROOT=directory, API_KEY="", MESHY_API_KEY="", GEMINI_API_KEY="", OPENAI_API_KEY="",
                           JWT_SECRET_KEY="", BLENDER_PORT="62129", CHARACTER_OWNER_ID="1", CHARACTER_DATABASE_URL="")
         from src.api.characters import router, pipeline_error_handler
         from src.api.avatars import router as avatar_router
         from src.api.avatar_factory import router as factory_router
-        from src.api.avatar_standard import router as standard_router
         from src.api.avatar_blueprints import router as blueprint_router
         from src.services.character_pipeline import CharacterPipeline, PipelineError
 
@@ -32,7 +28,6 @@ if __name__ == "__main__":
         app.include_router(router, prefix="/api")
         app.include_router(avatar_router, prefix="/api")
         app.include_router(factory_router, prefix="/api")
-        app.include_router(standard_router, prefix="/api")
         app.include_router(blueprint_router, prefix="/api")
         app.add_exception_handler(PipelineError, pipeline_error_handler)
 
@@ -67,14 +62,6 @@ if __name__ == "__main__":
                 path = run/(name+'.glb'); path.write_bytes(animated_fixture()); receipt[name] = {'sha256': digest(path)}
             _write_json(run/'rigging-artifacts.json', receipt)
             AvatarMeshy(factory)._publish(run)
-            from src.services.avatar_standard import AvatarStandard
-            standard = AvatarStandard(Path(directory)); sid = 'd'*24
-            candidate = standard.directory(1, sid); candidate.mkdir(parents=True)
-            (candidate/'model.glb').write_bytes(animated_fixture())
-            _write_json(candidate/'record.json', {'id': sid, 'kind': 'base', 'name': 'Unreviewed Meshy Fixture',
-                'created_at': '2026-09-17T00:00:00+00:00', 'status': 'review_required', 'contract': {'height_m': 1.2},
-                'model_sha256': digest(candidate/'model.glb'), 'files': {'model.glb': digest(candidate/'model.glb')},
-                'result': {'bones': ['root'], 'height_m': 1.2}, 'review': {'decision': 'pending'}})
             _write_json(factory.root/'1/meshy-library.json', {'fetched_at': time.time(), 'items': [
                 {'action_id': n, 'name': label, 'key': label, 'category': category, 'sub_category': category}
                 for n, label, category in [(0, 'Idle Fixture', 'DailyActions'), (14, 'Run Fixture', 'WalkAndRun'), (77, 'Walk Fixture', 'WalkAndRun')]]})

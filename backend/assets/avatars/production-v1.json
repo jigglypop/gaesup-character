@@ -1,11 +1,17 @@
 {
   "id": "sd-factory-v1",
-  "revision": 18,
+  "revision": 22,
   "rest_pose": "T",
   "units": "metres",
   "axes": {"right": "+X", "up": "+Y", "front": "+Z", "anatomical_left": "+X"},
   "origin": "floor_between_feet",
   "body_height_m": 1.2,
+  "runtime": {
+    "revision": "part-derivatives-v1",
+    "part_triangles": {"body": 24000, "hair": 40000, "hairFront": 20000, "hairBack": 24000, "hat": 8000, "top": 18000, "bottom": 12000, "shoes": 8000, "weapon": 8000, "tool": 6000, "glasses": 3000},
+    "texture_max_edge": 2048,
+    "source_files_preserved": true
+  },
   "base_body": {
     "face": "blank smooth egg-shaped head; no eyes, nose, mouth, ears or facial relief",
     "torso_width_m": 0.22, "torso_depth_m": 0.13,
@@ -41,8 +47,12 @@
     "shoes": [[-0.22, -0.012, -0.13], [0.22, 0.15, 0.23]]
   },
   "fitting": {
-    "revision": "shared-size-v20-measured-hair-scalp",
-    "hair_surface_fit": "measured-skull-v1",
+    "revision": "uniform-parts-v1-slot",
+    "part_fit": "uniform-slot-v1",
+    "hair_surface_fit": "cavity-reference-v4",
+    "hair_rear_surface": "reference-silhouette-v4",
+    "hair_backing_grid": [65, 65],
+    "hair_cavity_scale_limit": 1.25,
     "hair_length_profiles": {"source": null, "short": 1.0, "long": 1.7},
     "method": "shared_size_with_body_cut_lines",
     "fit_to_body_surface": false,

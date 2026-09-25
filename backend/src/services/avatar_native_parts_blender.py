@@ -1,6 +1,7 @@
 """Local fitting candidates on the original Meshy skeleton; never a visual approval."""
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -9,24 +10,96 @@ import bpy
 from mathutils import Matrix, Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.services.avatar_standard_blender import (
+from src.services.avatar_blender_common import (
     load, skeleton, body_meshes, bounds, bind, export, sha,
-    camera_setup, render,
+    camera_setup, render, matte_materials, soft_lighting,
 )
 from src.services.glb import parse_glb
-from src.services.avatar_fit_geometry import measured_fit, normalize_body, body_targets, hair_target, headwear_target, clearance, place, slim_base_body, bind_body_head, fit_equipment
+from src.services.avatar_fit_geometry import measured_fit, normalize_body, body_targets, hair_target, headwear_target, head_region, clearance, place, slim_base_body, bind_body_head, fit_equipment
 from src.services.avatar_shoe_geometry import fit_shoes_rigid, bind_shoes_rigid, finish_shoes_after_pose
 from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT
 from src.services.avatar_body_layers import (
     mark_body_coverage, hide_covered_materials, restore_covered_materials, strip_covered_primitives,
 )
-from src.services.avatar_head_geometry import headwear_palette, prepare_rear_hair, fit_hat, hat_target_over_hair, fit_hair, fit_hair_length, fit_hair_scalp, head_preview_body, whiten_base_body, seat_legacy_hair_roots
+from src.services.avatar_head_geometry import headwear_palette, prepare_rear_hair, fit_hat, fit_reference_frame, hat_target_over_hair, fit_hair, fit_hair_length, fit_hair_scalp, fit_hair_scalp_bounded, head_preview_body, whiten_base_body, seat_legacy_hair_roots
+from src.services.avatar_hair_geometry import fit_hair_cavity, repair_hair_backing
 from src.services.avatar_arm_geometry import fit_sleeves, bind_top_regions, t_rest_pose
 from src.services.avatar_render_budget import optimize_part
 from src.services.avatar_expression_uv_blender import prepare_expression_uv
 from src.services.avatar_garment_geometry import (
     bind_garment_regions, fit_profiled_garment, measure_body_profile,
 )
+
+
+def build_body_shell_part(part, body, rig, spec):
+    """Garment from the frozen body surface and the registered canvas views."""
+    from src.services.avatar_shell_garment import build_shell_garment
+    for view, path in part.get('image_paths', {}).items():
+        if sha(path) != part.get('image_sha256', {}).get(view):
+            raise ValueError('Part reference image changed')
+    canvas = dict(spec['canvas'])
+    meshes, report, covered = build_shell_garment(body, rig, part['slot'], part['image_paths'], canvas,
+                                                  kind=part.get('garment_kind', 'source'), shape=part.get('shape'))
+    for obj in meshes:
+        obj['standard_slot'] = part['slot']
+    report.update(binding='copied_body_weights', fit_method='body-shell-v1', available=True,
+                  runtime_budget={'preserved': True, 'source_mesh_detail': True, 'shell_triangles': report.get('triangles')})
+    if part['slot'] == 'bottom':
+        report['garment_kind'] = part.get('garment_kind', 'source')
+    return meshes, report, covered
+
+
+def extract_worn_meshes(part, meshes, body, rig, spec):
+    """Provider model worn on the key mannequin: register, remove the body, bind like the slot.
+
+    Head parts follow the head bone, a skirt the pelvis; other garments take the
+    body's skin weights from the nearest surface so sleeves and legs deform. Before
+    that, sleeves are centred on the arms and every limb opening is measured.
+    """
+    from src.services.avatar_limb_fit import centre_limbs, check_limbs
+    from src.services.avatar_worn_part import extract_worn_part
+    extracted, report = extract_worn_part(meshes, body, rig, part['slot'], key_rgb=part.get('key_rgb'))
+    garment_kind = (part.get('fit_profile') or {}).get('kind') or part.get('garment_kind')
+    centring = centre_limbs(extracted, body, rig, part['slot'], garment_kind)
+    runtime_policy = spec.get('runtime') or {}
+    runtime_budget = {'preserved': True, 'source_mesh_detail': True, 'source_uv': True}
+    if runtime_policy:
+        target = runtime_policy['part_triangles'].get(part['slot'], 12000)
+        runtime_budget = optimize_part(extracted, part['slot'], target_triangles=max(100, target),
+            texture_max_edge=runtime_policy['texture_max_edge'], preserve_appearance=True, merge=True)
+        runtime_budget.update(target_triangles=target, revision=runtime_policy['revision'])
+    fitting = spec['fitting']
+    adjustment = clearance(extracted, body, fitting.get('scalp_clearance_m', .003),
+                           spec['tolerances'].get('max_surface_adjustment_m', .015))
+    slot = part['slot']
+    skirt = slot == 'bottom' and garment_kind == 'skirt'
+    # Measured on the final rest geometry; a failed check is reported, never a blocked assembly.
+    limb_fit = {'centring': centring, 'check': check_limbs(extracted, body, rig, slot, garment_kind)}
+    bone = next((b.name for b in rig.data.bones if b.name.lower().split(':')[-1] == 'head'), 'Head')
+    if skirt:
+        bone = next((b.name for b in rig.data.bones if b.name.lower().split(':')[-1] in ('hips', 'pelvis')), None)
+        if not bone:
+            raise ValueError('Missing pelvis for skirt attachment')
+    rigid = skirt or slot in ('hair', 'head', 'hairFront', 'hairBack', 'hat')
+    binding = bind(extracted, body, rig, {'anchors': [], 'max_anchor_error_m': .0001,
+                   'binding': 'rigid' if rigid else 'transfer', 'bone': bone, 'slot': slot,
+                   'max_transfer_distance_m': None}, transform=Matrix.Identity(4))
+    binding.update(measurement=report, runtime_budget=runtime_budget, clearance=adjustment,
+                   limb_fit=limb_fit, fit_method='worn-extract-v1', available=True)
+    return extracted, binding
+
+
+def mark_shell_coverage(body, slot, covered):
+    """Store which body vertices a shell garment covers, for the body-layer crop."""
+    for obj in body:
+        indices = covered.get(obj.name, set())
+        name = f'shell_cover_{slot}'
+        attribute = obj.data.attributes.get(name) or obj.data.attributes.new(name, 'FLOAT', 'POINT')
+        values = [0.]*len(obj.data.vertices)
+        for index in indices:
+            if index < len(values):
+                values[index] = 1.
+        attribute.data.foreach_set('value', values)
 
 
 def rig_signature(rig):
@@ -85,6 +158,82 @@ def load_prefit_part(part, rig):
     return meshes, report
 
 
+def fit_uniform_part(part, meshes, body, rig, spec, targets, imported):
+    """One uniform placement, bounded clearance and binding; no shape heuristics.
+
+    The part keeps its generated proportions and is placed in the measured body
+    slot box. Image-measured frames are not used: saved views drift far from the
+    shared canvas scale (e.g. a hat spanning the whole body height).
+    """
+    slot, fitting, tolerances = part['slot'], spec['fitting'], spec['tolerances']
+    runtime_policy = spec.get('runtime') or {}
+    runtime_budget = {'preserved': True, 'source_mesh_detail': True, 'source_uv': True}
+    # Meshy often leaves the rear of an isolated hairstyle open. As in the measured path,
+    # a backing that follows the accepted rear image closes it after seating.
+    backed_hair = (slot == 'hair' and fitting.get('hair_surface_fit') in ('cavity-reference-v3', 'cavity-reference-v4')
+                   and bool((part.get('image_paths') or {}).get('back')))
+    if runtime_policy:
+        target = runtime_policy['part_triangles'].get(slot, 12000)
+        grid = fitting.get('hair_backing_grid', [81, 97])
+        reserve = 2*(grid[0]-1)*(grid[1]-1) if backed_hair else 0
+        runtime_budget = optimize_part(meshes, slot, target_triangles=max(100, target-reserve),
+            texture_max_edge=runtime_policy['texture_max_edge'], preserve_appearance=True, merge=True)
+        runtime_budget.update(target_triangles=target, backing_reserved_triangles=reserve, revision=runtime_policy['revision'])
+    maximum = tolerances.get('max_surface_adjustment_m', .015)
+    if slot == 'hat':
+        target = targets[slot]
+        seat = None
+        if imported.get('hair'):
+            target, seat = hat_target_over_hair(target, imported['hair'], spec)
+        transform, _, measurement = fit_hat(meshes, target, fitting.get('hat_width_scale', 1))
+        if seat:
+            measurement['seat'] = seat
+    elif slot in ('hair', 'hairFront', 'hairBack'):
+        transform, _, measurement = fit_hair(meshes, targets[slot], spec, slot, head_region(body, rig, spec)[:2])
+    else:
+        transform, _, measurement = fit_reference_frame(meshes, targets[slot], slot)
+        measurement['frame'] = 'body_slot_bounds'
+    place(meshes, transform)
+    if slot == 'hair':
+        # Still one uniform scale: enlarge only when the inner surface sits inside the skull.
+        measurement['cavity_fitting'] = fit_hair_cavity(meshes, body, rig, spec)
+    if slot in ('hair', 'hairFront', 'hairBack'):
+        adjustment = fit_hair_scalp_bounded(meshes, body, rig, spec)
+    else:
+        adjustment = clearance(meshes, body, tolerances['clearance_m'], maximum)
+        adjustment.update(maximum_allowed_m=maximum, bounded=True)
+    head_preparation = None
+    if backed_hair:
+        head_preparation = repair_hair_backing(meshes, body, rig, spec, part.get('image_paths'),
+                                              shared_canvas=bool(part.get('reference_bounds_m')))
+        head_preparation['source_image_sha256'] = part.get('image_sha256', {}).get('back')
+        runtime_budget['backing_added_triangles'] = head_preparation.get('added_faces', 0)*2
+    kind = (part.get('fit_profile') or {}).get('kind') or part.get('garment_kind', 'source')
+    skirt = slot == 'bottom' and kind == 'skirt'
+    bone = 'Head'
+    if skirt:
+        bone = next((b.name for b in rig.data.bones if b.name.lower().split(':')[-1] in ('hips', 'pelvis')), None)
+        if not bone:
+            raise ValueError('Missing pelvis for skirt attachment')
+    rigid = skirt or slot in ('hair', 'head', 'hairFront', 'hairBack', 'hat')
+    report = bind(meshes, body, rig, {'anchors': [], 'max_anchor_error_m': .0001,
+                  'binding': 'rigid' if rigid else 'transfer', 'bone': bone, 'slot': slot,
+                  'max_transfer_distance_m': None}, transform=Matrix.Identity(4))
+    report.update(measurement=measurement, runtime_budget=runtime_budget, clearance=adjustment,
+                  fit_method='uniform-slot-v1')
+    if head_preparation is not None:
+        report['head_preparation'] = head_preparation
+    if slot == 'bottom':
+        report['garment_kind'] = kind
+    a, b = bounds(meshes)
+    report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
+    names = []
+    for i, obj in enumerate(meshes):
+        obj.name = f'{slot}_{i}'; obj['part_role'] = slot; names.append(obj.name)
+    return {'slot': slot, 'source_sha256': part['sha256'], 'objects': names,
+            'anchors': [], 'available': True, **report}
+
+
 def run(payload):
     output = Path(payload['output'])
     if sha(payload['source']) != payload['source_sha256']:
@@ -95,6 +244,10 @@ def run(payload):
     body = body_meshes(objects, rig)
     spec = payload['production_spec']
     fitting = spec['fitting']
+    reference_hair = fitting.get('hair_surface_fit') in ('cavity-reference-v3', 'cavity-reference-v4')
+    runtime_policy = spec.get('runtime') or {}
+    bounded_hair = reference_hair or fitting.get('hair_surface_fit') == 'scalp-frame-v2-bounded'
+    uniform_parts = fitting.get('part_fit') == 'uniform-slot-v1'
     frozen = spec.get('frozen_body', False)
     source_preserved_body = spec.get('base_body', {}).get('source_preserved') is True
     normalization = {'preserved': True} if frozen else normalize_body(objects, body, fitting['bounds']['body'])
@@ -104,6 +257,7 @@ def run(payload):
     if not body_profile:
         body_profile = measure_body_profile(body, rig, payload['source_sha256'])
     targets, shoe_targets = (deepcopy(fitting['bounds']), deepcopy(fitting['shoe_bounds'])) if frozen else body_targets(body, rig, spec)
+    measured_head = head_region(body, rig, spec)[:2]
     # Frozen bodies still need their current measured head. Persisted envelopes
     # can belong to an older body and must not enlarge a short hairstyle.
     for slot in ('hair', 'hairFront', 'hairBack'):
@@ -114,7 +268,7 @@ def run(payload):
     # Include the metric parent in every export so separately loaded parts and
     # the body retain the same scaled skeleton and animation coordinate frame.
     metric_frame = bpy.data.objects['FactoryMetricFrame']
-    reports, fitted = [], []
+    reports, fitted = deepcopy(payload.get('unavailable_parts', [])), []
     body_names = []
     for i, obj in enumerate(body):
         obj.name = f'body_{i}'; obj['part_role'] = 'body'; body_names.append(obj.name)
@@ -126,8 +280,13 @@ def run(payload):
         reports.append(report)
         fitted += meshes
     for part in payload['parts']:
+        if part.get('part_method') == 'body_shell':
+            continue
         if sha(part['path']) != part['sha256']:
             raise ValueError('Part source changed')
+        for view, path in part.get('image_paths', {}).items():
+            if sha(path) != part.get('image_sha256', {}).get(view):
+                raise ValueError('Part reference image changed')
         additions = load(part['path'])
         meshes = [o for o in additions if o.type == 'MESH']
         if not meshes or any(o.type == 'ARMATURE' for o in additions):
@@ -135,14 +294,56 @@ def run(payload):
         imported[part['slot']] = meshes
         imported_additions[part['slot']] = additions
     hat_palette = headwear_palette(imported.get('hat', []))
+    shell_coverage = {}
     # Headwear uses the already fitted hairstyle even if the request listed the hat first.
     for part in sorted(payload['parts'], key=lambda part: part['slot'] == 'hat'):
-        slot = part['slot']; meshes = imported[slot]
+        slot = part['slot']
+        method = part.get('part_method', 'isolated')
+        if method == 'body_shell':
+            meshes, report, covered = build_body_shell_part(part, body, rig, spec)
+            shell_coverage[slot] = covered
+            imported[slot] = meshes
+            names = []
+            for i, obj in enumerate(meshes):
+                obj.name = f'{slot}_{i}'; obj['part_role'] = slot; names.append(obj.name)
+            a, b = bounds(meshes)
+            report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
+            reports.append({'slot': slot, 'source_sha256': part['sha256'], 'objects': names, 'anchors': [], **report})
+            fitted += meshes
+            continue
+        meshes = imported[slot]
+        if method == 'worn':
+            meshes, report = extract_worn_meshes(part, meshes, body, rig, spec)
+            imported[slot] = meshes
+            names = []
+            for i, obj in enumerate(meshes):
+                obj.name = f'{slot}_{i}'; obj['part_role'] = slot; names.append(obj.name)
+            a, b = bounds(meshes)
+            report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
+            reports.append({'slot': slot, 'source_sha256': part['sha256'], 'objects': names, 'anchors': [], **report})
+            fitted += meshes
+            continue
         profiled = part.get('fit_profile') is not None
+        if uniform_parts and slot not in EQUIPMENT and slot != 'shoes':
+            reports.append(fit_uniform_part(part, meshes, body, rig, spec, targets, imported))
+            fitted += meshes
+            continue
         garment_report, garment_masks = None, None
+        runtime_budget = None
+        if runtime_policy:
+            # Provider detail controls the immutable source, not the wearable.
+            # Reduce before fitting/BVH/weight transfer, retaining source UVs.
+            target = runtime_policy['part_triangles'].get(slot, 12000)
+            grid = fitting.get('hair_backing_grid', [81, 97])
+            reserve = 2*(grid[0]-1)*(grid[1]-1) if slot == 'hair' and reference_hair and part.get('image_paths', {}).get('back') else 0
+            runtime_budget = optimize_part(meshes, slot, target_triangles=max(100, target-reserve),
+                texture_max_edge=runtime_policy['texture_max_edge'], preserve_appearance=True, merge=not profiled)
+            runtime_budget.update(target_triangles=target, backing_reserved_triangles=reserve,
+                                  revision=runtime_policy['revision'])
         if profiled:
-            runtime_budget = {'preserved': True, 'source_mesh_detail': True,
-                              'source_uv': True, 'optimization': 'skipped_for_profiled_garment'}
+            if runtime_budget is None:
+                runtime_budget = {'preserved': True, 'source_mesh_detail': True,
+                                  'source_uv': True, 'optimization': 'skipped_for_profiled_garment'}
             supplied_source = part['fit_profile'].get('source_sha256')
             if supplied_source and supplied_source != part['sha256']:
                 garment_report = {'fit_profile': part['fit_profile'], 'fit_status': 'failed',
@@ -184,7 +385,7 @@ def run(payload):
                     'clearance': {'method': 'not_applied'}, **garment_report})
                 continue
             transform, anchors, measurement = Matrix.Identity(4), [], garment_report
-        else:
+        elif runtime_budget is None:
             runtime_budget = ({'preserved': True, 'source_mesh_detail': True, 'source_uv': True,
                                'optimization': 'skipped_for_accepted_meshy_options'}
                               if part.get('preserve_generated_detail') else optimize_part(meshes, slot))
@@ -197,11 +398,13 @@ def run(payload):
             headwear_seat = None
             if imported.get('hair'):
                 targets[slot], headwear_seat = hat_target_over_hair(targets[slot], imported['hair'], spec)
-            transform, anchors, measurement = fit_hat(meshes, targets[slot], fitting.get('hat_width_scale', 1))
+            transform, anchors, measurement = fit_hat(meshes, targets[slot], fitting.get('hat_width_scale', 1),
+                                                       part.get('reference_bounds_m') if bounded_hair else None)
             if headwear_seat:
                 measurement['seat'] = headwear_seat
         elif not profiled and slot in ('hair', 'hairFront', 'hairBack'):
-            transform, anchors, measurement = fit_hair(meshes, targets[slot], spec)
+            transform, anchors, measurement = fit_hair(meshes, targets[slot], spec, slot, measured_head,
+                                                       part.get('reference_bounds_m'))
         elif not profiled:
             transform, anchors, measurement = measured_fit(meshes, targets[slot])
         skirt = slot == 'bottom' and (part.get('fit_profile') or {}).get('kind', part.get('garment_kind')) == 'skirt'
@@ -217,14 +420,16 @@ def run(payload):
                     'slot': slot, 'max_transfer_distance_m': None}
         if not profiled:
             place(meshes, transform)
+        if slot == 'hair' and reference_hair:
+            measurement['cavity_fitting'] = fit_hair_cavity(meshes, body, rig, spec)
         if slot in ('hair', 'hairFront', 'hairBack'):
-            measurement['length_fitting'] = fit_hair_length(meshes, targets[slot], spec)
+            measurement['length_fitting'] = fit_hair_length(meshes, targets[slot], spec, measured_head[0].z)
         if slot == 'top' and not profiled:
             measurement['sleeves'], sleeve_masks = fit_sleeves(meshes, rig, spec)
-        # Rear topology comes from the generated multiview asset. Never clone
-        # front bangs or scalp triangles to fabricate a missing back view.
+        # Preserve fitted strands. Derive a separate rear surface only from an
+        # accepted rear image and the measured skull after clearance.
         head_preparation = (prepare_rear_hair(meshes, body, hat_palette, spec)
-                            if slot == 'hairBack' else None)
+                            if slot == 'hairBack' and not bounded_hair else None)
         if slot == 'shoes':
             adjustment = {'method': 'rigid_foot_fit_no_surface_projection',
                           'adjusted_vertices': 0, 'maximum_adjustment_m': 0.0}
@@ -240,6 +445,8 @@ def run(payload):
             adjustment = {'method': 'loose_fit_no_surface_projection',
                           'body_margin_xz_m': fitting['garment_margin_m'][slot],
                           'adjusted_vertices': 0, 'maximum_adjustment_m': 0.0}
+        elif slot in ('hair', 'hairFront', 'hairBack') and bounded_hair:
+            adjustment = fit_hair_scalp_bounded(meshes, body, rig, spec)
         elif slot in ('hair', 'hairFront', 'hairBack') and fitting.get('hair_surface_fit') == 'measured-skull-v1':
             adjustment = fit_hair_scalp(meshes, body, rig, spec)
         elif slot in ('hair', 'head', 'hairFront', 'hairBack'):
@@ -254,8 +461,13 @@ def run(payload):
         else:
             adjustment = clearance(meshes, body, spec['tolerances']['clearance_m'],
                 spec['tolerances']['max_surface_adjustment_m'] if slot == 'hat' else None)
-        if slot in ('hairBack', 'hairFront') and 'hat' in imported:
+        if slot in ('hairBack', 'hairFront') and 'hat' in imported and not bounded_hair:
             seat_legacy_hair_roots(meshes, body, spec)
+        if slot == 'hair' and reference_hair:
+            head_preparation = repair_hair_backing(meshes, body, rig, spec, part.get('image_paths'),
+                                                  shared_canvas=bool(part.get('reference_bounds_m')))
+            head_preparation['source_image_sha256'] = part.get('image_sha256', {}).get('back')
+            runtime_budget['backing_added_triangles'] = head_preparation.get('added_faces', 0)*2
         # Transfer weights only after the final garment size has been applied.
         report = (bind_shoes_rigid(meshes, rig, shoe_regions) if slot == 'shoes'
                   else bind(meshes, body, rig, contract, transform=Matrix.Identity(4)))
@@ -304,6 +516,9 @@ def run(payload):
     body_profile = measure_body_profile(body, rig, payload['source_sha256'])
     expression_uv = ({'available': False, 'preserved': True, 'reason': 'uploaded_face_texture'}
                      if spec.get('base_body', {}).get('preserve_face_texture') else prepare_expression_uv(body))
+    # Sealed prefit slots stay byte-identical; equipment keeps its own finish.
+    finish = matte_materials([*body, *[obj for obj in fitted
+                                       if obj['part_role'] not in (*EQUIPMENT, *prefit_paths)]])
     selected_slots = {part['slot'] for part in payload['parts']}
     shoes = [obj for obj in fitted if obj['part_role'] == 'shoes'] if 'shoes' in selected_slots else []
     if shoes:
@@ -312,54 +527,62 @@ def run(payload):
         a, b = bounds(shoes)
         shoe_report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
     garment_meshes = {part['slot']: [obj for obj in fitted if obj['part_role'] == part['slot']]
-                     for part in reports if part.get('fit_status') not in ('needs_anchors', 'failed')}
+                     for part in reports if part.get('fit_status') not in ('needs_anchors', 'failed')
+                     and part['slot'] not in shell_coverage}
     coverage_profiles = {report['slot']: report.get('coverage') for report in reports
                          if report.get('coverage')}
+    for slot, covered in shell_coverage.items():
+        mark_shell_coverage(body, slot, covered)
     covered_materials, coverage, crop_lines = mark_body_coverage(
-        body, garment_meshes, rig, spec, coverage_profiles)
+        body, garment_meshes, rig, spec, coverage_profiles, shell_slots=tuple(shell_coverage))
     hidden = hide_covered_materials(covered_materials)
     camera, view_center = camera_setup(spec['body_height_m'])
+    soft_lighting(bpy.context.scene)
     directions = [('front', (0, -1, 0)), ('side', (1, 0, 0)), ('back', (0, 1, 0)), ('opposite', (-1, 0, 0))]
+    # Product screens show the front; the other views are receipts: smaller and not denoised.
     for view, direction in directions:
-        render(output/f'{view}.png', camera, view_center, direction, 800)
-    # Persist the actual geometry from all four sides, including isolated head
-    # parts. These are inspection views, never an automatic quality verdict.
+        bpy.context.scene.cycles.use_denoising = view == 'front'
+        render(output/f'{view}.png', camera, view_center, direction, 800 if view == 'front' else 512)
+    bpy.context.scene.cycles.use_denoising = True
     detail_files = []
-    original_scale = camera.data.ortho_scale
-    detail_center = Vector((0, 0, spec['body_height_m']*.74))
-    camera.data.ortho_scale = spec['body_height_m']*1.05
-    collar_height = next((line['point_m'][1] for line in crop_lines if line['name'] == 'collar'), spec['anchors']['neck'][1])
-    preview_body = head_preview_body(body, collar_height)
-    for obj in body:
-        obj.hide_render = True
     visibility = {obj: obj.hide_render for obj in fitted}
-    for group, slots in (('head', ('hair', 'head', 'hairFront', 'hairBack', 'hat')),
-                         ('hair', ('hair', 'hairFront', 'hairBack')), ('hat', ('hat',))):
-        if not any(obj['part_role'] in slots for obj in fitted):
-            continue
+    if os.getenv('ASSET_DETAIL_RENDERS') == '1':
+        # Optional inspection views of the head parts and outfit from all four sides.
+        original_scale = camera.data.ortho_scale
+        detail_center = Vector((0, 0, spec['body_height_m']*.74))
+        camera.data.ortho_scale = spec['body_height_m']*1.05
+        collar_height = next((line['point_m'][1] for line in crop_lines if line['name'] == 'collar'), spec['anchors']['neck'][1])
+        preview_body = head_preview_body(body, collar_height)
+        for obj in body:
+            obj.hide_render = True
+        for group, slots in (('head', ('hair', 'head', 'hairFront', 'hairBack', 'hat')),
+                             ('hair', ('hair', 'hairFront', 'hairBack')), ('hat', ('hat',))):
+            if not any(obj['part_role'] in slots for obj in fitted):
+                continue
+            for obj in fitted:
+                obj.hide_render = obj['part_role'] not in slots
+            for view, direction in directions:
+                name = f'{group}-{view}.png'
+                render(output/name, camera, detail_center, direction, 600)
+                detail_files.append(name)
+        for obj, hidden_before in visibility.items():
+            obj.hide_render = hidden_before
+        for obj in preview_body:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        for obj in body:
+            obj.hide_render = False
+        camera.data.ortho_scale = original_scale
         for obj in fitted:
-            obj.hide_render = obj['part_role'] not in slots
+            obj.hide_render = obj['part_role'] not in ('top', 'bottom', 'shoes', *EQUIPMENT)
         for view, direction in directions:
-            name = f'{group}-{view}.png'
-            render(output/name, camera, detail_center, direction, 600)
+            name = f'wardrobe-{view}.png'
+            render(output/name, camera, view_center, direction, 600)
             detail_files.append(name)
-    for obj, hidden_before in visibility.items():
-        obj.hide_render = hidden_before
-    for obj in preview_body:
-        bpy.data.objects.remove(obj, do_unlink=True)
-    for obj in body:
-        obj.hide_render = False
-    camera.data.ortho_scale = original_scale
-    for obj in fitted:
-        obj.hide_render = obj['part_role'] not in ('top', 'bottom', 'shoes', *EQUIPMENT)
-    for view, direction in directions:
-        name = f'wardrobe-{view}.png'
-        render(output/name, camera, view_center, direction, 600)
-        detail_files.append(name)
     restore_covered_materials(hidden)
     for obj in fitted:
         obj.hide_render = True
-    for view, direction in directions:
+    # The base-body portrait is the only extra view the product screens show.
+    for view, direction in (directions if os.getenv('ASSET_DETAIL_RENDERS') == '1' else directions[:1]):
         name = f'body-{view}.png'
         render(output/name, camera, view_center, direction, 600)
         detail_files.append(name)
@@ -371,11 +594,12 @@ def run(payload):
     export_roles = [('body', body), *[(p['slot'], [o for o in fitted if o['part_role'] == p['slot']])
                                       for p in reports if p.get('available', True)]]
     for role, meshes in export_roles:
-        export(output/f'{role}.glb', [metric_frame, rig, *meshes])
         if role in prefit_paths:
             # Preserve the sealed fitted slot byte-for-byte. The composed model
             # above uses the same geometry/UV/weights attached to the same rig.
             shutil.copyfile(prefit_paths[role], output/f'{role}.glb')
+        else:
+            export(output/f'{role}.glb', [metric_frame, rig, *meshes])
     animation = rig.animation_data
     motion = None
     for track in animation.nla_tracks if animation else []:
@@ -391,8 +615,11 @@ def run(payload):
         bpy.context.scene.frame_set(0)
     bpy.context.view_layer.update()
     hide_covered_materials(covered_materials)
-    render(output/'motion.png', camera, view_center, (0, -1, 0), 800)
-    bpy.ops.wm.save_as_mainfile(filepath=str(output/'master.blend'))
+    bpy.context.scene.cycles.use_denoising = False
+    render(output/'motion.png', camera, view_center, (0, -1, 0), 512)
+    saved_blend = os.getenv('ASSET_SAVE_MASTER_BLEND') == '1'
+    if saved_blend:
+        bpy.ops.wm.save_as_mainfile(filepath=str(output/'master.blend'))
     doc, _ = parse_glb((output/'model.glb').read_bytes(), strict=True)
     parts = [{'slot': 'body', 'objects': body_names, 'runtime_budget': body_budget}, *reports]
     for part in parts:
@@ -433,11 +660,13 @@ def run(payload):
               'base_body_shape': base_shape,
               'rest_pose': rest_pose,
               'expression_uv': expression_uv,
+              'material_finish': finish,
               'source_sha256': payload['source_sha256'],
               'visual_review': 'required', 'origin': 'generated_parts_fitted_to_meshy_body',
               'limitations': ['Measured fitting and surface weight transfer require visual review.',
                               'Independently generated parts are not a segmentation of the original image or mesh.']}
-    files = ['model.glb', 'master.blend', 'front.png', 'side.png', 'back.png', 'opposite.png', 'motion.png'] + [f'{p["slot"]}.glb' for p in parts if p.get('available', True)] + detail_files
+    files = (['model.glb', *(['master.blend'] if saved_blend else []), 'front.png', 'side.png', 'back.png', 'opposite.png', 'motion.png']
+             + [f'{p["slot"]}.glb' for p in parts if p.get('available', True)] + detail_files)
     (output/'complete.json').write_text(json.dumps({'input_sha256': sha(output/'input.json'),
         'files': {name: sha(output/name) for name in files}, 'result': result}), encoding='utf8')
 

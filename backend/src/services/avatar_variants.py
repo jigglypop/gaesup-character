@@ -80,9 +80,13 @@ class AvatarVariants:
             variant['view_mode'] = payload['view_mode']
         if 'meshy_options' in payload:
             variant['meshy_options'] = payload['meshy_options']
-        for field in ('uploaded_views', 'uploaded_model', 'part_name'):
+        for field in ('uploaded_views', 'uploaded_model', 'part_name', 'model_provider'):
             if payload.get(field):
                 variant[field] = payload[field]
+        if payload.get('part_method'):
+            variant['part_methods'] = {slot: payload['part_method']}
+        if payload.get('redraw') is not None:
+            variant['redraw'] = payload['redraw']
         return self.create(owner, key, variant, frozen_context=frozen_context)
 
     def create(self, owner, key, payload, *, photo_input=None, frozen_context=None):
@@ -107,6 +111,17 @@ class AvatarVariants:
         job_id = hashlib.sha256(f'{owner}:{namespace}:{key}'.encode()).hexdigest()[:24]
         fingerprint = hashlib.sha256(json.dumps(photo_input if photo_input is not None else payload, sort_keys=True).encode()).hexdigest()
         target = self.factory.directory(owner, job_id)
+        if frozen_context is None and not read_json(target/'job.json'):
+            # A batch child was covered when its batch was accepted; a replay returns its job.
+            from src.services.meshy_status import require_credits
+            from src.services.avatar_part_methods import resolve as resolve_methods, needs_provider
+            from src.services.model_providers import resolve_provider
+            source_input = photo_input if photo_input is not None else payload
+            estimate = resolve_methods(slots, source_input.get('part_methods'),
+                uploaded_views=bool(payload.get('uploaded_views')), uploaded_model=bool(payload.get('uploaded_model')),
+                worn_redraw=bool((payload.get('redraw') or {}).get('worn')))
+            if resolve_provider(source_input.get('model_provider')) == 'meshy':
+                require_credits(0 if payload.get('uploaded_model') else sum(needs_provider(m) for m in estimate.values()))
         with _LOCK:
             prior = read_json(target/'job.json')
             if prior:
@@ -120,9 +135,28 @@ class AvatarVariants:
             from src.services.meshy_options import freeze_options
             meshy_options = (deepcopy(frozen_context['meshy_options']) if frozen_context else
                              {slot: freeze_options(self.factory, owner, (photo_input or payload).get('meshy_options'),
-                                                   slot, prompt_snapshot['meshy_texture']) for slot in slots})
+                                                   slot, prompt_snapshot['meshy_texture'], shared=photo_input is not None)
+                              for slot in slots})
             uploaded_views = payload.get('uploaded_views')
             uploaded_model = payload.get('uploaded_model')
+            redraw = payload.get('redraw')
+            if redraw is not None:
+                if slots != ['hair'] or not uploaded_views or uploaded_model:
+                    raise PipelineError('invalid_hair_redraw', '헤어 원본 3뷰를 선택한 뒤 고화질 다시 그리기를 사용하세요.', 422)
+                from src.services.avatar_hair_redraw import contract
+                redraw = contract(**redraw)
+                if frozen_context and frozen_context.get('hair_redraw_contract'):
+                    frozen_redraw = frozen_context['hair_redraw_contract']
+                    if any(frozen_redraw.get(field) != redraw[field] for field in ('notes', 'source_side_facing')):
+                        raise PipelineError('redraw_changed', '접수한 헤어 보정 입력이 변경되었습니다.', 409)
+                    redraw = deepcopy(frozen_redraw)
+            from src.services.avatar_part_methods import resolve as resolve_methods, needs_provider, needs_key_render
+            from src.services.model_providers import resolve_provider
+            source_input = photo_input if photo_input is not None else payload
+            part_methods = resolve_methods(slots, source_input.get('part_methods'),
+                uploaded_views=bool(uploaded_views), uploaded_model=bool(uploaded_model),
+                worn_redraw=bool(redraw and redraw.get('worn')))
+            model_provider = (frozen_context or {}).get('model_provider') or resolve_provider(source_input.get('model_provider'))
             if uploaded_views and (not payload.get('single_part') or set(uploaded_views) != {'front', 'side', 'back'}):
                 raise PipelineError('invalid_views', '단일 파츠의 정면·측면·후면 원본이 필요합니다.', 422)
             if uploaded_model:
@@ -136,8 +170,10 @@ class AvatarVariants:
             available = capabilities()
             if not available['blender_available']:
                 raise PipelineError('provider_unavailable', 'Blender 연결 설정을 확인해 주세요.', 503)
-            if not uploaded_model and not (available['meshy_configured']
-                    and (bool(uploaded_views) or available['image_configured'])):
+            provider_needed = not uploaded_model and any(needs_provider(m) for m in part_methods.values())
+            provider_ready = available.get(f'{model_provider}_configured', False)
+            if not uploaded_model and not ((provider_ready or not provider_needed)
+                    and ((bool(uploaded_views) and not redraw) or available['image_configured'])):
                 raise PipelineError('provider_unavailable', '생성 서비스 연결을 확인하세요.', 503)
             base_id = payload['base_job_id']
             base = self.factory.get(owner, base_id)
@@ -203,8 +239,11 @@ class AvatarVariants:
             state.update(image_provider='openai', image_model=capabilities()['image_model'],
                          image_base=os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
                          meshy_base=os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/'))
+            if redraw and frozen_context and frozen_context.get('image_settings'):
+                state.update(deepcopy(frozen_context['image_settings']))
             view_mode = (photo_input or payload).get('view_mode')
-            generated_views = ('front', 'side', 'back') if view_mode == 'front_side_back' else ('front', 'side')
+            generated_views = (tuple(redraw['views']) if redraw else
+                               ('front', 'side', 'back') if view_mode == 'front_side_back' else ('front', 'side'))
             # Repair/reuse pointers are scoped to their owning job and native
             # version. A child job must establish fresh snapshots below instead
             # of looking for the parent's version under its own directory.
@@ -231,7 +270,7 @@ class AvatarVariants:
                     from src.services.avatar_expression_pipeline import default_contract
                     state['default_expressions'] = default_contract(prompt_snapshot['expression'])
                 reference = state.get('reference_preparation')
-                if view_mode == 'front_side_back' and uses_legacy_side_pose(reference):
+                if (view_mode == 'front_side_back' or redraw) and uses_legacy_side_pose(reference):
                     # A new T-pose part must not inherit an old I-pose appearance reference.
                     reference = None
                     state['reference_preparation'] = None
@@ -318,6 +357,15 @@ class AvatarVariants:
                 raise PipelineError('headwear_required', '기존 일체형 머리를 교체할 때는 헤어와 머리 장식을 함께 선택하세요.', 422)
             state['parts'] = [p for p in state['parts'] if p['slot'] in ('body', *VARIANT_SLOTS, *historical_hair)
                              and not ('hair' in slots and p['slot'] in historical_hair)]
+            from src.services.avatar_part_methods import choose_key_color
+            art = None
+            if uploaded_views and uploaded_views.get('front'):
+                from src.services.avatar_blueprints import AvatarBlueprints
+                art = AvatarBlueprints(self.factory.data).asset(owner, uploaded_views['front']).read_bytes()
+            elif photo_input is not None:
+                art = image_source.read_bytes()
+            key_color = choose_key_color(art, ' '.join(str(v) for v in (descriptions or {}).values()))
+            state['model_provider'] = model_provider
             for slot in slots:
                 if not any(p['slot'] == slot for p in state['parts']):
                     state['parts'].append({'slot': slot})
@@ -337,6 +385,15 @@ class AvatarVariants:
                                     views={v: {'status': 'pending'} for v in generated_views},
                                     image={'status': 'pending'}, model={'status': 'pending'},
                                     provenance={'origin': 'generated_for_frozen_body', 'source_job_id': base_id})
+                    method = part_methods[slot]
+                    part['part_method'] = method
+                    part.pop('key_color', None)
+                    if needs_key_render(method):
+                        part['key_color'] = key_color
+                    if method == 'body_shell':
+                        # Made from the frozen body at assembly; no provider model exists.
+                        part.pop('meshy_options', None)
+                        part['model'] = {'status': 'ready', 'task_id': None, 'origin': 'body_shell'}
                     if photo_input is not None:
                         part['design_prompt'] = state['design_prompts'][slot]
                     else:
@@ -351,6 +408,9 @@ class AvatarVariants:
                     if slot in fit_profiles:
                         part['fit_profile'] = deepcopy(fit_profiles[slot])
                     part.pop('target_bounds_m', None)
+                    part.pop('hair_redraw', None)
+                    part.pop('source_views', None)
+                    part.pop('model_attempts', None)  # Resubmission limits belong to this new request.
                     if uploaded_model:
                         model_path = target/'parts'/slot/'generated.glb'
                         model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,12 +425,17 @@ class AvatarVariants:
                             asset = assets.asset(owner, asset_id)
                             if digest(asset) != asset_id:
                                 raise PipelineError('source_changed', '파츠 원본이 변경되었습니다.', 409)
-                            name = f'{slot}-{view}.png'
+                            name = f'{slot}-source-{view}.png' if redraw else f'{slot}-{view}.png'
                             copy_file(asset, target/'output'/name)
-                            part['views'][view] = {'status': 'succeeded', 'file': name, 'sha256': asset_id,
-                                                   'asset': asset_id, 'origin': 'uploaded_part'}
-                        part['image'] = deepcopy(part['views']['front'])
-                        part['provenance']['origin'] = 'uploaded_part_views'
+                            collection = part.setdefault('source_views', {}) if redraw else part['views']
+                            collection[view] = {'status': 'succeeded', 'file': name, 'sha256': asset_id,
+                                                'asset': asset_id, 'origin': 'uploaded_part'}
+                        if redraw:
+                            part['hair_redraw'] = deepcopy(redraw)
+                            part['provenance']['origin'] = 'redrawn_uploaded_hair'
+                        else:
+                            part['image'] = deepcopy(part['views']['front'])
+                            part['provenance']['origin'] = 'uploaded_part_views'
                     continue
                 reused.append(slot)
                 part['provenance'] = {'origin': 'reused', 'source_job_id': base_id}
@@ -384,20 +449,37 @@ class AvatarVariants:
                         'path': str(model_path), 'sha256': body_hash,
                         'reused_from': {'job_id': base_id, 'version': native['version'], 'slot': 'body'}}})
                     continue
-                for view in part['views'].values():
+                for view in (part.get('views') or {}).values():
                     name = view['file']
                     if Path(name).name != name or digest(source/'output'/name) != view['sha256']:
                         raise PipelineError('image_changed', '기본 파츠 이미지가 변경되었습니다.', 409)
                     copy_file(source/'output'/name, target/'output'/name)
+                    if view.get('raw_file'):
+                        raw_name = view['raw_file']
+                        if Path(raw_name).name != raw_name or digest(source/'output'/raw_name) != view.get('raw_sha256'):
+                            raise PipelineError('image_changed', '저장된 고화질 원본 이미지가 변경되었습니다.', 409)
+                        copy_file(source/'output'/raw_name, target/'output'/raw_name)
                     # Reused views are not charged against this request's limit.
                     for field in ('attempted_at', 'previous_attempts'):
                         view.pop(field, None)
+                for view in (part.get('source_views') or {}).values():
+                    name = view['file']
+                    if Path(name).name != name or digest(source/'output'/name) != view.get('sha256'):
+                        raise PipelineError('image_changed', '저장된 헤어 입력 원본이 변경되었습니다.', 409)
+                    copy_file(source/'output'/name, target/'output'/name)
+                # An uploaded 3D part has no generated views.
+                part['image'] = deepcopy(part['views']['front']) if part.get('views') else deepcopy(part.get('image') or {'status': 'not_required'})
+                if part.get('part_method') == 'body_shell':
+                    continue
                 copy_tree(source/'parts'/slot, target/'parts'/slot)
-                part['image'] = deepcopy(part['views']['front'])
                 receipt = read_json(target/'parts'/slot/'generation-artifacts.json')['generated']
                 if digest(target/'parts'/slot/'generated.glb') != receipt['sha256']:
                     raise PipelineError('model_changed', '저장된 파츠 모델이 변경되었습니다.', 409)
             state['reuse'] = {'source_job_id': base_id, 'slots': reused}
+            if redraw:
+                body_part = next(part for part in state['parts'] if part['slot'] == 'body')
+                for view in generated_views:
+                    body_part['views'].setdefault(view, {'status': 'pending'})
             if payload.get('single_part'):
                 native_record = read_json(source/'native-parts'/native['version']/'record.json')
                 native_files = native_record.get('files', {})
@@ -444,12 +526,12 @@ class AvatarVariants:
                 'base_job_id': base_id, 'base_version': native['version'], 'requested_slots': slots,
                 'meshy_options': ({} if uploaded_model else
                                   {slot: frozen['options'] for slot, frozen in meshy_options.items()}),
-                **({'resume_stage': 'models', 'part_name': payload.get('part_name', '')}
+                **({'resume_stage': 'images' if redraw else 'models', 'part_name': payload.get('part_name', '')}
                    if uploaded_views or uploaded_model else {}),
-                'limits': {'image_tasks': (0 if uploaded_views or uploaded_model else len(generated_views)*len(slots)) + (2 if photo_input is not None and state.get('reference_preparation') else 0),
+                'limits': {'image_tasks': (0 if (uploaded_views and not redraw) or uploaded_model else len(generated_views)*len(slots)) + (2 if photo_input is not None and state.get('reference_preparation') else 0),
                            'reference_tasks': 2 if photo_input is not None and state.get('reference_preparation') else 0,
                            'expression_tasks': (0 if payload.get('single_part') else 5 if state.get('default_expressions') else 0),
-                           'meshy_tasks': 0 if uploaded_model else len(slots),
+                           'meshy_tasks': 0 if uploaded_model else sum(needs_provider(part_methods[s]) for s in slots),
                            'meshy_rig_tasks': 0, 'meshy_animation_tasks': 0},
                 'review': {'decision': 'pending'}, 'files': {}})
             AvatarImagePipeline(self.factory).publish(owner, job_id, state)
@@ -473,11 +555,23 @@ def prepare_body(service, owner, job_id, state):
     _write_json(output/'input.json', {'source': str(body), 'sha256': body_hash,
         'worker_sha256': digest(worker), 'output': str(output), 'spec': state['production_spec'],
         'legacy_side_i': legacy_side_i})
+    required = {'spec.json', *(f'body-{view}.png' for view in state['production_spec']['generated_views'])}
+    if legacy_side_i:
+        required.add('body-side-i.png')
+    # Batch children share one frozen body and spec: reuse its sealed renders.
+    cache_key = hashlib.sha256(json.dumps({'body': body_hash, 'spec': state['production_spec'],
+        'worker': digest(worker), 'legacy_side_i': legacy_side_i}, sort_keys=True).encode()).hexdigest()[:24]
+    cache = service.factory.root/str(int(owner))/'body-reference-cache'/cache_key
+    shared = read_json(cache/'complete.json')
+    if (required <= shared.get('files', {}).keys()
+            and all((cache/name).is_file() and digest(cache/name) == shared['files'][name] for name in required)
+            and not read_json(output/'complete.json').get('input_sha256') == digest(output/'input.json')):
+        for name in required:
+            copy_file(cache/name, output/name)
+        _write_json(output/'complete.json', {'input_sha256': digest(output/'input.json'),
+            'files': {name: shared['files'][name] for name in required}, 'reused_from': cache_key})
     with local_workspace(output, inputs=[body]):
         seal = read_json(output/'complete.json')
-        required = {'spec.json', *(f'body-{view}.png' for view in state['production_spec']['generated_views'])}
-        if legacy_side_i:
-            required.add('body-side-i.png')
         cached = (seal.get('input_sha256') == digest(output/'input.json')
                   and required <= seal.get('files', {}).keys()
                   and all((output/name).is_file() and digest(output/name) == seal['files'][name] for name in required))
@@ -487,6 +581,10 @@ def prepare_body(service, owner, job_id, state):
         if (seal.get('input_sha256') != digest(output/'input.json') or not required <= seal.get('files', {}).keys()
                 or any(not (output/name).is_file() or digest(output/name) != seal['files'][name] for name in required)):
             raise PipelineError('body_render_failed', '기본 몸 참조 렌더 저장 확인 실패', 409)
+    if not shared.get('files'):
+        for name in required:
+            copy_file(output/name, cache/name)
+        _write_json(cache/'complete.json', {'files': {name: seal['files'][name] for name in required}})
     state['production_spec'] = read_json(output/'spec.json')
     state['body_height_m'] = state['production_spec']['body_height_m']
     part = next(p for p in state['parts'] if p['slot'] == 'body')

@@ -7,8 +7,9 @@ import { StageRunner } from '../factory/StageRunner';
 import { baseBodiesApi, readBaseBodyDraft, saveBaseBodyDraft, type BaseBodyDraft, type BodyType, type BodyView } from './base-bodies-api';
 import './base-bodies.css';
 import { GlbBodyForm } from './GlbBodyForm';
+import { WardrobeBodies } from './WardrobeBodies';
 
-type Props = { jobs: FactoryJob[]; onJob: (job: FactoryJob) => void; refreshJobs: () => Promise<unknown> };
+type Props = { jobs: FactoryJob[]; selectedJobId?: string; onJob: (job: FactoryJob) => void; refreshJobs: () => Promise<unknown> };
 type RigOption = { jobId: string; version: string; label: string };
 const bodyLabels: Record<BodyType, string> = { male: '남성형', female: '여성형' };
 const viewLabels: Record<BodyView, string> = { front: '정면', side: '측면', back: '후면' };
@@ -56,7 +57,7 @@ function BodyViewUpload({ view, asset, disabled, busy, onUpload, onClear }: {
   </div>;
 }
 
-export default function BaseBodies({ jobs, onJob, refreshJobs }: Props) {
+export default function BaseBodies({ jobs, selectedJobId, onJob, refreshJobs }: Props) {
   const [bodyType, setBodyType] = useState<BodyType>('male');
   const [sourceMode, setSourceMode] = useState<'glb' | 'images'>('glb');
   const [glbBusy, setGlbBusy] = useState(false);
@@ -65,6 +66,8 @@ export default function BaseBodies({ jobs, onJob, refreshJobs }: Props) {
   const [rigOptions, setRigOptions] = useState<RigOption[]>([]);
   const [uploading, setUploading] = useState<BodyView>();
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
+  // The motion panel downloads and parses the rigged model; mount it only while open.
+  const [motionOpen, setMotionOpen] = useState(false);
   const locked = useRef(false);
   const draft = drafts[bodyType];
   const recovery = baseBodiesApi.recovery(bodyType), pending = recovery.pending;
@@ -74,6 +77,12 @@ export default function BaseBodies({ jobs, onJob, refreshJobs }: Props) {
   const inputLocked = busy || !!uploading || !!pending || !!recovery.error;
   const savedJobs = useMemo(() => jobs.filter(job => bodyTypeOf(job) === bodyType), [jobs, bodyType]);
   const selectedJob = savedJobs.find(job => job.id === selected[bodyType]) || savedJobs[0];
+  const requestedBodyType = jobs.find(job => job.id === selectedJobId)?.base_body?.body_type;
+  useEffect(() => {
+    if (!selectedJobId || !requestedBodyType) return;
+    setBodyType(requestedBodyType);
+    setSelected(current => ({ ...current, [requestedBodyType]: selectedJobId }));
+  }, [selectedJobId, requestedBodyType]);
   const rigSourceRefreshKey = useMemo(() => jobs
     .filter(job => !job.base_job_id && ['complete', 'expressions'].includes(job.character_flow?.stage || ''))
     .map(job => `${job.id}:${job.assembly_version || ''}`).sort().join('|'), [jobs]);
@@ -138,6 +147,11 @@ export default function BaseBodies({ jobs, onJob, refreshJobs }: Props) {
 
   return <div className="base-bodies workspace-content">
     <div className="workspace-heading"><h1>기본 몸</h1><div className="base-body-tabs" role="tablist" aria-label="기본 몸 타입">{(['male', 'female'] as const).map(value => <button key={value} role="tab" aria-selected={bodyType === value} disabled={busy || !!uploading || glbBusy} onClick={() => { setBodyType(value); setError(''); setNotice(''); }}>{bodyLabels[value]}</button>)}</div></div>
+    <WardrobeBodies jobs={jobs} selectedJob={selectedJob} onSelect={job => {
+      const type = bodyTypeOf(job);
+      if (!type || busy || uploading || glbBusy) return;
+      setBodyType(type); setSelected(current => ({ ...current, [type]: job.id }));
+    }} />
     <div className="base-body-layout">
       <section className="base-body-compose" aria-busy={busy || !!uploading}>
         <div className="base-body-tabs base-body-source" role="tablist" aria-label="기본 몸 입력 방식">
@@ -154,14 +168,14 @@ export default function BaseBodies({ jobs, onJob, refreshJobs }: Props) {
           update({ rig_source: option ? { job_id: option.jobId, version: option.version } : undefined });
         }}><option value="">새 리깅 생성</option>{rigValue && !rigOptions.some(item => `${item.jobId}:${item.version}` === rigValue) && <option value={rigValue}>{rigValue}</option>}{rigOptions.map(item => <option key={`${item.jobId}:${item.version}`} value={`${item.jobId}:${item.version}`}>{item.label}</option>)}</select></label>
         <button className="base-body-create" disabled={busy || !!uploading || !!recovery.error || (!pending && (!draft.name.trim() || !complete))} onClick={() => void create()}>{busy ? '접수 확인 중' : pending ? '같은 요청 복구' : '기본 몸 3D 생성'}</button>
-        <small>이미지 생성 0장 · Meshy 3D 1회{shownRig ? ' · 저장된 리깅 재사용' : ' · 리깅 1회 · 공통 기본 동작 5종'}</small>
+        <small>유료 Meshy 3D 1회{shownRig ? ' · 저장된 리깅 재사용' : ' · 리깅 1회 · 기본 동작'}</small>
         {pending && <p className="base-body-recovery">응답이 확인되지 않은 {bodyLabels[bodyType]} 요청입니다. 저장된 이미지와 요청 키로 복구합니다.</p>}
         {(error || recovery.error) && <p role="alert">{error || recovery.error}</p>}{notice && <p role="status">{notice}</p>}
         </>}
       </section>
       <section className="base-body-results">
         <div className="base-body-saved-heading"><h2>저장된 {bodyLabels[bodyType]}</h2>{savedJobs.length > 0 && <select aria-label={`저장된 ${bodyLabels[bodyType]}`} value={selectedJob?.id || ''} onChange={event => setSelected(current => ({ ...current, [bodyType]: event.target.value }))}>{savedJobs.map(job => <option key={job.id} value={job.id}>{job.character_name} · {new Date(job.created_at).toLocaleString()}</option>)}</select>}</div>
-        {selectedJob ? <><ProductionProgress key={`progress:${selectedJob.id}`} job={selectedJob} offline={false} />{selectedJob.error && <p className="base-body-job-error" role="alert">{selectedJob.error}</p>}<StageRunner key={`stages:${selectedJob.id}`} jobId={selectedJob.id} onChange={() => void refreshJobs()} /><NativeAssembly key={`assembly:${selectedJob.id}`} jobId={selectedJob.id} simple flow={selectedJob.character_flow} />{(selectedJob.input_kind !== 'glb' || selectedJob.base_body?.import_mode === 'rig') && <details className="base-body-motion"><summary>리깅·동작</summary><MeshyMotion key={`motion:${selectedJob.id}`} jobId={selectedJob.id} showRigRecovery={false} /></details>}</> : <div className="base-body-empty">저장된 {bodyLabels[bodyType]} 기본 몸이 없습니다.</div>}
+        {selectedJob ? <><ProductionProgress key={`progress:${selectedJob.id}`} job={selectedJob} offline={false} />{selectedJob.error && <p className="base-body-job-error" role="alert">{selectedJob.error}</p>}<StageRunner key={`stages:${selectedJob.id}`} jobId={selectedJob.id} onChange={() => void refreshJobs()} /><NativeAssembly key={`assembly:${selectedJob.id}`} jobId={selectedJob.id} simple flow={selectedJob.character_flow} />{(selectedJob.input_kind !== 'glb' || selectedJob.base_body?.import_mode === 'rig') && <details className="base-body-motion" onToggle={event => setMotionOpen(event.currentTarget.open)}><summary>리깅·동작</summary>{motionOpen && <MeshyMotion key={`motion:${selectedJob.id}`} jobId={selectedJob.id} showRigRecovery={false} />}</details>}</> : <div className="base-body-empty">저장된 {bodyLabels[bodyType]} 기본 몸이 없습니다.</div>}
       </section>
     </div>
   </div>;

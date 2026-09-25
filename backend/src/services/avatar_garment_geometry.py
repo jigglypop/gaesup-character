@@ -4,7 +4,7 @@ import math
 
 from mathutils import Matrix, Vector
 
-from src.services.avatar_standard_blender import blender_to_gltf, bounds, fit_matrix, gltf_to_blender
+from src.services.avatar_blender_common import blender_to_gltf, bounds, fit_matrix, gltf_to_blender
 
 PROFILE_REVISION = 'garment-fit-v1'
 

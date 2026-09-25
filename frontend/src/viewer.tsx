@@ -12,10 +12,11 @@ import { FaceEditor, type PaintSettings } from './face-editor';
 import { captureRestPose } from './model-pose';
 import { NativeWardrobe, type Wearable } from './native-wardrobe';
 import { TextureExpressions } from './texture-expressions';
+import { matteCharacter } from './matte-materials';
 import { disposeObjectResources } from './assets/gpu-resources';
 
 type Model = { gltf: GLTF; url: string; rigged: boolean; restorePose(): void };
-export type CardView = 'front' | 'side' | 'back';
+export type CardView = 'front' | 'side' | 'back' | 'opposite';
 type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; studio?: boolean; card?: boolean; cardView: CardView; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
 const worldMode = { type: 'character', controller: 'keyboard', control: 'thirdPerson' } as const;
 
@@ -170,14 +171,15 @@ function CardScene({ model, hidden, cardView, onReady, onError }: ViewProps) {
     perspective.aspect = aspect;
     const verticalFov = THREE.MathUtils.degToRad(perspective.fov);
     const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
-    const depth = cardView === 'side' ? dimensions.x : dimensions.z;
-    const width = cardView === 'side' ? dimensions.z : dimensions.x;
+    const profile = cardView === 'side' || cardView === 'opposite';
+    const depth = profile ? dimensions.x : dimensions.z;
+    const width = profile ? dimensions.z : dimensions.x;
     const distance = Math.max(
       depth / 2 + dimensions.y / (2 * Math.tan(verticalFov / 2)),
       depth / 2 + width / (2 * Math.tan(horizontalFov / 2)),
       .25,
     ) * 1.18;
-    if (cardView === 'side') perspective.position.set(distance, 0, 0);
+    if (profile) perspective.position.set(cardView === 'side' ? distance : -distance, 0, 0);
     else perspective.position.set(0, 0, cardView === 'back' ? -distance : distance);
     perspective.near = Math.max(distance / 100, .001);
     perspective.far = Math.max(distance * 20, dimensions.length() * 10, 10);
@@ -212,8 +214,10 @@ function Garden() {
   return <>
     <color attach="background" args={['#dce9e2']} />
     <fog attach="fog" args={['#dce9e2', 40, 110]} />
-    <hemisphereLight args={[0xffffff, 0x8b9e85, 2.4]} />
-    <directionalLight position={[4, 9, 5]} intensity={3.5} />
+    <ambientLight intensity={.85} />
+    <hemisphereLight args={[0xfffaf0, 0xe2dfc6, 2.6]} />
+    <directionalLight position={[4, 9, 5]} intensity={2.3} />
+    <directionalLight position={[-3, 3, 5]} intensity={.6} />
     <RigidBody type="fixed" colliders="cuboid">
       <mesh position={[0, -.2, 0]} receiveShadow><boxGeometry args={[extent * 2, .4, extent * 2]} /><meshStandardMaterial color="#abc8ae" roughness={.95} /></mesh>
     </RigidBody>
@@ -231,6 +235,17 @@ function Garden() {
   </>;
 }
 
+/** Soft light for matte characters: a warm fill from below and the front keeps faces bright. */
+function SoftLights() {
+  return <>
+    <ambientLight intensity={.65} />
+    <hemisphereLight args={[0xfffaf2, 0xe0d3c1, 2.4]} />
+    <directionalLight position={[2, 4, 6]} intensity={1.9} />
+    <directionalLight position={[-4, 2, 4]} intensity={.85} />
+    <directionalLight position={[0, 3, -5]} intensity={.9} />
+  </>;
+}
+
 function CharacterViewport(props: ViewProps) {
   const urls = useMemo(() => ({ characterUrl: props.model.url }), [props.model.url]);
   const cameraOption = useMemo(() => {
@@ -242,19 +257,14 @@ function CharacterViewport(props: ViewProps) {
   }, [props.model]);
   if (props.card) return <GaesupWorld urls={urls} enablePhysics={false}>
     <PreviewBoundary onError={props.onError}>
-      <ambientLight intensity={1.15} />
-      <hemisphereLight args={[0xffffff, 0x787878, 1.8]} />
-      <directionalLight position={[4, 6, 7]} intensity={2.4} />
-      <directionalLight position={[-5, 2, -4]} intensity={1.1} />
+      <SoftLights />
       <CardScene {...props} />
     </PreviewBoundary>
   </GaesupWorld>;
   if (props.studio) return <GaesupWorld urls={urls} enablePhysics={false}>
     <PreviewBoundary onError={props.onError}>
       <color attach="background" args={['#191f17']} />
-      <hemisphereLight args={[0xffffff, 0x86907b, 2.4]} />
-      <directionalLight position={[3, 5, 4]} intensity={3} />
-      <directionalLight position={[-3, 2, -2]} intensity={1.2} />
+      <SoftLights />
       <gridHelper args={[20, 40, '#3d4b32', '#293222']} position={[0, -.02, 0]} />
       <EditingScene {...props} />
     </PreviewBoundary>
@@ -392,9 +402,17 @@ export class ModelViewer {
     if (options.sha256 && options.sha256 !== digest) throw new Error('모델이 고정한 몸 버전과 다릅니다.');
     const gltf = await new GLTFLoader().parseAsync(content, '');
     if (this.disposed || token !== this.generation) { release(gltf); return []; }
+    matteCharacter(gltf.scene);
     let wardrobe: NativeWardrobe | undefined;
     if (options.wardrobe) {
-      try { wardrobe = new NativeWardrobe(gltf.scene); }
+      // "mesh:primitive" of each body mesh, matching the server's coverage keys.
+      const keys = new Map<THREE.Object3D, string>();
+      gltf.scene.traverse(object => {
+        // GLTFLoader stores {meshes, primitives} per primitive mesh; the typings omit primitives.
+        const mapping = gltf.parser.associations.get(object as THREE.Mesh) as { meshes?: number; primitives?: number } | undefined;
+        if (mapping?.meshes !== undefined && mapping.primitives !== undefined) keys.set(object, `${mapping.meshes}:${mapping.primitives}`);
+      });
+      try { wardrobe = new NativeWardrobe(gltf.scene, keys); }
       catch (error) { release(gltf); throw error; }
     }
     if (this.model) this.retired.push(this.model.gltf);
@@ -414,6 +432,18 @@ export class ModelViewer {
   }
   play(index: number) { this.animation = index; this.render(); }
   setCardView(view: CardView) { if (this.presentation === 'card') { this.cardView = view; this.render(); } }
+  setWireframe(enabled: boolean) {
+    this.model?.gltf.scene.traverse(object => {
+      if (!(object instanceof THREE.Mesh)) return;
+      for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+        if ('wireframe' in material) {
+          material.wireframe = enabled;
+          material.needsUpdate = true;
+        }
+      }
+    });
+    this.render();
+  }
   async clearExpression() {
     this.expressions?.clear(); this.render();
     return !this.disposed;
@@ -432,6 +462,8 @@ export class ModelViewer {
   }
   wardrobeDiagnostics() { return this.wardrobe?.diagnostics(); }
   setHairColor(color: string | null) { this.wardrobe?.setHairColor(color); this.render(); }
+  setHiddenBodyTriangles(hidden: Record<string, Uint8Array> | null) { this.wardrobe?.hideTriangles(hidden); this.render(); }
+  setPartColors(slot: string, material: number, mask: THREE.Texture, lights: number[], colors: (string | null)[]) { this.wardrobe?.setRegionColors(slot, material, mask, lights, colors); this.render(); }
   setEditing(enabled: boolean, onCount: (count: number) => void) { this.editing = enabled; this.paintCount = onCount; this.render(); }
   setPaint(settings: PaintSettings) { this.paintSettings = settings; if (this.editor) this.editor.settings = settings; }
   selections() { return this.editor?.export() ?? []; }

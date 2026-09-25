@@ -131,7 +131,7 @@ class AvatarRigTransfer:
             payload = {'body': str(body), 'body_sha256': digest(body), 'donor': str(donor),
                        'donor_sha256': digest(donor), 'output': str(directory),
                        'worker_sha256': digest(Path(__file__).with_name('avatar_rig_transfer_blender.py')),
-                       'binding_sha256': digest(Path(__file__).with_name('avatar_standard_blender.py'))}
+                       'binding_sha256': digest(Path(__file__).with_name('avatar_blender_common.py'))}
             directory.mkdir(parents=True, exist_ok=True)
             _write_json(directory/'input.json', payload)
             _write_json(directory/'previous-worker.json', read_json(root.parent/'worker.json'))
@@ -145,9 +145,12 @@ class AvatarRigTransfer:
         job = self.factory.get(owner, job_id)
         root = self.root(owner, job_id)
         # An existing recovery stays under its own receipt and explicit resume UI.
-        # Donor clips cannot silently replace explicitly requested Meshy actions.
-        if (not job.get('auto_assemble') or read_json(root/'current.json')
-                or read_json(root.parent.parent/'pipeline.json').get('motion_actions')):
+        # Donor clips cannot silently replace Meshy actions the operator chose; the
+        # server-filled default actions may be replaced by the donor's saved clips.
+        # Jobs accepted before the flag existed keep the earlier rule.
+        pipeline = read_json(root.parent.parent/'pipeline.json')
+        explicit_actions = pipeline.get('motion_actions_explicit', bool(pipeline.get('motion_actions')))
+        if not job.get('auto_assemble') or read_json(root/'current.json') or explicit_actions:
             return False
         state = self.get(owner, job_id, during_pipeline=True)
         source = state.get('recommended_source')
@@ -174,7 +177,7 @@ class AvatarRigTransfer:
             try:
                 payload = read_json(directory/'input.json')
                 if (payload['worker_sha256'] != digest(Path(__file__).with_name('avatar_rig_transfer_blender.py'))
-                        or payload['binding_sha256'] != digest(Path(__file__).with_name('avatar_standard_blender.py'))):
+                        or payload['binding_sha256'] != digest(Path(__file__).with_name('avatar_blender_common.py'))):
                     raise ValueError('Rig transfer worker changed')
                 with local_workspace(directory, inputs=[payload['body'], payload['donor']]):
                     command = [blender_executable(), '--background', '--factory-startup', '--disable-autoexec',

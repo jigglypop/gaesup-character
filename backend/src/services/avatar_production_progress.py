@@ -14,7 +14,8 @@ def production_progress(directory, job):
     models_done = sum(p.get('model_status') == 'ready' for p in parts)
     # Provider 100% means generation finished; local download still has to succeed.
     model_fraction = sum(1 if p.get('model_status') == 'ready' else max(0, min(99, p.get('progress') or 0))/100 for p in parts)
-    model_failed = any(p.get('model_status') in ('FAILED', 'CANCELED', 'submission_uncertain', 'submission_rejected') for p in parts)
+    model_failed = any(p.get('model_status') in ('FAILED', 'CANCELED', 'submission_uncertain', 'submission_rejected',
+                                                   'submission_not_sent') for p in parts)
     flow = job.get('character_flow', {})
     worker = read_json(directory/'meshy/worker.json'); rig = read_json(directory/'meshy/character.json')
     delivery = read_json(directory/'meshy/delivery.json')
@@ -24,6 +25,8 @@ def production_progress(directory, job):
     native_ready = native.get('status') == 'review_required'
     incomplete = {p['slot']: p for p in native.get('result', {}).get('incomplete_parts', [])}
     job['assembly_version'] = pointer.get('version') if native_ready else None
+    # An uploaded GLB registered without assembly cannot be the body of new parts.
+    job['assembly_origin'] = native.get('result', {}).get('origin') if native_ready else None
     # Reuse the saved assembly receipt already read for progress. Gallery cards
     # should not each request the whole native-parts state to find their GLB.
     job['assembly_artifacts'] = [
@@ -59,7 +62,8 @@ def production_progress(directory, job):
             active=flow.get('busy') and flow.get('stage') in ('reference', 'queued'),
             failed=reference_status in ('not_sent', 'rejected', 'failed', 'submission_uncertain'))
     view_count = len(job.get('production_spec', {}).get('generated_views', []))
-    image_label = '정면·측면·후면' if view_count == 3 else '정면·측면' if frozen else '이미지'
+    image_label = ('정면·후면·좌우면' if view_count == 4 else
+                   '정면·측면·후면' if view_count == 3 else '정면·측면' if frozen else '이미지')
     if job.get('input_kind') != 'glb':
         add('images', image_label, image_done, len(images),
             active=flow.get('busy') and flow.get('stage') in ('images', 'queued'), failed=image_failed)

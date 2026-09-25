@@ -14,7 +14,7 @@ from PIL import Image
 from src.services.asset_editor import _write_json
 from src.services.avatar_blueprints import AvatarBlueprints
 from src.services.avatar_factory import _LOCK, digest
-from src.services.avatar_image_pipeline import AvatarImagePipeline
+from src.services.avatar_image_pipeline import AvatarImagePipeline, capabilities
 from src.services.avatar_native_parts import AvatarNativeParts
 from src.services.avatar_variants import AvatarVariants
 from src.services.character_pipeline import PipelineError, now, read_json
@@ -55,7 +55,11 @@ def _batch_lease(directory):
 
 
 def isolate_hair(tile):
-    """Remove warm skin and saturated matte remnants, retaining original hair pixels."""
+    """Opt-in chroma filter for monochrome sheets; it cannot identify skin.
+
+    Warm/colored hair matches the same RGB rule. Normal intake preserves every
+    color and alpha value; only explicitly selected monochrome cleanup uses it.
+    """
     tile = tile.convert('RGBA'); pixels = list(tile.getdata()); w, h = tile.size
     mask = bytearray(w*h)
     for i, (r, g, b, a) in enumerate(pixels):
@@ -139,35 +143,24 @@ def split_sheet(factory, owner, payload):
     if len(view_edges) != rows or any(not _valid_edges(edges, columns*3) for edges in view_edges):
         raise PipelineError('invalid_grid', '각 행의 뷰 경계를 0에서 1까지 오름차순으로 입력하세요.', 422)
     contract = {**payload, 'row_edges': row_edges, 'view_edges': view_edges,
-                'revision': 'hair-sheet-crop-v4-transparent-seams' if detect_seams else 'hair-sheet-crop-v3-row-view-seams'}
+                'revision': 'hair-sheet-crop-v5-preserve-pixels'}
     sheet_id = _hash(contract)[:24]
     path = factory.root/str(int(owner))/'part-sheets'/sheet_id/'sheet.json'
     if path.is_file():
         return read_json(path)
     items = []
-    cropped_rows = None
-    if payload['remove_skin']:
-        from src.services.avatar_hair_sheet import crop_rows
-        cropped_rows = crop_rows(image, [round(image.height*edge) for edge in row_edges],
-                                 [[round(image.width*edge) for edge in edges] for edges in view_edges])
-    canvas_side = (max(max(tile.size) for row in cropped_rows for tile in row)+16
-                   if cropped_rows else max(max(round(image.width*b)-round(image.width*a)
-                   for edges in view_edges for a, b in zip(edges, edges[1:])),
-                   max(round(image.height*b)-round(image.height*a)
-                   for a, b in zip(row_edges, row_edges[1:])))+16)
+    from src.services.avatar_hair_sheet import crop_rows
+    cropped_rows = crop_rows(image, [round(image.height*edge) for edge in row_edges],
+                            [[round(image.width*edge) for edge in edges] for edges in view_edges],
+                            remove_skin=payload['remove_skin'])
+    canvas_side = max(max(tile.size) for row in cropped_rows for tile in row)+16
     for row in range(rows):
-        y0, y1 = round(image.height*row_edges[row]), round(image.height*row_edges[row+1])
-        edges = view_edges[row]
-        row_tiles = cropped_rows[row] if cropped_rows else None
+        row_tiles = cropped_rows[row]
         for col in range(columns):
             tiles = []
             for offset, view in enumerate(payload['view_order']):
                 edge = col*3+offset
-                if row_tiles is not None:
-                    tile = row_tiles[edge]
-                else:
-                    x0, x1 = round(image.width*edges[edge]), round(image.width*edges[edge+1])
-                    tile = image.crop((x0, y0, x1, y1))
+                tile = row_tiles[edge]
                 if not tile.getchannel('A').getbbox():
                     raise PipelineError('empty_crop', f'{row+1}행 {col+1}번 {view} 이미지가 비어 있습니다.', 422)
                 tiles.append((view, tile))
@@ -249,13 +242,15 @@ class PartBatches:
         artifact = next((value for value in native.get('artifacts', [])
                          if value.get('name') == 'hair.glb' and _ASSET_ID.fullmatch(str(value.get('sha256', '')))), None)
         complete = False
-        if native.get('status') == 'review_required' and artifact:
+        if (native.get('status') == 'review_required' and artifact
+                and not native.get('expression_pending') and not native.get('incomplete_parts')):
             try:
                 AvatarNativeParts(self.factory).artifact(owner, job_id, native['version'], 'hair.glb')
                 complete = True
             except PipelineError:
                 artifact = None
-        active = child.get('status') in ('pipeline_running', 'accepted', 'running')
+        active = (child.get('status') in ('pipeline_running', 'accepted', 'running')
+                  or bool(child.get('character_flow', {}).get('busy')))
         if native.get('status') in ('accepted', 'running'):
             active = True
         queued = child.get('status') == 'pipeline_queued'
@@ -265,6 +260,14 @@ class PartBatches:
                   'child_status': child.get('status'),
                   'progress': {key: progress[key] for key in ('stage', 'message') if key in progress},
                   'error': None if complete else child.get('error') or native.get('error')}
+        hair_input = next((part for part in child.get('parts', []) if part['slot'] == 'hair'), {})
+        if hair_input.get('hair_redraw'):
+            result['prepared_views'] = [
+                {'view': view, 'status': image.get('status'),
+                 'background_removal': image.get('background_removal'),
+                 'url': next((asset['url'] for asset in child.get('artifacts', [])
+                              if image.get('status') == 'succeeded' and asset['name'] == image.get('file')), None)}
+                for view, image in hair_input.get('views', {}).items()]
         if generated_sha:
             result['model_receipt'] = {'sha256': generated_sha}
         if artifact:
@@ -299,6 +302,9 @@ class PartBatches:
             raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
         batch = hashlib.sha256(f'{owner}:part-batch:{key}'.encode()).hexdigest()[:24]
         path = self._path(owner, batch); fingerprint = _hash(payload)
+        if not read_json(path):
+            from src.services.meshy_status import require_credits
+            require_credits(len(payload['items']))
         with _LOCK, _batch_lease(self.root(owner, batch)):
             old = read_json(path)
             if old:
@@ -321,6 +327,15 @@ class PartBatches:
             frozen_context = {'prompt_snapshot': prompt_snapshot,
                 'meshy_options': {'hair': freeze_options(self.factory, owner, payload['meshy_options'],
                                                          'hair', prompt_snapshot['meshy_texture'])}}
+            if payload.get('redraw') is not None:
+                from src.services.avatar_hair_redraw import contract
+                from src.services.avatar_openai_images import DEFAULT_BASE
+                frozen_context['hair_redraw_contract'] = contract(**payload['redraw'])
+                available = capabilities()
+                if not available['image_configured']:
+                    raise PipelineError('image_provider_unavailable', '고화질 다시 그리기에는 이미지 서비스 연결이 필요합니다.', 503)
+                frozen_context['image_settings'] = {'image_provider': 'openai', 'image_model': available['image_model'],
+                    'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/')}
             # Persist the full frozen batch before accepting any child. The worker uses
             # deterministic child keys, so a crash can resume without a second request.
             children = []
@@ -332,7 +347,7 @@ class PartBatches:
             record = {'id': batch, 'fingerprint': fingerprint, 'input': payload,
                       'base_job_id': payload['base_job_id'], 'base_version': payload['base_version'],
                       'base_receipt': base_receipt, 'concurrency': payload['concurrency'],
-                      'budget': {'jobs': len(children), 'image_tasks_each': 0, 'meshy_tasks_each': 1,
+                      'budget': {'jobs': len(children), 'image_tasks_each': (3 if payload['redraw'].get('worn') else 4) if payload.get('redraw') is not None else 0, 'meshy_tasks_each': 1,
                                  'meshy_rig_tasks_each': 0, 'meshy_animation_tasks_each': 0},
                       'frozen_context': frozen_context, 'status': 'accepted', 'created_at': now(),
                       'updated_at': now(), 'error': None, 'items': children}
@@ -409,16 +424,25 @@ class PartBatches:
                             'slot': 'hair', 'hair_length': 'source', 'bottom_kind': 'source',
                             'view_mode': 'front_side_back', 'uploaded_views': source['views'],
                             'part_name': source['name'],
+                            **({'redraw': record['input']['redraw']} if record['input'].get('redraw') is not None else {}),
                             'meshy_options': record['input']['meshy_options']},
                             frozen_context=record['frozen_context'])
-                        if child['id'] != job_id or child.get('limits') != _EXPECTED_BUDGET:
+                        child_pipeline = read_json(self.factory.directory(owner, job_id)/'pipeline.json')
+                        expected_budget = {**_EXPECTED_BUDGET,
+                            'image_tasks': record['budget']['image_tasks_each'] + sum(
+                                len(image.get('previous_attempts', [])) for part in child_pipeline.get('parts', [])
+                                for image in part.get('views', {}).values())}
+                        if child['id'] != job_id or child.get('limits') != expected_budget:
                             raise PipelineError('budget_mismatch', '헤어 생성 예산 계약을 확인할 수 없습니다.', 409)
                         child = self.factory.get(owner, job_id)
                         service = AvatarImagePipeline(self.factory)
                         if child['status'] in ('pipeline_paused', 'failed', 'recovery_required', 'review_required'):
                             if not explicit_resume:
                                 update(index, snapshot); return
-                            service.resume(owner, job_id, stage='models')
+                            images_pending = any(part.get('hair_redraw') and any(
+                                image.get('status') != 'succeeded' for image in part.get('views', {}).values())
+                                for part in child_pipeline.get('parts', []))
+                            service.resume(owner, job_id, stage='images' if images_pending else 'models')
                         service.execute(owner, job_id)
                         update(index, self._child_snapshot(owner, item))
                     except Exception as exc:
