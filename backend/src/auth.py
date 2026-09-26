@@ -39,10 +39,26 @@ def _compute_level(roles: Iterable[str]) -> Optional[int]:
     return min(levels) if levels else None
 
 
+_PLACEHOLDER_SECRET_MARKERS = (
+    "replace-this", "replace_this", "replaceme", "replace-me", "changeme", "change-me", "change_me",
+    "your-secret", "your_secret", "yoursecret", "placeholder", "example", "insecure", "not-a-secret",
+)
+
+
+def _is_placeholder_secret(raw: str) -> bool:
+    """Template values (such as the one in .env.example) and one-word secrets."""
+    lowered = raw.lower()
+    if any(marker in lowered for marker in _PLACEHOLDER_SECRET_MARKERS):
+        return True
+    return lowered.strip("-_ ") in {"secret", "jwt-secret", "jwt_secret", "password", "test", "dev", "default"}
+
+
 def _resolve_secret() -> bytes:
     raw = (os.getenv("JWT_SECRET") or "").strip()
     if not raw:
         raise RuntimeError("JWT_SECRET 환경변수가 설정되어 있지 않습니다.")
+    if _is_placeholder_secret(raw):
+        raise RuntimeError("JWT_SECRET 이 예시 값입니다. 임의의 비밀 값으로 설정하세요.")
     min_len = int(os.getenv("JWT_MIN_SECRET_LENGTH", "32") or "32")
     raw_bytes = raw.encode("utf-8")
     try:

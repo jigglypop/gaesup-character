@@ -64,6 +64,30 @@ def tripo_task_id(response_json):
     return data.get('task_id')
 
 
+# Tripo reports an empty balance with code 2010 (also as HTTP 403).
+TRIPO_CREDIT_CODES = (2010,)
+
+
+def tripo_refusal(response_json):
+    """A definite refusal inside a successful HTTP response, or None.
+
+    Tripo answers every request with {"code": ..., "data": ...}; a non-zero code means no
+    task was created. The public message names only the numeric code, never provider text.
+    """
+    if not isinstance(response_json, dict):
+        return None
+    code = response_json.get('code')
+    if code in (0, None):
+        return None
+    number = code if isinstance(code, int) and not isinstance(code, bool) else None
+    if number in TRIPO_CREDIT_CODES:
+        message = 'Tripo 크레딧 부족 · 충전 후 3D 파츠부터 실행하세요 · 받은 이미지와 파일은 보존했습니다.'
+    else:
+        label = f' (코드 {number})' if number is not None else ''
+        message = f'Tripo 요청 거절{label} · 입력을 확인한 뒤 3D 파츠부터 실행으로 다시 요청할 수 있습니다 · 받은 이미지와 파일은 보존했습니다.'
+    return {'code': number, 'message': message}
+
+
 def tripo_state(response_json):
     data = response_json.get('data') or {}
     return TRIPO_STATUS.get(str(data.get('status', 'unknown')).lower(), 'IN_PROGRESS'), data.get('progress')

@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import logging
 from typing import Any, Callable
-import httpx
 from src.services.media import (
     _dispatch_image_generation,
     _image_dimensions,
@@ -11,10 +10,13 @@ from src.services.media import (
     _resolve_default_image_model,
     _resolve_media_model_alias,
     _upload_to_s3,
+    fetch_public_url,
 )
 from src.text_utils import redact_url
 
 logger = logging.getLogger(__name__)
+
+MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 def _first_text(value: Any) -> str:
@@ -56,17 +58,15 @@ def prepare_image_generation_refs(
         if not url:
             continue
         try:
-            response = httpx.get(
+            content, content_type = fetch_public_url(
                 url,
                 timeout=timeout,
-                follow_redirects=True,
+                max_bytes=MAX_REFERENCE_IMAGE_BYTES,
                 headers={"Accept": "image/*,*/*", "User-Agent": user_agent},
             )
-            response.raise_for_status()
-            content = response.content or b""
             if not content:
                 continue
-            mime_type = (response.headers.get("content-type") or "image/png").split(";", 1)[0].strip() or "image/png"
+            mime_type = (content_type or "image/png").split(";", 1)[0].strip() or "image/png"
             prepared.append({
                 **{key: value for key, value in ref.items() if key not in {"url", "image_url", "src"}},
                 "inlineData": {

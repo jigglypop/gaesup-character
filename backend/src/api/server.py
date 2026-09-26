@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import hmac
 import logging
 import os
 import threading
@@ -68,6 +69,34 @@ app = FastAPI(
 )
 app.include_router(studio_router, prefix='/api')
 app.include_router(studio_glb_assets_router, prefix='/api')
+
+
+_API_KEY = os.getenv("API_KEY", "").strip()
+
+
+def _api_key_matches(candidate: str) -> bool:
+    return hmac.compare_digest(candidate.encode("utf-8"), _API_KEY.encode("utf-8"))
+
+
+async def auth_middleware(request: Request, call_next):
+    request_id = ensure_request_id(request)
+    if not _API_KEY or is_public_path(request.url.path) or request.method == "OPTIONS":
+        return await call_next(request)
+    key = (request.headers.get("x-api-key") or "").strip()
+    if _api_key_matches(key):
+        return await call_next(request)
+    return attach_request_id(
+        JSONResponse(
+            status_code=401,
+            content={"detail": "Unauthorized", "requestId": request_id},
+        ),
+        request_id,
+    )
+
+
+# The middleware added last runs first. The API-key check sits inside CORS and request
+# logging so its 401 responses carry CORS headers and are logged like any other response.
+app.middleware("http")(auth_middleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
@@ -82,39 +111,26 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 app.add_exception_handler(PipelineError, pipeline_error_handler)
 
 
-_API_KEY = os.getenv("API_KEY", "").strip()
-
-
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    request_id = ensure_request_id(request)
-    if not _API_KEY or is_public_path(request.url.path) or request.method == "OPTIONS":
-        return await call_next(request)
-    key = (request.headers.get("x-api-key") or "").strip()
-    if key == _API_KEY:
-        return await call_next(request)
-    return attach_request_id(
-        JSONResponse(
-            status_code=401,
-            content={"detail": "Unauthorized", "requestId": request_id},
-        ),
-        request_id,
-    )
-
-
 _DB_STATUS: dict = {"value": None, "at": 0.0, "running": False}
 _DB_STATUS_LOCK = threading.Lock()
 
 
+def _public_database_status(value: dict) -> dict:
+    """/health is public: report the state only, never the driver's error text."""
+    if value.get("error"):
+        logger.warning("database health check failed: %s", value["error"])
+    return {key: value[key] for key in ("configured", "ok") if key in value}
+
+
 def _refresh_database_status() -> None:
-    value = db.ping()
+    value = _public_database_status(db.ping())
     with _DB_STATUS_LOCK:
         _DB_STATUS.update(value=value, at=time.monotonic(), running=False)
 
 
 def _database_status() -> dict:
     if not db.is_configured():
-        return db.ping()
+        return _public_database_status(db.ping())
     # An unreachable database host takes seconds to fail; /health answers from the last check
     # and refreshes it in the background so local launchers can still identify this server.
     with _DB_STATUS_LOCK:

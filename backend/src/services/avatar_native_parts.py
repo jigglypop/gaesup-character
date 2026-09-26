@@ -10,7 +10,7 @@ from copy import deepcopy
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, _QUEUE, digest
 from src.services.avatar_meshy import AvatarMeshy
-from src.services.character_parts import blender_executable
+from src.services.character_parts import blender_executable, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity, state as process_state
 from src.services.object_storage import copy_file, local_workspace, publish_checkpoint
@@ -314,8 +314,8 @@ class AvatarNativeParts:
                 if 'front' not in images:
                     raise PipelineError('part_images_missing', f'{slot}: 몸 셸 의상에는 저장된 정면 이미지가 필요합니다.', 409)
                 shape = part_inputs[slot].get('shape')
-                identity = {'views': hashes, 'shape': shape} if shape else hashes
-                identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+                shell_inputs = {'views': hashes, 'shape': shape} if shape else hashes
+                identity_hash = hashlib.sha256(json.dumps(shell_inputs, sort_keys=True).encode()).hexdigest()
                 parts.append({'slot': slot, 'part_method': 'body_shell', 'path': None, 'sha256': identity_hash,
                               'garment_kind': (part_inputs[slot].get('fit_profile') or {}).get('kind') or garment_kinds[slot],
                               'fit_profile': part_inputs[slot].get('fit_profile'), 'shape': shape,
@@ -459,17 +459,21 @@ class AvatarNativeParts:
                 command = [blender_executable(), '--background', '--factory-startup', '--disable-autoexec',
                            '--python-exit-code', '1', '--python', str(Path(__file__).with_name('avatar_native_parts_blender.py')),
                            '--', str(directory/'input.json')]
+                environment = {**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'}
+                if read_json(self.factory.directory(owner, job)/'pipeline.json').get('uploaded_glb'):
+                    # An imported base body publishes its front/side/back renders as the frozen
+                    # body views later part requests draw on (publish_import_views).
+                    environment['ASSET_DETAIL_RENDERS'] = '1'
                 with (directory/'blender.log').open('wb') as log:
-                    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
-                        env={**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'},
+                    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment,
                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
                     _write_json(directory/'runner.json', {'process': identity(process.pid)})
                     publish_checkpoint(directory/'runner.json')
                     try:
                         code = process.wait(timeout=1800)
                     except subprocess.TimeoutExpired:
-                        process.terminate()
-                        process.wait(timeout=10)
+                        # Kill a worker that ignores terminate, so no Blender outlives a failed record.
+                        stop_process(process)
                         raise
                 if code:
                     raise ValueError('Blender fitting failed')

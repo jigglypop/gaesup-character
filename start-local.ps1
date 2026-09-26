@@ -79,6 +79,8 @@ while (Test-PortListening $ApiPort) {
             while ((Test-PortListening $ApiPort) -and (Get-Date) -lt $releaseDeadline) { Start-Sleep -Milliseconds 300 }
             if (-not (Test-PortListening $ApiPort)) { break }
         }
+        # A second API on this workspace would share its data root outside the single-worker locks.
+        throw "The previous API of this workspace on port $ApiPort is still busy (paid requests $($existing.activity.paid_requests), running $($existing.activity.running_tasks)). Run this script again once it is idle."
     }
     $ownerIds = (Get-NetTCPConnection -State Listen -LocalPort $ApiPort).OwningProcess | Sort-Object -Unique
     Write-Host "Preserving API port $ApiPort (PID $($ownerIds -join ',')). Selecting an available port."

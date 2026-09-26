@@ -12,13 +12,16 @@ export type AssetModelPreviewProps = {
   emptyLabel: string;
   detail?: boolean;
   autoLoad?: boolean;
+  /** Play an animation clip once the model is loaded: this clip name when present, otherwise the first. */
+  animate?: boolean;
+  clip?: string;
 };
 
 type View = 'model' | 'image';
 
 const modelIdentity = (model: AssetPreviewModel) => `${model.url}:${model.sha256 ?? ''}`;
 
-export function AssetModelPreview({ model, models, image, name, emptyLabel, detail = false, autoLoad = detail }: AssetModelPreviewProps) {
+export function AssetModelPreview({ model, models, image, name, emptyLabel, detail = false, autoLoad = detail, animate = false, clip }: AssetModelPreviewProps) {
   const viewerMount = useRef<HTMLDivElement>(null);
   const viewer = useRef<import('../viewer').ModelViewer | null>(null);
   const nameRef = useRef(name);
@@ -88,8 +91,9 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
       });
       return Promise.race([instance.load(modelUrl, { sha256: modelSha256 }), timeout])
         .finally(() => clearTimeout(timeoutId));
-    }).then(() => {
+    }).then(clips => {
       if (!active) return;
+      if (animate && clips?.length) instance?.play(Math.max(0, clips.findIndex(item => item.name === clip)));
       setReady(true);
       setLoading(false);
     }).catch(reason => {
@@ -106,7 +110,7 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
       instance?.dispose();
       if (viewer.current === instance) viewer.current = null;
     };
-  }, [attempt, modelKey, modelSha256, modelUrl, view, visible]);
+  }, [animate, attempt, clip, modelKey, modelSha256, modelUrl, view, visible]);
 
   useEffect(() => { viewer.current?.setCardView(cardView); }, [cardView, ready]);
   useEffect(() => { if (ready) viewer.current?.setWireframe(wireframe); }, [wireframe, ready]);

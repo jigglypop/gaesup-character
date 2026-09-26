@@ -24,6 +24,12 @@ export type Generation = {
   artifacts: GenerationArtifact[];
   gpu?: { estimated_bytes_with_mips: number };
   reference_id?: string | null;
+  vector?: GenerationVector | null;
+};
+export type VectorColors = 12 | 16 | 24 | 32;
+export type GenerationVector = {
+  colors: VectorColors; paths: number; palette: string[]; width: number; height: number; bytes: number;
+  revision: string; source_sha256: string; created_at: string;
 };
 
 export type GenerationInput = {
@@ -100,4 +106,7 @@ export const generationsApi = {
     }
   },
   resume: (id: string) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 }),
+  vectorize: (id: string, colors: VectorColors) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/vector`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ colors }), timeoutMs: 60000,
+  }),
 };

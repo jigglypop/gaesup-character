@@ -64,12 +64,17 @@ class AvatarFactory:
             schedule(self, owner, job_id)
         if job.get('input_kind') == 'image' and job['status'] in ('pipeline_paused', 'failed', 'recovery_required'):
             job = self._settle_interrupted(owner, job_id) or job
-        if job['status'] in ('accepted', 'running') and job['executor'] != self.instance:
+        if job['status'] in ('accepted', 'running') and job.get('executor') != self.instance:
+            # Only the removed local 23-bone factory wrote these statuses. Its Blender
+            # worker and finalizer no longer exist, so a stopped run, finished or not,
+            # is kept unchanged for inspection instead of being sealed by other rules.
             worker_state = process_state(read_json(directory/'output/runner.json').get('process'))
-            if (directory/'output/worker-complete.json').exists() and worker_state == 'exited':
-                self.finalize(owner, job_id); job = read_json(directory/'job.json')
-            elif worker_state == 'exited' or (worker_state != 'running' and process_state(job.get('executor_process')) == 'exited'):
-                job.update(status='recovery_required', error='서버가 중단된 생산 작업입니다. 원본과 중간 파일을 보존했습니다. 새 버전으로 다시 생산해 주세요.')
+            if worker_state == 'exited' or (worker_state != 'running' and process_state(job.get('executor_process')) == 'exited'):
+                finished = (directory/'output/worker-complete.json').exists()
+                job.update(status='recovery_required', error=(
+                    '이전 방식 조립 결과는 더 이상 확정하지 않습니다. 원본과 작업 파일을 보존했습니다. 새 버전으로 다시 생산해 주세요.'
+                    if finished else
+                    '서버가 중단된 생산 작업입니다. 원본과 중간 파일을 보존했습니다. 새 버전으로 다시 생산해 주세요.'))
                 _write_json(directory/'job.json', job)
         public = {k: deepcopy(v) for k, v in job.items() if k not in ('executor', 'executor_process', 'fingerprint', 'files')}
         public['progress'] = read_json(directory/'output/progress.json', {'stage': 'queued', 'message': '로컬 생산 대기 중'})

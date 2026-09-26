@@ -52,6 +52,23 @@ if ! docker inspect "$service_name" >/dev/null 2>&1 && docker inspect "$rollback
   fi
 fi
 
+# Replace the running release only once it reports no paid requests and no background work,
+# as start-local.ps1 does. A release that cannot be reached is replaced as before. The default
+# drain leaves room for the image build and health check inside the 900 s SSM command timeout.
+drain_deadline=$((SECONDS + ${ASSET_DEPLOY_DRAIN_SECONDS:-420}))
+while docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; do
+  busy="$(curl --silent --max-time 5 http://127.0.0.1:8080/api/health | python3 -c '
+import json, sys
+activity = json.load(sys.stdin).get("activity") or {}
+print(int(activity.get("paid_requests", 0)) + int(activity.get("running_tasks", 0)))' 2>/dev/null || echo unknown)"
+  [[ "$busy" == 0 || "$busy" == unknown ]] && break
+  if (( SECONDS >= drain_deadline )); then
+    echo "running release still has $busy paid or background tasks; deploy again once it is idle" >&2
+    exit 4
+  fi
+  sleep 5
+done
+
 original_id="$(docker inspect -f '{{.Id}}' "$service_name" 2>/dev/null || true)"
 candidate_id=''
 restore_previous() {

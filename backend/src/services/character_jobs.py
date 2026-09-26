@@ -74,8 +74,18 @@ def _submit(directory: Path, value: dict, endpoint: str, payload: dict, client: 
     save_submission_response(directory, value['stage'], response)
     response.raise_for_status()
     if value.get('provider') == 'tripo':
-        from src.services.model_providers import tripo_task_id
-        task_id = tripo_task_id(response.json())
+        from src.services.model_providers import tripo_refusal, tripo_task_id
+        body = response.json()
+        refusal = tripo_refusal(body)
+        if refusal is not None:
+            # A non-zero code in a 200 answer created no task: a definite refusal, not an
+            # unknown outcome. The raw body stays in the private submission receipt.
+            from src.services.character_pipeline import PipelineError
+            value.update(status="submission_rejected", http_status=response.status_code,
+                         provider_code=refusal['code'])
+            _write_json(directory / "character.json", value)
+            raise PipelineError('provider_rejected', refusal['message'], 422)
+        task_id = tripo_task_id(body)
     else:
         task_id = response.json().get("result")
     if not isinstance(task_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", task_id):

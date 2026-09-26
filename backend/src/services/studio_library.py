@@ -90,6 +90,46 @@ def _pattern_maps(surface, n, seed):
     return heights, colours
 
 
+def _tile_maps(surface, n, seed):
+    """Lossless albedo, normal and ORM WebP bytes for one reproducible tile identity."""
+    rng = random.Random(seed)
+    # Preserve the original five surfaces byte-for-byte. New authored families
+    # use their own periodic functions while sharing the same wrapped derivatives.
+    if surface in {'wood', 'bark', 'brick'}:
+        heights, colour_modifiers = _pattern_maps(surface, n, seed)
+    else:
+        # Integer frequencies produce a continuous periodic surface, including
+        # normal derivatives. Each tile samples [0, 1), so texels aren't duplicated.
+        waves = [(rng.randint(1, 24), rng.randint(-24, 24), rng.random()*math.tau,
+                  .6**octave) for octave in range(7)]
+        xs = [[math.sin(math.tau*fx*x/n+phase) for x in range(n)] for fx, _, phase, _ in waves]
+        xc = [[math.cos(math.tau*fx*x/n+phase) for x in range(n)] for fx, _, phase, _ in waves]
+        ys = [[math.sin(math.tau*fy*y/n) for y in range(n)] for _, fy, _, _ in waves]
+        yc = [[math.cos(math.tau*fy*y/n) for y in range(n)] for _, fy, _, _ in waves]
+        weight = sum(w[3] for w in waves)
+        heights = array('f', (sum(a*(xs[i][x]*yc[i][y]+xc[i][x]*ys[i][y])
+            for i, (_, _, _, a) in enumerate(waves))/weight for y in range(n) for x in range(n)))
+        colour_modifiers = heights
+    base = SURFACES[surface]; albedo, normals, orm = bytearray(), bytearray(), bytearray()
+    clamp = lambda v: max(0, min(255, round(v)))
+    for y in range(n):
+        for x in range(n):
+            h = heights[y*n+x]
+            colour = colour_modifiers[y*n+x]
+            albedo.extend(clamp(c+(10 if surface == 'snow' else 24)*colour) for c in base)
+            dx = (heights[y*n+(x+1)%n]-heights[y*n+(x-1)%n])*n*.025
+            dy = (heights[((y+1)%n)*n+x]-heights[((y-1)%n)*n+x])*n*.025
+            length = math.sqrt(dx*dx+dy*dy+1)
+            normals.extend((clamp(127.5-dx/length*127.5), clamp(127.5+dy/length*127.5), clamp(127.5+127.5/length)))
+            orm.extend((255, clamp(220+15*h), 0))
+    maps = {}
+    for name, raw in (('albedo', albedo), ('normal', normals), ('orm', orm)):
+        output = io.BytesIO()
+        Image.frombytes('RGB', (n, n), bytes(raw)).save(output, format='WEBP', lossless=True, method=4)
+        maps[name+'.webp'] = output.getvalue()
+    return maps
+
+
 class StudioLibrary:
     def __init__(self, factory, owner):
         self.factory, self.owner = factory, owner
@@ -198,48 +238,20 @@ class StudioLibrary:
         identity['algorithm'] = 'periodic-fourier-pbr-v3'
         texture_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
         directory = self.root/'textures'/texture_id
+        if (directory/'record.json').is_file():
+            return self.texture(texture_id)
+        # The maps depend only on the identity, so concurrent requests compute and store identical bytes.
+        # The shared factory lock guards only the record commit, never this CPU-bound work.
+        maps = _tile_maps(payload['surface'], payload['size'], payload['seed'])
+        directory.mkdir(parents=True, exist_ok=True)
+        files = {}
+        for filename, data in maps.items():
+            (directory/filename).write_bytes(data)
+            files[filename] = hashlib.sha256(data).hexdigest()
+        n = payload['size']
         with _LOCK:
             if (directory/'record.json').is_file():
                 return self.texture(texture_id)
-            n, seed, surface = payload['size'], payload['seed'], payload['surface']
-            rng = random.Random(seed)
-            # Preserve the original five surfaces byte-for-byte. New authored families
-            # use their own periodic functions while sharing the same wrapped derivatives.
-            if surface in {'wood', 'bark', 'brick'}:
-                heights, colour_modifiers = _pattern_maps(surface, n, seed)
-            else:
-                # Integer frequencies produce a continuous periodic surface, including
-                # normal derivatives. Each tile samples [0, 1), so texels aren't duplicated.
-                waves = [(rng.randint(1, 24), rng.randint(-24, 24), rng.random()*math.tau,
-                          .6**octave) for octave in range(7)]
-                xs = [[math.sin(math.tau*fx*x/n+phase) for x in range(n)] for fx, _, phase, _ in waves]
-                xc = [[math.cos(math.tau*fx*x/n+phase) for x in range(n)] for fx, _, phase, _ in waves]
-                ys = [[math.sin(math.tau*fy*y/n) for y in range(n)] for _, fy, _, _ in waves]
-                yc = [[math.cos(math.tau*fy*y/n) for y in range(n)] for _, fy, _, _ in waves]
-                weight = sum(w[3] for w in waves)
-                heights = array('f', (sum(a*(xs[i][x]*yc[i][y]+xc[i][x]*ys[i][y])
-                    for i, (_, _, _, a) in enumerate(waves))/weight for y in range(n) for x in range(n)))
-                colour_modifiers = heights
-            base = SURFACES[surface]; albedo, normals, orm = bytearray(), bytearray(), bytearray()
-            clamp = lambda v: max(0, min(255, round(v)))
-            for y in range(n):
-                for x in range(n):
-                    h = heights[y*n+x]
-                    colour = colour_modifiers[y*n+x]
-                    albedo.extend(clamp(c+(10 if surface == 'snow' else 24)*colour) for c in base)
-                    dx = (heights[y*n+(x+1)%n]-heights[y*n+(x-1)%n])*n*.025
-                    dy = (heights[((y+1)%n)*n+x]-heights[((y-1)%n)*n+x])*n*.025
-                    length = math.sqrt(dx*dx+dy*dy+1)
-                    normals.extend((clamp(127.5-dx/length*127.5), clamp(127.5+dy/length*127.5), clamp(127.5+127.5/length)))
-                    orm.extend((255, clamp(220+15*h), 0))
-            directory.mkdir(parents=True, exist_ok=True)
-            files = {}
-            for name, raw in (('albedo', albedo), ('normal', normals), ('orm', orm)):
-                output = io.BytesIO()
-                Image.frombytes('RGB', (n, n), bytes(raw)).save(output, format='WEBP', lossless=True, method=4)
-                data = output.getvalue(); filename = name+'.webp'
-                (directory/filename).write_bytes(data)
-                files[filename] = hashlib.sha256(data).hexdigest()
             record = {'id': texture_id, **identity, 'created_at': now(), 'files': files,
                 'tileable': True, 'channels': {'orm': {'r': 'occlusion', 'g': 'roughness', 'b': 'metalness'}},
                 'material': {'baseColor': 'albedo.webp', 'normal': 'normal.webp', 'orm': 'orm.webp',

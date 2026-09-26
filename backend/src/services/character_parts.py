@@ -25,6 +25,20 @@ def blender_executable() -> str | None:
     return None
 
 
+def stop_process(process: subprocess.Popen, grace: float = 10) -> None:
+    """Stop a timed-out worker: terminate, kill it if it ignores that, and reap it.
+
+    Raises subprocess.TimeoutExpired only if the process survives a kill; its runner
+    receipt then still names a live process, so callers never report it as stopped.
+    """
+    process.terminate()
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=grace)
+
+
 def separate_materials(model: Path, output: Path, selections: list[dict] | None = None, source_sha256: str | None = None) -> dict:
     executable = blender_executable()
     if not executable:
@@ -45,7 +59,11 @@ def separate_materials(model: Path, output: Path, selections: list[dict] | None 
                                       "source_sha256": _digest(worker_model), "review_only": selections is not None})
     command = [executable, "--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1",
                "--python", str(Path(__file__).with_name("character_parts_blender.py")), "--", str(output / "input.json")]
-    with (output / "blender.log").open("wb") as log:
+    from src.services.avatar_factory import _QUEUE
+    # One BLENDER_CONCURRENCY slot, as for assembly. The only caller holds non-blocking
+    # run/Blender file locks, never this semaphore, so waiting here cannot deadlock.
+    # The worker's own timeout starts once a slot is granted.
+    with _QUEUE, (output / "blender.log").open("wb") as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         _write_json(output / "runner.json", {"process": identity(process.pid), "source_sha256": _digest(model)})

@@ -84,6 +84,16 @@ if login_user or login_password:
         '  proxy_read_timeout 65s;',
         '  proxy_buffering off;',
         '}',
+        # Raw GLB uploads; the API streams them and caps each at 256 MiB.
+        'location ~ ^/api/(avatar-factory/base-bodies/glb-assets|studio/glb-assets/upload)$ {',
+        '  client_max_body_size 256m;',
+        '  proxy_pass http://127.0.0.1:8000;',
+        '  proxy_set_header X-User-Id 1;',
+        '  proxy_set_header Authorization "";',
+        '  proxy_set_header Host $host;',
+        '  proxy_read_timeout 65s;',
+        '  proxy_buffering off;',
+        '}',
         'location = /health { return 404; }',
     ]
 Path('/etc/nginx/studio-public.conf').write_text('\n'.join(public_rules) + '\n', encoding='utf-8')

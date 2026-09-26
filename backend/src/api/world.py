@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import itertools
 import logging
 import os
 import pathlib
 import struct
+import threading
 import time
 import uuid
 import base64
@@ -21,8 +23,10 @@ except Exception:
 
 from src import db
 from src.services.media import (
+    UnsafeRemoteUrl,
     _s3_client,
     _upload_to_s3,
+    fetch_public_url,
 )
 from src.api.sse import sse_done, sse_error, sse_response, sse_status
 from src.auth import UserContext, get_current_user
@@ -61,6 +65,22 @@ _QUADRUPED_PROMPT_TERMS = {
 _MEMORY_JOBS: dict[str, dict[str, Any]] = {}
 _MEMORY_ASSETS: list[dict[str, Any]] = []
 _MEMORY_PLACEMENTS: dict[str, dict[str, Any]] = {}
+_MEMORY_LOCK = threading.Lock()
+_MEMORY_ASSET_IDS = itertools.count(1)
+_MEMORY_JOB_LIMIT = 500
+_MEMORY_ASSET_LIMIT = 2000
+_MEMORY_PLACEMENT_LIMIT = 500
+_TERMINAL_JOB_STATUSES = {"done", "planned", "error"}
+_JOB_ID_TAKEN = "이미 다른 사용자가 사용 중인 작업 ID입니다."
+_MAX_MODEL_FETCH_BYTES = 256 * 1024 * 1024
+_MESHY_ASSET_DOMAIN = "meshy.ai"
+_WORLD_MODEL_MEDIA_KIND = "world-model"
+# Metadata written by generation and read back by the model proxy and provider refresh.
+# PATCH /world/assets/{id} never changes these; see _is_server_owned_metadata_key.
+_SERVER_OWNED_METADATA_KEYS = frozenset({
+    "provider", "source", "source_asset_id", "task_id", "rigging", "output_contract", "part_bundle_role",
+})
+_SERVER_OWNED_METADATA_PREFIXES = ("stored_", "original_", "refreshed_", "provider_")
 
 _CHARACTER_KINDS = {"character", "npc"}
 _MESHY_CHARACTER_ACTION_PRESET: list[dict[str, Any]] = [
@@ -236,16 +256,60 @@ def _model_mime_from_url(url: str, content_type: str = "") -> str:
     return "model/gltf-binary"
 
 
+def _url_host(url: str) -> str:
+    try:
+        return (httpx.URL(str(url or "").strip()).host or "").strip().lower().rstrip(".")
+    except Exception:
+        return ""
+
+
+def _configured_provider_host(settings: dict[str, str]) -> str:
+    return _url_host(_setting(settings, "world_3d_api_url", "WORLD_3D_API_URL", ""))
+
+
 def _fetch_model_bytes(model_url: str, timeout: int = 180) -> tuple[bytes, str]:
     headers = {
         "Accept": "model/gltf-binary,model/gltf+json,application/octet-stream,*/*",
         "User-Agent": "signight-world-model-proxy/1.0",
     }
-    response = httpx.get(model_url, timeout=timeout, follow_redirects=True, headers=headers)
-    response.raise_for_status()
-    if not response.content:
+    # Every hop must resolve to a public address; only the operator-configured provider host is exempt.
+    content, content_type = fetch_public_url(
+        model_url,
+        timeout=timeout,
+        max_bytes=_MAX_MODEL_FETCH_BYTES,
+        headers=headers,
+        trusted_hosts=(_configured_provider_host(_settings()),),
+    )
+    if not content:
         raise RuntimeError("empty model response")
-    return response.content, _model_mime_from_url(model_url, response.headers.get("content-type") or "")
+    return content, _model_mime_from_url(model_url, content_type)
+
+
+def _world_model_storage(settings: dict[str, str]) -> tuple[str, str, str]:
+    """Bucket, region and key prefix that _upload_to_s3(..., "world-model", ...) writes to."""
+    bucket = _setting(settings, "gemini_s3_bucket", "AWS_S3_BUCKET", "")
+    region = _setting(settings, "gemini_s3_region", "AWS_REGION", "ap-northeast-2")
+    root = (_setting(settings, "gemini_s3_prefix", "AWS_S3_DIR", "images") or "images").strip("/") or "images"
+    return bucket, region, f"{root}/gemini/{_WORLD_MODEL_MEDIA_KIND}/"
+
+
+def _world_proxy_hosts(settings: dict[str, str]) -> set[str]:
+    """Hosts the world pipeline itself records model URLs on: Meshy assets, the configured
+    provider, the world-model bucket, and any extra hosts the operator lists."""
+    bucket, region, _ = _world_model_storage(settings)
+    hosts = {_MESHY_ASSET_DOMAIN, _url_host(_meshy_base(settings)), _configured_provider_host(settings)}
+    if bucket:
+        hosts.update({f"{bucket}.s3.{region}.amazonaws.com".lower(), f"{bucket}.s3.amazonaws.com".lower()})
+    extra = _setting(settings, "world_model_proxy_hosts", "WORLD_MODEL_PROXY_HOSTS", "")
+    hosts.update(item.strip().lower().rstrip(".") for item in extra.split(","))
+    return {host for host in hosts if host}
+
+
+def _fetch_proxied_model_bytes(url: str, settings: dict[str, str]) -> tuple[bytes, str]:
+    host = _url_host(url)
+    if not host or not any(host == allowed or host.endswith(f".{allowed}") for allowed in _world_proxy_hosts(settings)):
+        raise UnsafeRemoteUrl(f"model host is not a recorded provider or storage host: {host or '-'}")
+    return _fetch_model_bytes(url, timeout=120)
 
 
 def _pad4(data: bytes, pad_byte: bytes = b"\x00") -> bytes:
@@ -728,7 +792,10 @@ def _stored_model_bytes(metadata: dict[str, Any]) -> tuple[bytes, str] | None:
     key = str(metadata.get("stored_model_key") or "").strip()
     if not bucket or not key:
         return None
-    region = _setting(_settings(), "gemini_s3_region", "AWS_REGION", "ap-northeast-2")
+    expected_bucket, region, prefix = _world_model_storage(_settings())
+    if not expected_bucket or bucket != expected_bucket or not key.startswith(prefix) or ".." in key.split("/"):
+        logger.warning("world stored model ignored: object is outside the world-model storage prefix")
+        return None
     obj = _s3_client(region).get_object(Bucket=bucket, Key=key)
     body = obj.get("Body")
     content = body.read() if body is not None else b""
@@ -3425,42 +3492,85 @@ def _call_meshy_rig_provider(settings: dict[str, str], body: dict[str, Any], job
     }
 
 
-def _save_job(job: dict[str, Any]) -> None:
-    _MEMORY_JOBS[job["job_id"]] = job
-    if not db.is_configured():
+def _is_server_owned_metadata_key(key: Any) -> bool:
+    name = str(key or "").strip().lower()
+    return (
+        name in _SERVER_OWNED_METADATA_KEYS
+        or name.startswith(_SERVER_OWNED_METADATA_PREFIXES)
+        or name in {"url", "uri"}
+        or name.endswith(("_url", "_urls", "_uri"))
+    )
+
+
+def _client_metadata_patch(patch: dict[str, Any]) -> dict[str, Any]:
+    """Drop server-owned keys so a PATCH merge keeps the stored values for them."""
+    return {key: value for key, value in patch.items() if not _is_server_owned_metadata_key(key)}
+
+
+def _memory_job_owner_conflict(job_id: str, user_id: int) -> bool:
+    existing = _MEMORY_JOBS.get(job_id)
+    return existing is not None and int(existing.get("user_id") or -1) != int(user_id)
+
+
+def _trim_memory_jobs() -> None:
+    excess = len(_MEMORY_JOBS) - _MEMORY_JOB_LIMIT
+    if excess <= 0:
         return
-    try:
-        db.execute(
-            """
-            INSERT INTO world_generation_job (
-                id, user_id, sig_id, session_id, kind, source_image_asset_id, prompt, status,
-                provider_configured, provider_payload_json, plan_json, error_message
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                status = EXCLUDED.status,
-                provider_configured = EXCLUDED.provider_configured,
-                provider_payload_json = EXCLUDED.provider_payload_json,
-                plan_json = EXCLUDED.plan_json,
-                error_message = EXCLUDED.error_message,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (
-                job["job_id"],
-                int(job["user_id"]),
-                job.get("sig_id") or None,
-                job.get("session_id") or None,
-                job.get("kind") or "house",
-                job.get("source_image_asset_id") or None,
-                job.get("prompt") or "",
-                job.get("status") or "planned",
-                bool(job.get("provider_configured")),
-                _json(job.get("provider_payload") or {}),
-                _json(job.get("plan") or {}),
-                job.get("error") or None,
-            ),
-        )
-    except Exception as e:
-        logger.warning("world_generation_job save failed: %s", e)
+    finished = [job_id for job_id, job in _MEMORY_JOBS.items() if job.get("status") in _TERMINAL_JOB_STATUSES]
+    for job_id in finished[:excess]:
+        _MEMORY_JOBS.pop(job_id, None)
+
+
+def _save_job(job: dict[str, Any]) -> None:
+    """Persist a job. A job id owned by another user is never overwritten (409)."""
+    job_id = str(job["job_id"])
+    owner = int(job["user_id"])
+    with _MEMORY_LOCK:
+        if _memory_job_owner_conflict(job_id, owner):
+            raise HTTPException(status_code=409, detail=_JOB_ID_TAKEN)
+    if db.is_configured():
+        affected: Optional[int] = None
+        try:
+            affected = db.execute(
+                """
+                INSERT INTO world_generation_job (
+                    id, user_id, sig_id, session_id, kind, source_image_asset_id, prompt, status,
+                    provider_configured, provider_payload_json, plan_json, error_message
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    provider_configured = EXCLUDED.provider_configured,
+                    provider_payload_json = EXCLUDED.provider_payload_json,
+                    plan_json = EXCLUDED.plan_json,
+                    error_message = EXCLUDED.error_message,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE world_generation_job.user_id = EXCLUDED.user_id
+                """,
+                (
+                    job_id,
+                    owner,
+                    job.get("sig_id") or None,
+                    job.get("session_id") or None,
+                    job.get("kind") or "house",
+                    job.get("source_image_asset_id") or None,
+                    job.get("prompt") or "",
+                    job.get("status") or "planned",
+                    bool(job.get("provider_configured")),
+                    _json(job.get("provider_payload") or {}),
+                    _json(job.get("plan") or {}),
+                    job.get("error") or None,
+                ),
+            )
+        except Exception as e:
+            logger.warning("world_generation_job save failed: %s", e)
+        if affected == 0:
+            # The id exists and belongs to another user; the guarded upsert left it untouched.
+            raise HTTPException(status_code=409, detail=_JOB_ID_TAKEN)
+    with _MEMORY_LOCK:
+        if _memory_job_owner_conflict(job_id, owner):
+            raise HTTPException(status_code=409, detail=_JOB_ID_TAKEN)
+        _MEMORY_JOBS[job_id] = job
+        _trim_memory_jobs()
 
 
 def _set_job_progress(
@@ -3560,8 +3670,11 @@ def _save_assets(user_id: int, sig_id: str, job_id: str, assets: list[dict[str, 
             except Exception as e:
                 logger.warning("world_asset save failed: %s", e)
         if not item.get("id"):
-            item["id"] = len(_MEMORY_ASSETS) + 1
-        _MEMORY_ASSETS.append(item)
+            item["id"] = next(_MEMORY_ASSET_IDS)
+        with _MEMORY_LOCK:
+            _MEMORY_ASSETS.append(item)
+            if len(_MEMORY_ASSETS) > _MEMORY_ASSET_LIMIT:
+                del _MEMORY_ASSETS[: len(_MEMORY_ASSETS) - _MEMORY_ASSET_LIMIT]
         saved.append(item)
     return saved
 
@@ -3914,7 +4027,7 @@ def world_update_asset(
 ):
     label = _first_text(body.get("label"))
     description = _first_text(body.get("description"))
-    metadata_patch = body.get("metadata") if isinstance(body.get("metadata"), dict) else None
+    metadata_patch = _client_metadata_patch(body["metadata"]) if isinstance(body.get("metadata"), dict) else None
     if db.is_configured():
         try:
             row = db.fetch_one(
@@ -4044,9 +4157,10 @@ def world_asset_model_proxy(
     if stored_model_url:
         model_url = stored_model_url
 
+    settings = _settings()
     try:
         stored = _stored_model_bytes(metadata)
-        content, mime = stored if stored else _fetch_model_bytes(model_url, timeout=120)
+        content, mime = stored if stored else _fetch_proxied_model_bytes(model_url, settings)
     except Exception as e:
         logger.warning("world_asset model proxy failed: asset_id=%s url=%s error=%s", asset_id, redact_url(model_url), e)
         refreshed_url, refreshed_metadata = _refresh_world_asset_model_from_provider(asset_id, int(user.user_id), metadata)
@@ -4054,7 +4168,7 @@ def world_asset_model_proxy(
             raise HTTPException(status_code=502, detail="3D model source could not be loaded.") from e
         try:
             stored = _stored_model_bytes(refreshed_metadata)
-            content, mime = stored if stored else _fetch_model_bytes(refreshed_url, timeout=120)
+            content, mime = stored if stored else _fetch_proxied_model_bytes(refreshed_url, settings)
         except Exception as retry_error:
             logger.warning("world_asset refreshed model proxy failed: asset_id=%s error=%s", asset_id, retry_error)
             raise HTTPException(status_code=502, detail="3D model source could not be loaded.") from retry_error
@@ -4108,7 +4222,7 @@ def world_asset_animation_model_proxy(
     if not model_url:
         raise HTTPException(status_code=404, detail="애니메이션 모델 URL이 없습니다.")
     try:
-        content, mime = _fetch_model_bytes(model_url, timeout=120)
+        content, mime = _fetch_proxied_model_bytes(model_url, _settings())
     except Exception as e:
         logger.warning("world_asset animation proxy failed: asset_id=%s clip_index=%s url=%s error=%s", asset_id, clip_index, redact_url(model_url), e)
         raise HTTPException(status_code=502, detail="Animation model source could not be loaded.") from e
@@ -4128,37 +4242,58 @@ def world_save_placement(
     if not isinstance(plan, dict):
         raise HTTPException(status_code=400, detail="plan은 필수입니다.")
     sig_id = (body.get("sig_id") or plan.get("sig_id") or "").strip()
-    placement_id = f"sig-{sig_id}" if sig_id else _job_id()
-    payload = {
-        "placement_id": placement_id,
-        "user_id": int(user.user_id),
-        "sig_id": sig_id,
-        "job_id": (body.get("job_id") or plan.get("id") or "").strip(),
-        "plan": plan,
-        "created_at": _now_ms(),
-    }
-    _MEMORY_PLACEMENTS[placement_id] = payload
-    if db.is_configured():
-        try:
-            db.execute(
-                """
-                INSERT INTO world_placement (id, user_id, sig_id, job_id, plan_json)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    plan_json=EXCLUDED.plan_json,
-                    updated_at=CURRENT_TIMESTAMP
-                """,
-                (
-                    placement_id,
-                    int(user.user_id),
-                    sig_id or None,
-                    payload["job_id"] or None,
-                    _json(plan),
-                ),
-            )
-        except Exception as e:
-            logger.warning("world_placement save failed: %s", e)
-    return {"status": "saved", "placement_id": placement_id}
+    owner = int(user.user_id)
+    job_id = (body.get("job_id") or plan.get("id") or "").strip()
+    # A SIG keeps one row per user: the first saver owns "sig-<id>", later users get their own row.
+    # /world/placements/latest still returns the newest plan in the SIG.
+    candidates = [f"sig-{sig_id}", f"sig-{sig_id}-u{owner}"] if sig_id else [_job_id()]
+    for placement_id in candidates:
+        with _MEMORY_LOCK:
+            existing = _MEMORY_PLACEMENTS.get(placement_id)
+            if existing is not None and int(existing.get("user_id") or -1) != owner:
+                continue
+        if db.is_configured():
+            affected: Optional[int] = None
+            try:
+                affected = db.execute(
+                    """
+                    INSERT INTO world_placement (id, user_id, sig_id, job_id, plan_json)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        plan_json=EXCLUDED.plan_json,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE world_placement.user_id = EXCLUDED.user_id
+                    """,
+                    (
+                        placement_id,
+                        owner,
+                        sig_id or None,
+                        job_id or None,
+                        _json(plan),
+                    ),
+                )
+            except Exception as e:
+                logger.warning("world_placement save failed: %s", e)
+            if affected == 0:
+                continue
+        payload = {
+            "placement_id": placement_id,
+            "user_id": owner,
+            "sig_id": sig_id,
+            "job_id": job_id,
+            "plan": plan,
+            "created_at": _now_ms(),
+        }
+        with _MEMORY_LOCK:
+            existing = _MEMORY_PLACEMENTS.get(placement_id)
+            if existing is not None and int(existing.get("user_id") or -1) != owner:
+                continue
+            _MEMORY_PLACEMENTS.pop(placement_id, None)
+            _MEMORY_PLACEMENTS[placement_id] = payload
+            while len(_MEMORY_PLACEMENTS) > _MEMORY_PLACEMENT_LIMIT:
+                _MEMORY_PLACEMENTS.pop(next(iter(_MEMORY_PLACEMENTS)))
+        return {"status": "saved", "placement_id": placement_id}
+    raise HTTPException(status_code=409, detail="이 시그 월드 배치는 다른 사용자가 소유하고 있습니다.")
 
 
 @router.get("/world/placements/latest")
@@ -4193,7 +4328,8 @@ def world_latest_placement(
         except Exception as e:
             logger.warning("world_placement latest fetch failed: %s", e)
 
-    candidates = [p for p in _MEMORY_PLACEMENTS.values() if p.get("sig_id") == sig_id]
+    with _MEMORY_LOCK:
+        candidates = [p for p in _MEMORY_PLACEMENTS.values() if p.get("sig_id") == sig_id]
     if not candidates:
         raise HTTPException(status_code=404, detail="저장된 시그 월드가 없습니다.")
     latest = sorted(candidates, key=lambda item: int(item.get("created_at") or 0), reverse=True)[0]

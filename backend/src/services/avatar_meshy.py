@@ -268,8 +268,38 @@ class AvatarMeshy:
                 if digest(path) != saved['sha256']:
                     raise ValueError('Provider library animation changed')
                 clips[slot] = {'path': path, 'source': 'animation_library', 'action_id': action_id}
-        content = merge_character_clips(rig.read_bytes(), {slot: item['path'].read_bytes() for slot, item in clips.items()})
-        quality = inspect_glb(content, budget_warnings=True)
+        clip_content = {slot: item['path'].read_bytes() for slot, item in clips.items()}
+        provider_rig = rig.read_bytes()
+
+        def package(model):
+            merged = merge_character_clips(model, clip_content)
+            return merged, inspect_glb(merged, budget_warnings=True)
+
+        # Meshy returns the rig with a greyed, re-baked base colour and no normal/ORM maps; the
+        # body that was sent keeps its own material on the same UV layout. Restoring it is an
+        # improvement only: any failure delivers the provider rig exactly as received.
+        rig_content, material = provider_rig, {'restored': False, 'reason': 'source_missing'}
+        source = run.parent/'output/generated-body.glb'
+        if source.is_file():
+            try:
+                from src.services.rig_material import restore_source_material
+                rig_content, material = restore_source_material(provider_rig, source.read_bytes())
+            except Exception as exc:
+                LOGGER.warning('Rig material restore skipped job=%s type=%s', run.parent.name, type(exc).__name__)
+                rig_content = provider_rig
+                material = {'restored': False, 'reason': 'restore_failed', 'error_type': type(exc).__name__}
+        content = quality = None
+        if material.get('restored'):
+            try:
+                content, quality = package(rig_content)
+            except Exception as exc:
+                LOGGER.warning('Restored rig material rejected job=%s type=%s', run.parent.name, type(exc).__name__)
+                content = None
+            if content is None or quality['errors']:
+                content = None
+                material = {'restored': False, 'reason': 'restore_invalid'}
+        if content is None:
+            content, quality = package(provider_rig)
         if quality['errors']:
             raise ValueError('Meshy package failed structural validation')
         lineage = [{'slot': slot, 'source': item['source'], 'action_id': item['action_id']} for slot, item in clips.items()]
@@ -285,7 +315,7 @@ class AvatarMeshy:
         receipt = {'version': version, 'files': {'model.glb': digest(model)},
                    'bone_count': len({j for skin in doc.get('skins', []) for j in skin['joints']}),
                    'source_sha256': digest(rig), 'rig_task_id': character_jobs.state(run)['task_id'],
-                   'clips': lineage}
+                   'clips': lineage, 'material': material}
         _write_json(output/'receipt.json', receipt)
         _write_json(run/'delivery.json', receipt)
 

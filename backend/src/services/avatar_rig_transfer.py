@@ -5,9 +5,9 @@ import re
 import subprocess
 
 from src.services.asset_editor import _write_json
-from src.services.avatar_factory import _LOCK, digest
+from src.services.avatar_factory import _LOCK, _QUEUE, digest
 from src.services.avatar_native_parts import AvatarNativeParts
-from src.services.character_parts import blender_executable
+from src.services.character_parts import blender_executable, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.glb import parse_glb
 from src.services.object_storage import StoredPath as Path, copy_file, local_workspace, publish_checkpoint
@@ -165,9 +165,11 @@ class AvatarRigTransfer:
     def execute(self, owner, job_id, request_id):
         root = self.root(owner, job_id)
         directory = root/request_id
-        # local_workspace serializes Blender scratch access. Do not hold the
-        # factory queue while waiting for it: native assembly takes that queue
-        # inside its workspace, which would invert the lock order.
+        # Lock order is the same as native assembly: local_workspace (per-directory
+        # scratch lock) first, then the shared BLENDER_CONCURRENCY queue, released as
+        # soon as Blender exits. Taking the queue before the workspace would invert
+        # that order. The queue is also released before assemble_character below,
+        # which takes it again for the assembly worker (the semaphore is not reentrant).
         with run_lock(directory, 0, blender=False):
             record = read_json(directory/'record.json')
             if record.get('status') != 'accepted' or read_json(root/'current.json').get('id') != request_id:
@@ -183,7 +185,7 @@ class AvatarRigTransfer:
                     command = [blender_executable(), '--background', '--factory-startup', '--disable-autoexec',
                                '--python-exit-code', '1', '--python', str(Path(__file__).with_name('avatar_rig_transfer_blender.py')),
                                '--', str(directory/'input.json')]
-                    with (directory/'blender.log').open('wb') as log:
+                    with _QUEUE, (directory/'blender.log').open('wb') as log:
                         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                             env={**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'},
                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
@@ -192,12 +194,7 @@ class AvatarRigTransfer:
                         try:
                             code = process.wait(timeout=1200)
                         except subprocess.TimeoutExpired:
-                            process.terminate()
-                            try:
-                                process.wait(timeout=10)
-                            except subprocess.TimeoutExpired:
-                                process.kill()
-                                process.wait(timeout=10)
+                            stop_process(process)
                             raise
                     if code:
                         raise ValueError('Rig transfer failed')

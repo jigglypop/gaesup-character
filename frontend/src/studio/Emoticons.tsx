@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePolling } from '../use-polling';
-import { generationsApi, type Generation } from './generations-api';
+import { generationsApi, type Generation, type VectorColors } from './generations-api';
 import './generations.css';
 import './emoticons.css';
 
 const storage = 'gaesup.studio.illustration-draft.v1';
 const labels = { accepted: '접수됨', running: '생성 중', paused: '일시 중단', blocked: '중단됨', complete: '완료' };
+const colorChoices: VectorColors[] = [12, 16, 24, 32];
 const artwork = (item?: Generation) => item?.artifacts.find(artifact => artifact.name === 'image.png');
+const vectorArt = (item?: Generation) => item?.artifacts.find(artifact => artifact.name === 'image.svg');
+// A new trace keeps the file name; the hash makes the preview reload.
+const versioned = (artifact: { url: string; sha256: string }) => `${artifact.url}?v=${artifact.sha256.slice(0, 12)}`;
 function readDraft() {
   try {
     const value = JSON.parse(localStorage.getItem(storage) || 'null');
@@ -28,10 +32,12 @@ export default function Emoticons() {
   const items = listing.value?.items || [];
   const current = items.find(item => item.id === currentId) || items[0];
   const base = items.find(item => item.id === selection.value?.selected);
-  const currentImage = artwork(current), baseImage = artwork(base);
+  const currentImage = artwork(current), baseImage = artwork(base), currentVector = vectorArt(current);
+  const [colors, setColors] = useState<VectorColors>(16), [tracing, setTracing] = useState(false);
   const inputLocked = busy || !!pending || !!recovery.error;
   const defaultPrompt = listing.value?.defaults.character || '';
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => { setColors(current?.vector?.colors || 16); }, [current?.id, current?.vector?.colors]);
   useEffect(() => {
     if (defaultPrompt) setDraft(value => value.edited ? value : { ...value, prompt: defaultPrompt });
   }, [defaultPrompt]);
@@ -101,16 +107,30 @@ export default function Emoticons() {
         {current && <figure><figcaption>{current.name} · {labels[current.status]}</figcaption>
           {currentImage ? <img src={currentImage.url} alt={current.name} /> : <div className="generation-no-preview">{labels[current.status]}</div>}
         </figure>}
+        {current?.vector && currentVector && <figure><figcaption>SVG · 색 {current.vector.palette.length} · 경로 {current.vector.paths.toLocaleString()} · {Math.round(current.vector.bytes / 1024).toLocaleString()}KB</figcaption>
+          <img src={versioned(currentVector)} alt={`${current.name} SVG`} />
+        </figure>}
       </div>
       {current && <>
         <pre className="generation-result-prompt">{current.prompt}</pre>
         {current.reference_id && <p>참고 원화: {items.find(item => item.id === current.reference_id)?.name || current.reference_id}</p>}
         {current.error && <p role="alert">{current.error}</p>}
+        {current.status === 'complete' && currentImage && <div className="vector-tools">
+          <label>SVG 색 수<select value={colors} disabled={busy} onChange={event => setColors(Number(event.target.value) as VectorColors)}>
+            {colorChoices.map(value => <option key={value} value={value}>{value}색</option>)}</select></label>
+          <button disabled={busy || (current.vector?.colors === colors && !!currentVector)} onClick={() => void perform(async () => {
+            setTracing(true);
+            try { remember(await generationsApi.vectorize(current.id, colors)); } finally { if (alive.current) setTracing(false); }
+          })}>{tracing ? 'SVG 만드는 중' : currentVector ? `${colors}색으로 다시 만들기` : 'SVG 만들기'}</button>
+          {current.vector && currentVector && <ul className="vector-palette" aria-label="SVG 색상">{current.vector.palette.map(color =>
+            <li key={color} style={{ background: color }} title={color} />)}</ul>}
+        </div>}
         <div className="generation-form-actions">
           <button disabled={inputLocked} onClick={() => setDraft(value => ({ ...value, name: current.name, prompt: current.prompt, edited: true }))}>프롬프트 가져오기</button>
           <button disabled={busy || !selection.value || current.status !== 'complete' || !currentImage || base?.id === current.id} onClick={() => void perform(selectBase)}>기준 원화로 선택</button>
           {current.can_resume && <button disabled={busy} onClick={() => void perform(async () => remember(await generationsApi.resume(current.id)))}>계속 진행</button>}
-          {currentImage && <a href={currentImage.url} download>PNG 다운로드</a>}
+          {currentImage && <a href={`${currentImage.url}?download=1`}>PNG 다운로드</a>}
+          {currentVector && <a href={`${versioned(currentVector)}&download=1`}>SVG 다운로드</a>}
         </div>
       </>}
     </section>}

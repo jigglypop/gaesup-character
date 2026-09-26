@@ -1,11 +1,16 @@
+from pathlib import PurePath
+import re
 from typing import Literal
-from fastapi import APIRouter, Depends, Header, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, Header, BackgroundTasks
 from pydantic import BaseModel, ConfigDict, Field
 from src.auth import UserContext, get_current_user
 from src.api.avatar_factory import get_factory
 from src.services.studio_library import StudioLibrary
 from src.services.object_storage import artifact_response
-from src.services.animal_rig import AnimalRig
+from src.services.animal_library import AnimalLibrary, MAX_REFERENCE_BYTES
+from src.services.animal_production import AnimalProduction
+from fastapi import Request
+from starlette.concurrency import run_in_threadpool
 from src.services.character_pipeline import PipelineError
 from src.services.avatar_expressions import AvatarExpressions
 from src.services.avatar_equipment import ImageSlot
@@ -105,9 +110,26 @@ def resume_asset(job_id: str, background: BackgroundTasks,
     return record
 
 
+class VectorInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    colors: Literal[12, 16, 24, 32] = 16
+
+
+@router.post('/generations/{job_id}/vector')
+def vectorize_asset(job_id: str, body: VectorInput, user: UserContext = Depends(get_current_user),
+                    factory=Depends(get_factory)):
+    return StudioGenerations(factory, user.user_id).vectorize(job_id, body.colors)
+
+
 @router.get('/generations/{job_id}/artifacts/{name}')
-def generation_artifact(job_id: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
-    return artifact_response(StudioGenerations(factory, user.user_id).artifact(job_id, name))
+def generation_artifact(job_id: str, name: str, download: bool = False, user: UserContext = Depends(get_current_user),
+                        factory=Depends(get_factory)):
+    service = StudioGenerations(factory, user.user_id)
+    path = service.artifact(job_id, name)
+    if not download:
+        return artifact_response(path)
+    title = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', ' ', service.get(job_id)['name']).strip() or job_id
+    return artifact_response(path, filename=f'{title}{PurePath(name).suffix}')
 
 
 @router.get('/illustration-selection')
@@ -342,33 +364,53 @@ def texture_artifact(texture_id: str, name: str, user: UserContext = Depends(get
 
 @router.get('/animals')
 def animals(user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
-    return AnimalRig(factory, user.user_id).listing()
+    return AnimalLibrary(factory, user.user_id).listing()
 
 
-@router.post('/animals')
-async def upload_animal(request: Request, species: Literal['dog','cat','dragon'], name: str,
-                        user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
-    if not name.strip() or len(name)>80:
-        raise PipelineError('invalid_name','이름은 1~80자로 입력하세요.',422)
-    content=bytearray()
+@router.post('/animals/references', status_code=201)
+async def upload_animal_reference(request: Request, user: UserContext = Depends(get_current_user),
+                                  factory=Depends(get_factory)):
+    content = bytearray()
     async for chunk in request.stream():
         content.extend(chunk)
-        if len(content)>64*1024*1024:
-            raise PipelineError('file_too_large','GLB는 64MB 이내로 올려 주세요.',413)
-    from starlette.concurrency import run_in_threadpool
-    return await run_in_threadpool(AnimalRig(factory,user.user_id).upload,bytes(content),species,name.strip())
+        if len(content) > MAX_REFERENCE_BYTES:
+            raise PipelineError('image_too_large', '그림은 32MB 이하로 올려 주세요.', 413)
+    return await run_in_threadpool(AnimalLibrary(factory, user.user_id).upload_reference, bytes(content))
 
 
-@router.post('/animals/{animal_id}/rig', status_code=202)
-def rig_animal(animal_id: str, background: BackgroundTasks,
-               user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
-    service=AnimalRig(factory,user.user_id)
-    record,created=service.start(animal_id)
-    if created or record['status'] == 'accepted':
-        background.add_task(service.execute,animal_id)
-    return record
+class AnimalCreateInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(min_length=1, max_length=80)
+    species: Literal['dog']
+    reference: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+@router.post('/animals', status_code=201)
+def create_animal(body: AnimalCreateInput, idempotency_key: str = Header(alias='Idempotency-Key'),
+                  user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    animal, _ = AnimalLibrary(factory, user.user_id).create(idempotency_key, body.model_dump())
+    return animal
+
+
+class AnimalRegenerateInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    views: list[Literal['front', 'left', 'back', 'right']] = Field(default_factory=list, max_length=4)
+    note: str = Field(default='', max_length=400)
+    model: bool = False
+    rig: bool = False
+
+
+@router.post('/animals/{animal_id}/regenerate', status_code=202)
+def regenerate_animal(animal_id: str, body: AnimalRegenerateInput, background: BackgroundTasks,
+                      idempotency_key: str = Header(alias='Idempotency-Key'),
+                      user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    service = AnimalProduction(factory, user.user_id)
+    animal, run = service.start(animal_id, idempotency_key, body.model_dump())
+    if run:
+        background.add_task(service.execute, animal_id, animal['production']['id'])
+    return animal
 
 
 @router.get('/animals/{animal_id}/{name}')
 def animal_artifact(animal_id: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
-    return artifact_response(AnimalRig(factory,user.user_id).artifact(animal_id,name))
+    return artifact_response(AnimalLibrary(factory, user.user_id).artifact(animal_id, name))

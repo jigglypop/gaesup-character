@@ -141,16 +141,25 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
   return <group ref={group}><primitive object={model.gltf.scene} dispose={null} /></group>;
 }
 
-function CardScene({ model, hidden, cardView, onReady, onError }: ViewProps) {
+function CardScene({ model, animation, hidden, cardView, onReady, onError }: ViewProps) {
   const { camera, gl, invalidate, size: viewport } = useThree();
   const controls = useRef<OrbitControls | null>(null);
   const group = useRef<THREE.Group>(null!);
+  const mixer = useMemo(() => new THREE.AnimationMixer(model.gltf.scene), [model]);
   useEffect(() => {
     model.gltf.scene.traverse(node => {
       const index = model.gltf.parser.associations.get(node)?.nodes;
       if (index !== undefined) node.visible = !hidden.has(index);
     });
   }, [model, hidden]);
+  useEffect(() => {
+    mixer.stopAllAction();
+    const clip = animation >= 0 ? model.gltf.animations[animation] : undefined;
+    if (clip) mixer.clipAction(clip).reset().play();
+    else model.restorePose();
+    invalidate();
+    return () => { mixer.stopAllAction(); mixer.uncacheRoot(model.gltf.scene); };
+  }, [animation, model, mixer, invalidate]);
   useEffect(() => {
     model.restorePose();
     group.current.position.set(0, 0, 0);
@@ -205,7 +214,10 @@ function CardScene({ model, hidden, cardView, onReady, onError }: ViewProps) {
       controls.current = null;
     };
   }, [camera, cardView, gl, invalidate, model, onError, onReady, viewport.height, viewport.width]);
-  useFrame(() => { if (controls.current?.update()) invalidate(); });
+  useFrame((_, delta) => {
+    if (animation >= 0 && model.gltf.animations[animation]) { mixer.update(Math.min(delta, .1)); invalidate(); }
+    if (controls.current?.update()) invalidate();
+  });
   return <group ref={group}><primitive object={model.gltf.scene} dispose={null} /></group>;
 }
 

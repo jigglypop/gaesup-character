@@ -16,6 +16,7 @@ from src.services.avatar_openai_images import (DEFAULT_BASE, DEFAULT_MODEL, gene
                                               generate_standard_part_image, OpenAIImageHTTPError,
                                               image_error_message)
 from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.illustration_vector import VECTOR_REVISION, trace_illustration
 from src.services.meshy_status import task_problem
 from src.services.process_identity import identity, state as process_state
 from src.services.object_storage import copy_file
@@ -85,7 +86,7 @@ class StudioGenerations:
             status = 'paused' if resumable else 'blocked'
         task = read_json(directory/'meshy/character.json') if record['kind'] == 'prop' else {}
         return {**{key: record.get(key) for key in ('id', 'request_key', 'kind', 'category', 'name', 'prompt',
-                    'size', 'stage', 'created_at', 'gpu', 'reference_id')}, 'status': status,
+                    'size', 'stage', 'created_at', 'gpu', 'reference_id', 'vector')}, 'status': status,
                 'can_resume': bool(resumable and (not alive or status == 'accepted')),
                 'error': record.get('error') or (reason if not alive else None),
                 'task_id': task.get('task_id'), 'progress': task.get('progress'),
@@ -271,6 +272,35 @@ class StudioGenerations:
         self._save(directory, record)
         record['gpu'] = prop_model(run/'generated.glb', directory/'model.glb', record['size'])
         record['files']['model.glb'] = digest(directory/'model.glb')
+
+    def vectorize(self, job_id, colors):
+        """Trace a finished illustration into `image.svg`; local, free and deterministic per colour count."""
+        directory = self.directory(job_id)
+        with _LOCK:
+            lock = _WORKERS.setdefault(str(directory), Lock())
+        if not lock.acquire(blocking=False):
+            raise PipelineError('vector_busy', 'SVG를 만드는 중입니다. 잠시 후 다시 불러오세요.', 409)
+        try:
+            record = self._record(job_id)
+            if record.get('kind') != 'illustration' or record.get('status') != 'complete':
+                raise PipelineError('invalid_vector', '완료된 2D 원화만 SVG로 만들 수 있습니다.', 422)
+            source_sha256 = record['files']['image.png']
+            saved = record.get('vector') or {}
+            if ('image.svg' in record['files'] and saved.get('colors') == colors
+                    and saved.get('revision') == VECTOR_REVISION and saved.get('source_sha256') == source_sha256):
+                return self.get(job_id)
+            svg, stats = trace_illustration(self.artifact(job_id, 'image.png').read_bytes(), colors)
+            target = directory/'image.svg'
+            target.write_bytes(svg.encode())
+            with _LOCK:
+                record = self._record(job_id)
+                record['files']['image.svg'] = digest(target)
+                record['vector'] = {**stats, 'revision': VECTOR_REVISION, 'source_sha256': source_sha256,
+                                    'created_at': now()}
+                self._save(directory, record)
+            return self.get(job_id)
+        finally:
+            lock.release()
 
     def artifact(self, job_id, name):
         record = self._record(job_id)

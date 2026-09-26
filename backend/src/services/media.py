@@ -4,19 +4,24 @@ from __future__ import annotations
 
 import base64
 import io
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import time
 import uuid
 from contextlib import suppress
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from threading import Lock
-from typing import Any, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 import httpx
 import requests
 from fastapi import HTTPException
+from urllib3.exceptions import NewConnectionError
 
 from src import db
 
@@ -394,25 +399,71 @@ _OPENAI_EDIT_MAX_SIDE = 1024
 _OPENAI_EDIT_MAX_BYTES = 900 * 1024
 
 
-def _is_transient_network_error(exc: BaseException) -> bool:
-    """Windows + (httpx/requests) 환경에서 sporadic 하게 뜨는 SSL/Read 에러 판별.
+_OPENAI_CONNECT_TIMEOUT_SEC = 30.0
 
-    `SSLV3_ALERT_BAD_RECORD_MAC`, ConnectionReset, `Server disconnected ...`,
-    RemoteProtocol 등은 단발성이므로 새 connection 으로 재시도하면 대부분 성공한다.
+
+_RETRY_AFTER_MAX_SEC = 30.0
+
+
+def _request_not_sent(exc: BaseException) -> bool:
+    """True only when a failure provably happened before the request reached the provider.
+
+    Read timeouts, resets, TLS errors and broken responses can occur after the provider already
+    accepted a paid request, so they are never treated as safe to resend.
     """
-    name = type(exc).__name__
-    msg = str(exc)
-    transient_names = {
-        "ReadError", "RemoteProtocolError", "ConnectError", "WriteError", "PoolTimeout",
-        "ConnectionError", "ChunkedEncodingError", "SSLError", "ProtocolError", "ReadTimeout",
-    }
-    if name in transient_names:
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
         return True
-    if "SSL" in msg and ("BAD_RECORD_MAC" in msg or "DECRYPTION_FAILED" in msg or "alert" in msg.lower()):
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
         return True
-    if "Connection reset" in msg or "WinError 10054" in msg or "Server disconnected" in msg:
-        return True
+    if isinstance(exc, requests.exceptions.SSLError):
+        return False
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        inner = exc.args[0] if exc.args else None
+        return isinstance(getattr(inner, "reason", None), NewConnectionError)
     return False
+
+
+def _retry_after_seconds(headers: Mapping[str, str]) -> Optional[float]:
+    raw = str(headers.get("retry-after") or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
+def _rejection_retry_delay(status_code: int, headers: Mapping[str, str]) -> Optional[float]:
+    """Delay before resending a request the provider refused (429/503 carrying Retry-After)."""
+    if status_code not in {429, 503}:
+        return None
+    delay = _retry_after_seconds(headers)
+    if delay is None or delay > _RETRY_AFTER_MAX_SEC:
+        return None
+    return delay
+
+
+def _openai_transport_exception(exc: BaseException, model: str, label: str) -> HTTPException:
+    if _request_not_sent(exc):
+        return HTTPException(
+            status_code=502,
+            detail={"error": f"{label}: OpenAI 연결 실패 ({type(exc).__name__}: {str(exc)[:300]})", "model": model, "delivery": "not_sent"},
+        )
+    return HTTPException(
+        status_code=502,
+        detail={
+            "error": f"{label}: 응답을 확인하지 못했습니다. 요청이 접수되었을 수 있어 재전송하지 않습니다 ({type(exc).__name__}: {str(exc)[:300]})",
+            "model": model,
+            "delivery": "uncertain",
+        },
+    )
 
 
 def _openai_image_payload(model: str, prompt: str, body: dict[str, Any], caps: dict[str, bool]) -> dict[str, Any]:
@@ -459,53 +510,46 @@ def _openai_post_json(
         "Content-Type": "application/json",
         "Connection": "close",
     }
-    last_exc: Optional[BaseException] = None
+    label = f"OpenAI 이미지 {action_label} 실패"
     for attempt in range(1, _OPENAI_HTTP_RETRY_ATTEMPTS + 1):
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=240.0)
-            if resp.status_code >= 400:
-                raise requests.HTTPError(response=resp)
-            return resp.json()
-        except requests.HTTPError as e:
-            r = e.response
-            raise HTTPException(
-                status_code=r.status_code,
-                detail={"error": f"OpenAI 이미지 {action_label} 실패: {_openai_response_error_message(r)}", "model": model},
-            ) from e
+            resp = requests.post(url, headers=headers, json=payload, timeout=(_OPENAI_CONNECT_TIMEOUT_SEC, 240.0))
         except Exception as e:
-            last_exc = e
-            if not _is_transient_network_error(e) or attempt >= _OPENAI_HTTP_RETRY_ATTEMPTS:
-                break
+            if not _request_not_sent(e) or attempt >= _OPENAI_HTTP_RETRY_ATTEMPTS:
+                raise _openai_transport_exception(e, model, label) from e
             logger.warning(
-                "OpenAI %s transient 에러 (attempt %d/%d, model=%s, transport=json-requests): %s",
+                "OpenAI %s connection failed before sending (attempt %d/%d, model=%s): %s",
                 action_label, attempt, _OPENAI_HTTP_RETRY_ATTEMPTS, model, e,
             )
             time.sleep(_OPENAI_HTTP_RETRY_BACKOFF_SEC * attempt)
-    raise HTTPException(
-        status_code=502,
-        detail={"error": f"OpenAI 이미지 {action_label} 실패 (재시도 {_OPENAI_HTTP_RETRY_ATTEMPTS}회 모두 실패): {last_exc}", "model": model},
-    ) from last_exc
+            continue
+        if resp.status_code >= 400:
+            delay = _rejection_retry_delay(resp.status_code, resp.headers)
+            if delay is not None and attempt < _OPENAI_HTTP_RETRY_ATTEMPTS:
+                logger.warning(
+                    "OpenAI %s refused with HTTP %s; retrying after %.1fs (attempt %d/%d, model=%s)",
+                    action_label, resp.status_code, delay, attempt, _OPENAI_HTTP_RETRY_ATTEMPTS, model,
+                )
+                time.sleep(delay)
+                continue
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail={"error": f"{label}: {_openai_response_error_message(resp)}", "model": model},
+            )
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise HTTPException(
+                status_code=502,
+                detail={"error": f"{label}: 응답 JSON을 읽지 못했습니다.", "model": model, "delivery": "uncertain"},
+            ) from e
+    raise HTTPException(status_code=502, detail={"error": label, "model": model, "delivery": "uncertain"})
 
 
 def _is_openai_transport_failure(exc: HTTPException) -> bool:
+    """Only failures where OpenAI never received the request may fall back to another paid provider."""
     detail = exc.detail
-    msg = ""
-    if isinstance(detail, dict):
-        msg = str(detail.get("error") or "")
-    else:
-        msg = str(detail or "")
-    return exc.status_code == 502 and (
-        "WinError 10054" in msg
-        or "BAD_RECORD_MAC" in msg
-        or "연결" in msg
-        or "Bad Gateway" in msg
-        or "bad gateway" in msg
-        or "Cloudflare" in msg
-        or "cloudflare" in msg
-        or "HTTP 502" in msg
-        or "Connection" in msg
-        or "SSL" in msg
-    )
+    return exc.status_code == 502 and isinstance(detail, dict) and detail.get("delivery") == "not_sent"
 
 
 def _openai_post_multipart(
@@ -522,37 +566,45 @@ def _openai_post_multipart(
     구형/특수 모델 fallback 용으로만 남긴다.
     """
     headers = {"Authorization": f"Bearer {api_key}"}
-    last_exc: Optional[BaseException] = None
+    label = "OpenAI 이미지 편집 실패"
     for attempt in range(1, _OPENAI_HTTP_RETRY_ATTEMPTS + 1):
         try:
-            resp = requests.post(url, headers=headers, data=fields, files=files, timeout=240.0)
-            if resp.status_code >= 400:
-                raise requests.HTTPError(response=resp)
-            return resp.json()
-        except requests.HTTPError as e:
-            r = e.response
-            try:
-                err_payload = r.json().get("error") or {}
-                msg = (err_payload.get("message") or "").strip() or (r.text or "")[:600]
-            except Exception:
-                msg = (r.text or "")[:600]
-            raise HTTPException(
-                status_code=r.status_code,
-                detail={"error": f"OpenAI 이미지 편집 실패: {msg}", "model": model},
-            ) from e
+            resp = requests.post(url, headers=headers, data=fields, files=files, timeout=(_OPENAI_CONNECT_TIMEOUT_SEC, 240.0))
         except Exception as e:
-            last_exc = e
-            if not _is_transient_network_error(e) or attempt >= _OPENAI_HTTP_RETRY_ATTEMPTS:
-                break
+            if not _request_not_sent(e) or attempt >= _OPENAI_HTTP_RETRY_ATTEMPTS:
+                raise _openai_transport_exception(e, model, label) from e
             logger.warning(
-                "OpenAI edits transient 에러 (attempt %d/%d, model=%s): %s",
+                "OpenAI edits connection failed before sending (attempt %d/%d, model=%s): %s",
                 attempt, _OPENAI_HTTP_RETRY_ATTEMPTS, model, e,
             )
             time.sleep(_OPENAI_HTTP_RETRY_BACKOFF_SEC * attempt)
-    raise HTTPException(
-        status_code=502,
-        detail={"error": f"OpenAI 이미지 편집 실패 (재시도 {_OPENAI_HTTP_RETRY_ATTEMPTS}회 모두 실패): {last_exc}", "model": model},
-    ) from last_exc
+            continue
+        if resp.status_code >= 400:
+            delay = _rejection_retry_delay(resp.status_code, resp.headers)
+            if delay is not None and attempt < _OPENAI_HTTP_RETRY_ATTEMPTS:
+                logger.warning(
+                    "OpenAI edits refused with HTTP %s; retrying after %.1fs (attempt %d/%d, model=%s)",
+                    resp.status_code, delay, attempt, _OPENAI_HTTP_RETRY_ATTEMPTS, model,
+                )
+                time.sleep(delay)
+                continue
+            try:
+                err_payload = resp.json().get("error") or {}
+                msg = (err_payload.get("message") or "").strip() or (resp.text or "")[:600]
+            except Exception:
+                msg = (resp.text or "")[:600]
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail={"error": f"{label}: {msg}", "model": model},
+            )
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise HTTPException(
+                status_code=502,
+                detail={"error": f"{label}: 응답 JSON을 읽지 못했습니다.", "model": model, "delivery": "uncertain"},
+            ) from e
+    raise HTTPException(status_code=502, detail={"error": label, "model": model, "delivery": "uncertain"})
 
 
 def _openai_response_error_message(resp: requests.Response) -> str:
@@ -915,6 +967,10 @@ def _upload_to_s3(content: bytes, mime_type: str, media_kind: str, settings: dic
 def _record_usage(user_id: int, session_id: str, model: str, usage: dict[str, int]) -> None:
     if not usage:
         return
+    # Gemini reports prompt/completion tokens; the OpenAI Images API reports input/output tokens.
+    prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    total_tokens = int(usage.get("total_tokens") or 0) or prompt_tokens + completion_tokens
     try:
         db.execute(
             """
@@ -925,24 +981,27 @@ def _record_usage(user_id: int, session_id: str, model: str, usage: dict[str, in
                 int(user_id),
                 session_id or "",
                 model or "",
-                int(usage.get("prompt_tokens") or 0),
-                int(usage.get("completion_tokens") or 0),
-                int(usage.get("total_tokens") or 0),
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
             ],
         )
     except Exception as e:
         logger.debug("recordUsage failed: %s", e)
 
 
-_GEMINI_RETRY_STATUS = {404, 429, 500, 502, 503, 504}
-
-
 def _should_retry_gemini(exc: Exception) -> bool:
+    """Move to the next base/model only when Gemini provably did not accept the request.
+
+    404 (unknown model or API version) and 429 are refusals; 503 counts only with Retry-After.
+    Other 5xx responses and read/write failures may follow an accepted paid request.
+    """
     if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in _GEMINI_RETRY_STATUS
-    if isinstance(exc, (httpx.RequestError, httpx.TimeoutException)):
-        return True
-    return False
+        status_code = exc.response.status_code
+        if status_code in {404, 429}:
+            return True
+        return status_code == 503 and _retry_after_seconds(exc.response.headers) is not None
+    return _request_not_sent(exc)
 
 
 def _post_gemini_with_fallback(
@@ -988,6 +1047,94 @@ def _download_bytes(uri: str, api_key: str) -> bytes:
         response = client.get(uri, headers=headers)
         response.raise_for_status()
         return response.content
+
+
+class UnsafeRemoteUrl(ValueError):
+    """A remote URL the server refuses to fetch (non-public destination, bad scheme, size limit)."""
+
+
+def _normalize_host(host: str) -> str:
+    return (host or "").strip().lower().rstrip(".")
+
+
+def _is_public_address(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        embedded = ip.ipv4_mapped or ip.sixtofour
+        if embedded is not None:
+            ip = embedded
+    return ip.is_global and not (
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+    )
+
+
+def assert_public_http_url(url: str, *, trusted_hosts: Iterable[str] = ()) -> httpx.URL:
+    """Validate an outbound fetch target: http(s), no credentials, every resolved address public.
+
+    `trusted_hosts` names operator-configured hosts that may resolve to private addresses.
+    """
+    try:
+        parsed = httpx.URL(str(url or "").strip())
+    except Exception as e:
+        raise UnsafeRemoteUrl("invalid URL") from e
+    if parsed.scheme not in {"http", "https"}:
+        raise UnsafeRemoteUrl(f"unsupported URL scheme: {parsed.scheme or '-'}")
+    if parsed.userinfo:
+        raise UnsafeRemoteUrl("URL credentials are not allowed")
+    host = _normalize_host(parsed.host)
+    if not host:
+        raise UnsafeRemoteUrl("URL has no host")
+    if host in {_normalize_host(item) for item in trusted_hosts if item}:
+        return parsed
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(parsed.raw_host.decode("ascii"), port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as e:
+        raise UnsafeRemoteUrl(f"host could not be resolved: {host}") from e
+    addresses = {str(info[4][0]) for info in infos}
+    if not addresses or not all(_is_public_address(address) for address in addresses):
+        raise UnsafeRemoteUrl(f"host does not resolve to a public address: {host}")
+    return parsed
+
+
+def fetch_public_url(
+    url: str,
+    *,
+    timeout: float,
+    max_bytes: int,
+    headers: Optional[dict[str, str]] = None,
+    trusted_hosts: Iterable[str] = (),
+    max_redirects: int = 5,
+) -> tuple[bytes, str]:
+    """GET a remote file, re-validating the destination on every redirect hop and capping its size.
+
+    Returns (content, content_type).
+    """
+    trusted = tuple(trusted_hosts)
+    current = str(url or "").strip()
+    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+        for _ in range(max_redirects + 1):
+            target = assert_public_http_url(current, trusted_hosts=trusted)
+            with client.stream("GET", target, headers=headers) as response:
+                if response.has_redirect_location:
+                    current = str(response.url.join(response.headers["location"]))
+                    continue
+                response.raise_for_status()
+                declared = str(response.headers.get("content-length") or "").strip()
+                if declared.isdigit() and int(declared) > max_bytes:
+                    raise UnsafeRemoteUrl(f"remote file exceeds {max_bytes} bytes")
+                chunks: list[bytes] = []
+                size = 0
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise UnsafeRemoteUrl(f"remote file exceeds {max_bytes} bytes")
+                    chunks.append(chunk)
+                return b"".join(chunks), str(response.headers.get("content-type") or "")
+    raise UnsafeRemoteUrl("too many redirects")
 
 
 def _extract_image_bytes(response: dict[str, Any]) -> tuple[list[str], list[tuple[bytes, str]], list[tuple[str, str]]]:

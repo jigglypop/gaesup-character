@@ -167,7 +167,7 @@ def _content_type(path):
     # Windows MIME registrations do not consistently include WebP or glTF.
     known = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
              '.webp': 'image/webp', '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json',
-             '.json': 'application/json'}
+             '.json': 'application/json', '.svg': 'image/svg+xml'}
     return known.get(LocalPath(path).suffix.lower()) or mimetypes.guess_type(str(path))[0] or 'application/octet-stream'
 
 
@@ -474,9 +474,13 @@ def artifact_response(path, **kwargs):
     path = StoredPath(path)
     location = _location(path)
     if location and _head(path):
-        url = _s3().generate_presigned_url('get_object', Params={
-            'Bucket': location[0], 'Key': location[1],
-            'ResponseContentType': kwargs.get('media_type') or _content_type(path)}, ExpiresIn=900)
+        params = {'Bucket': location[0], 'Key': location[1],
+                  'ResponseContentType': kwargs.get('media_type') or _content_type(path)}
+        if kwargs.get('filename'):
+            from urllib.parse import quote
+            # Presigned downloads come from another origin, where the page's download attribute is ignored.
+            params['ResponseContentDisposition'] = f"attachment; filename*=UTF-8''{quote(kwargs['filename'])}"
+        url = _s3().generate_presigned_url('get_object', Params=params, ExpiresIn=900)
         return RedirectResponse(url, status_code=307, headers={'Cache-Control': 'private, no-store'})
     return FileResponse(LocalPath(path), **kwargs)
 

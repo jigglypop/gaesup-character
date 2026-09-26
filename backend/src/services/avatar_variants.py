@@ -7,7 +7,7 @@ import re
 import subprocess
 
 from src.services.asset_editor import _write_json
-from src.services.avatar_factory import _LOCK, digest
+from src.services.avatar_factory import _LOCK, _QUEUE, digest
 from src.services.avatar_image_pipeline import AvatarImagePipeline, capabilities
 from src.services.avatar_native_parts import AvatarNativeParts
 from src.services.avatar_production_spec import production_spec, seal_production_spec
@@ -17,7 +17,7 @@ from src.services.avatar_reference_preparation import initial_state as initial_r
 from src.services.avatar_openai_images import DEFAULT_BASE
 from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec
 from src.services.glb import parse_glb
-from src.services.character_parts import blender_executable
+from src.services.character_parts import blender_executable, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.object_storage import StoredPath as Path, copy_file, copy_tree, local_workspace, publish_checkpoint
 from src.services.process_identity import identity, state as process_state
@@ -601,7 +601,10 @@ def prepare_body(service, owner, job_id, state):
 
 
 def render_body_reference(output, worker):
-        with (output/'blender.log').open('wb') as log:
+        # Called by prepare_body inside its local_workspace and never while the queue is held:
+        # the same workspace-then-queue order as native assembly. The render timeout starts
+        # once a BLENDER_CONCURRENCY slot is granted.
+        with _QUEUE, (output/'blender.log').open('wb') as log:
             process = subprocess.Popen([blender_executable(), '--background', '--disable-autoexec', '--python-exit-code', '1', '--threads', '2', '--python',
                 str(worker), '--', str(output/'input.json')],
                 stdout=log, stderr=subprocess.STDOUT, env={**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'},
@@ -611,7 +614,7 @@ def render_body_reference(output, worker):
             try:
                 code = process.wait(timeout=240)
             except subprocess.TimeoutExpired:
-                process.terminate(); process.wait(timeout=10)
+                stop_process(process)
                 raise PipelineError('body_render_timeout', '기본 몸 참조 렌더 시간 초과', 409) from None
             if code:
                 raise PipelineError('body_render_failed', '기본 몸 참조 렌더 실패', 409)
