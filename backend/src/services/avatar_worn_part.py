@@ -134,6 +134,21 @@ def key_likelihood(colors, key_rgb, *, faint=False, hue_deg=28.):
     return ((difference < hue_deg) & (saturation > (.15 if faint else .35)) & (high > .2)).astype(float)
 
 
+def observed_key(colors, key_rgb, *, share=.03):
+    """(key colour as the provider baked it, adapted?). Some providers (Tripo) return the pure key as a
+    muted neighbour, magenta as dusty pink. Colours within 60 degrees of the key hue, faint ones too, are
+    collected and their median becomes the key. The key is always chosen far from the part's own hues,
+    so that window only meets the mannequin. Too few such colours keeps the requested key."""
+    if colors is None or not len(colors):
+        return tuple(key_rgb), False
+    rgb = np.clip(colors, 0, 1)
+    near = key_likelihood(rgb, key_rgb, faint=True, hue_deg=60.) > .5
+    strict = key_likelihood(rgb, key_rgb) > .5
+    if near.mean() < share or strict.sum() >= .5*near.sum():
+        return tuple(key_rgb), False
+    return tuple(float(v) for v in np.median(rgb[near], axis=0)), True
+
+
 def face_key_votes(obj, key_rgb):
     """Per loop triangle: how many of its three corners and its centre sample the key colour.
 
@@ -418,10 +433,14 @@ def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None):
     tree = body_tree(data)
     regions, _, marks = classify_regions(data['positions'], rig)
     colors = vertex_colors(obj)
-    key = key_likelihood(colors, key_rgb) if colors is not None else np.zeros(len(points))
+    requested = key_rgb
+    key_rgb, adapted = observed_key(colors, key_rgb)
+    # An adapted key is muted by definition, so it is matched with the faint thresholds throughout.
+    key = key_likelihood(colors, key_rgb, faint=adapted) if colors is not None else np.zeros(len(points))
     keyed = key > .5
     faint = key_likelihood(colors, key_rgb, faint=True) > .5 if colors is not None else keyed
     report = {'method': 'worn_extract_v1', 'slot': slot, 'key_rgb': list(key_rgb),
+              'requested_key_rgb': list(requested), 'key_adapted': bool(adapted),
               'provider_vertices': int(len(points)), 'key_vertices': int(keyed.sum())}
     transform = initial_alignment(points, data['positions'])
     use_key = keyed.sum() >= max(200, .05*len(points))
