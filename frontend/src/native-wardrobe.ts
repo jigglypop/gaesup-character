@@ -7,9 +7,12 @@ import { regionColorControl } from './region-color';
 import { matteCharacter } from './matte-materials';
 
 export type Wearable = { id: string; slot: string; url: string; sha256: string };
+/** An inner garment's tuck: per "mesh:primitive", the body vertex under each vertex (index into keys
+ * << 20 | vertex, -1 for none) and the vertex-space move (x, y, z per vertex) pressing it to the skin. */
+export type Tuck = { anchors: Record<string, Int32Array>; moves: Record<string, Float32Array>; keys: string[] };
 /** Depth bias of outer garment layers (more negative draws in front). */
 const OUTER_LAYERS: Record<string, number> = { top: -2, hat: -2, shoes: -1 };
-type Entry = { spec: Wearable; group: Group; source: GLTF; skeletons: Set<Skeleton>; touched: number };
+type Entry = { spec: Wearable; group: Group; source: GLTF; skeletons: Set<Skeleton>; touched: number; keys: Map<SkinnedMesh, string> };
 type RestBone = { bone: Bone; matrix: Matrix4; parent: string | null };
 
 function standardSlot(object: Object3D): unknown {
@@ -53,6 +56,7 @@ export class NativeWardrobe {
   }
 
   private originalIndex = new Map<SkinnedMesh, BufferAttribute | null>();
+  private partPositions = new WeakMap<SkinnedMesh, Float32Array>();
   private regionControls = new Map<Material, { mask: Texture; update: (colors: (string | null)[]) => void }>();
 
   /** Region colours of the part worn in a slot; null entries keep the original colour.
@@ -99,6 +103,50 @@ export class NativeWardrobe {
     }
   }
 
+  /** Press a worn inner garment onto the skin where the outer garments worn with it cover the body
+   * (outer: their hidden body triangles), so a waistband never shows through a top. */
+  tuckUnder(slot: string, tuck: Tuck | null, outer: Record<string, Uint8Array> | null) {
+    const entry = this.active.get(slot);
+    if (!entry) return;
+    // Body vertices under the outer garments: the corners of their hidden body triangles, grown by
+    // one ring so the press reaches just past the outer garment's hem.
+    const covered = new Map<string, Uint8Array>();
+    if (tuck && outer) for (const mesh of this.baseMeshes) {
+      const key = this.primitiveKeys.get(mesh), bits = key ? outer[key] : undefined;
+      if (!key || !bits) continue;
+      const index = this.originalIndex.has(mesh) ? this.originalIndex.get(mesh)! : mesh.geometry.index;
+      const corner = (t: number, k: number) => index ? index.getX(3*t+k) : 3*t+k;
+      const vertices = new Uint8Array(mesh.geometry.attributes.position.count);
+      const count = index ? index.count/3 : vertices.length/3;
+      for (let t = 0; t < count; t++) {
+        if ((bits[t >> 3] >> (t & 7)) & 1) for (let k = 0; k < 3; k++) vertices[corner(t, k)] = 1;
+      }
+      const grown = vertices.slice();
+      for (let t = 0; t < count; t++) {
+        if (vertices[corner(t, 0)] | vertices[corner(t, 1)] | vertices[corner(t, 2)]) for (let k = 0; k < 3; k++) grown[corner(t, k)] = 1;
+      }
+      covered.set(key, grown);
+    }
+    entry.group.traverse(object => {
+      const mesh = object as SkinnedMesh;
+      const position = mesh.isSkinnedMesh ? mesh.geometry.attributes.position : undefined;
+      if (!(position instanceof BufferAttribute) || !(position.array instanceof Float32Array) || position.itemSize !== 3) return;
+      if (!this.partPositions.has(mesh)) this.partPositions.set(mesh, position.array.slice());
+      const original = this.partPositions.get(mesh)!;
+      const key = entry.keys.get(mesh);
+      const anchor = key && tuck ? tuck.anchors[key] : undefined, move = key && tuck ? tuck.moves[key] : undefined;
+      const values = original.slice();
+      if (anchor && move && covered.size && anchor.length === position.count && move.length === 3*position.count) {
+        for (let v = 0; v < position.count; v++) {
+          const value = anchor[v];
+          if (value < 0 || covered.get(tuck!.keys[value >>> 20])?.[value & 0xfffff] !== 1) continue;
+          values[3*v] += move[3*v]; values[3*v+1] += move[3*v+1]; values[3*v+2] += move[3*v+2];
+        }
+      }
+      position.array.set(values); position.needsUpdate = true;
+    });
+  }
+
   constructor(private body: Object3D, private primitiveKeys: Map<Object3D, string> = new Map()) {
     body.updateMatrixWorld(true); this.baseInverse = body.matrixWorld.clone().invert();
     const rigs = new Set<Skeleton>();
@@ -139,13 +187,18 @@ export class NativeWardrobe {
       if (digest !== spec.sha256) throw new Error('의상 파일이 검수한 버전과 다릅니다.');
       const source = await new GLTFLoader().parseAsync(bytes, '');
       matteCharacter(source.scene);
-      const entry: Entry = { spec, source, group: new Group(), skeletons: new Set(), touched: performance.now() };
+      const entry: Entry = { spec, source, group: new Group(), skeletons: new Set(), touched: performance.now(), keys: new Map() };
       try {
         if (this.disposed) throw new Error('옷장 화면이 닫혔습니다.');
         source.scene.updateMatrixWorld(true);
         const meshes: SkinnedMesh[] = [];
         source.scene.traverse(object => { if ((object as SkinnedMesh).isSkinnedMesh) meshes.push(object as SkinnedMesh); });
         if (!meshes.length || meshes.some(mesh => standardSlot(mesh) !== spec.slot)) throw new Error('공용 골격에 맞춘 해당 슬롯의 의상 파일이 필요합니다.');
+        for (const mesh of meshes) {
+          // "mesh:primitive", matching the server's layering anchors (the typings omit primitives).
+          const mapping = source.parser.associations.get(mesh) as { meshes?: number; primitives?: number } | undefined;
+          if (mapping?.meshes !== undefined && mapping.primitives !== undefined) entry.keys.set(mesh, `${mapping.meshes}:${mapping.primitives}`);
+        }
         if (['hair', 'hairFront', 'hairBack'].includes(spec.slot)) {
           const materials = new Set(meshes.flatMap(mesh => Array.isArray(mesh.material) ? mesh.material : [mesh.material]));
           materials.forEach(material => {

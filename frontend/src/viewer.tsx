@@ -10,7 +10,7 @@ import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FaceEditor, type PaintSettings } from './face-editor';
 import { captureRestPose } from './model-pose';
-import { NativeWardrobe, type Wearable } from './native-wardrobe';
+import { NativeWardrobe, type Tuck, type Wearable } from './native-wardrobe';
 import { TextureExpressions } from './texture-expressions';
 import { matteCharacter } from './matte-materials';
 import { disposeObjectResources } from './assets/gpu-resources';
@@ -475,6 +475,7 @@ export class ModelViewer {
   wardrobeDiagnostics() { return this.wardrobe?.diagnostics(); }
   setHairColor(color: string | null) { this.wardrobe?.setHairColor(color); this.render(); }
   setHiddenBodyTriangles(hidden: Record<string, Uint8Array> | null) { this.wardrobe?.hideTriangles(hidden); this.render(); }
+  setTucked(slot: string, tuck: Tuck | null, outer: Record<string, Uint8Array> | null) { this.wardrobe?.tuckUnder(slot, tuck, outer); this.render(); }
   setPartColors(slot: string, material: number, mask: THREE.Texture, lights: number[], colors: (string | null)[]) { this.wardrobe?.setRegionColors(slot, material, mask, lights, colors); this.render(); }
   setEditing(enabled: boolean, onCount: (count: number) => void) { this.editing = enabled; this.paintCount = onCount; this.render(); }
   setPaint(settings: PaintSettings) { this.paintSettings = settings; if (this.editor) this.editor.settings = settings; }

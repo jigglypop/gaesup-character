@@ -4,6 +4,11 @@ Parts of one wardrobe body share its skeleton and export frame, so a garment GLB
 body GLB are compared directly in rest-pose glTF space. A body vertex is covered when the
 garment surface lies just outside it along its normal; a triangle is hidden only when all
 three vertices are covered, so openings (cuffs, hems, collars) never show a gap.
+
+Garments generated in different jobs overlap by centimetres (a waistband above a tee's hem).
+An inner garment carries, per vertex, the body vertex under it and the move that presses it
+onto the skin; where an outer garment worn with it covers those body vertices, the viewer
+presses the inner garment under it. Nothing is hidden, so a flared hem never shows a gap.
 """
 import base64
 
@@ -14,7 +19,11 @@ from src.services.glb import parse_glb
 GARMENT_SLOTS = ('top', 'bottom', 'shoes')
 OUTSIDE_M = (-.005, .06)   # garment distance along the skin normal that counts as covering
 SIDEWAYS_M = .02           # a garment point farther sideways belongs to a neighbouring area
-DRESS_LEG_SHARE = .35      # a top covering this share of the thighs takes the bottom's place
+DRESS_LEG_SHARE = .35      # a top covering this share of the lower thighs takes the bottom's place
+UNDER = {'bottom': ('top', 'shoes')}   # an inner garment slot and the outer slots it tucks under
+ANCHOR_M = .08             # a garment vertex farther than this from the skin never tucks under
+TUCK_M = .0015             # a tucked garment lies this far outside the skin (fitted parts keep 3 mm)
+VERTEX_BITS = 20           # anchor = body primitive ordinal << VERTEX_BITS | body vertex
 _COMPONENTS = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16, 5125: np.uint32, 5126: np.float32}
 _WIDTH = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4, 'MAT4': 16}
 
@@ -79,8 +88,10 @@ def skinned_primitives(content):
                 rest += weights[:, k:k+1]*np.einsum('nij,nj->ni', matrices[joints[:, k]], homogeneous)[:, :3]
             indices = (_accessor(doc, binary, primitive['indices']).astype(np.int64).reshape(-1)
                        if 'indices' in primitive else np.arange(len(positions)))
+            # Blended skin matrix per vertex: turns a rest-space move into the primitive's vertex space.
+            linear = sum(weights[:, k, None, None]*matrices[joints[:, k], :3, :3] for k in range(joints.shape[1]))
             result.append({'key': f"{node['mesh']}:{number}", 'positions': rest.astype(np.float32),
-                           'triangles': indices.reshape(-1, 3),
+                           'triangles': indices.reshape(-1, 3), 'linear': linear.astype(np.float32),
                            'joints': names[joints[np.arange(len(joints)), weights.argmax(axis=1)]]})
     return result
 
@@ -114,15 +125,70 @@ def _covered(positions, normals, garment, chunk=256):
     return covered
 
 
+def nearest(points, targets, reach):
+    """Per point, the index of the nearest target within reach, or -1. Chunks follow height (glTF Y)."""
+    points, targets = np.asarray(points, np.float64), np.asarray(targets, np.float64)
+    found = np.full(len(points), -1, dtype=np.int64)
+    order = np.argsort(points[:, 1], kind='stable')
+    for start in range(0, len(order), 256):
+        index = order[start:start+256]
+        chunk = points[index]
+        low, high = chunk.min(axis=0) - reach, chunk.max(axis=0) + reach
+        near = np.flatnonzero(np.all((targets >= low) & (targets <= high), axis=1))
+        if not len(near):
+            continue
+        distance = ((chunk[:, None, :] - targets[near][None, :, :])**2).sum(axis=2)
+        best = distance.argmin(axis=1)
+        close = distance[np.arange(len(index)), best] <= reach**2
+        found[index[close]] = near[best[close]]
+    return found
+
+
+def press(points, skin, normals, index):
+    """Moves pressing each point with a skin vertex (index >= 0) to TUCK_M outside it along its normal."""
+    move = np.zeros((len(points), 3))
+    found = index >= 0
+    normal = normals[index[found]]
+    along = ((points[found] - skin[index[found]])*normal).sum(axis=1)
+    move[found] = -np.maximum(along - TUCK_M, 0.)[:, None]*normal
+    return move
+
+
+def tucks(body, part):
+    """Per part primitive key: (anchor, move). anchor: int32 per vertex, the nearest body vertex
+    within ANCHOR_M as ordinal << VERTEX_BITS | vertex (ordinal: position in `body`), or -1.
+    move: float32 (vertex, 3) in the primitive's own vertex space, along that body vertex's
+    normal down to TUCK_M outside the skin (zero where the vertex is already that close)."""
+    skin = np.concatenate([p['positions'] for p in body]).astype(np.float64)
+    normals = np.concatenate([_normals(p['positions'], p['triangles']) for p in body]).astype(np.float64)
+    labels = np.concatenate([(np.int64(i) << VERTEX_BITS) + np.arange(len(p['positions']))
+                             for i, p in enumerate(body)])
+    result = {}
+    for primitive in part:
+        positions = primitive['positions'].astype(np.float64)
+        index = nearest(positions, skin, ANCHOR_M)
+        anchor = np.where(index >= 0, labels[np.maximum(index, 0)], -1)
+        move = press(positions, skin, normals, index)
+        pressed = np.flatnonzero(np.abs(move).sum(axis=1) > 0)
+        if len(pressed):
+            move[pressed] = np.linalg.solve(primitive['linear'][pressed].astype(np.float64), move[pressed, :, None])[..., 0]
+        result[primitive['key']] = anchor.astype(np.int32), move.astype(np.float32)
+    return result
+
+
 def coverage(body, part_content, slot):
     """{hidden: {primitive key: base64 bitset of triangles}, triangles: {key: count}, covers_bottom}.
 
+    An inner slot (UNDER) also gets, per part primitive key, anchors (base64 int32 per vertex) and
+    tucks (base64 float32 x, y, z per vertex) from tucks(), anchor_keys (body primitive keys by
+    ordinal) and under (the outer slots).
     body: skinned_primitives() of the wardrobe body GLB (parse once, reuse for every part).
     """
-    garment = np.concatenate([p['positions'] for p in skinned_primitives(part_content)] or [np.zeros((0, 3), np.float32)])
+    part = skinned_primitives(part_content)
+    garment = np.concatenate([p['positions'] for p in part] or [np.zeros((0, 3), np.float32)])
     if len(garment) > 20000:
         garment = garment[np.random.default_rng(0).choice(len(garment), 20000, replace=False)]
-    hidden, counts, thigh = {}, {}, [0, 0]
+    hidden, counts, thighs = {}, {}, []
     for primitive in body:
         positions, triangles = primitive['positions'], primitive['triangles']
         covered = _covered(positions, _normals(positions, triangles), garment) if len(garment) else np.zeros(len(positions), bool)
@@ -130,7 +196,17 @@ def coverage(body, part_content, slot):
         counts[primitive['key']] = int(len(triangles))
         hidden[primitive['key']] = base64.b64encode(np.packbits(faces, bitorder='little').tobytes()).decode()
         legs = np.isin(np.char.lower(primitive['joints'].astype(str)), ('leftupleg', 'rightupleg'))
-        thigh[0] += int((covered & legs).sum()); thigh[1] += int(legs.sum())
-    share = thigh[0]/thigh[1] if thigh[1] else 0.
-    return {'slot': slot, 'hidden': hidden, 'triangles': counts,
-            'covers_bottom': bool(slot == 'top' and share >= DRESS_LEG_SHARE), 'thigh_share': round(share, 3)}
+        thighs.append((positions[legs, 1], covered[legs]))
+    # The lower half of the thighs: a hip-length sweater reaches the top of them, a dress the rest.
+    heights = np.concatenate([height for height, _ in thighs]) if thighs else np.zeros(0)
+    lower = heights < np.median(heights) if len(heights) else heights.astype(bool)
+    under = np.concatenate([flags for _, flags in thighs]) if thighs else lower
+    share = float(under[lower].mean()) if lower.any() else 0.
+    value = {'slot': slot, 'hidden': hidden, 'triangles': counts,
+             'covers_bottom': bool(slot == 'top' and share >= DRESS_LEG_SHARE), 'thigh_share': round(share, 3)}
+    if slot in UNDER:
+        pressed = tucks(body, part)
+        value.update(under=list(UNDER[slot]), anchor_keys=[p['key'] for p in body],
+                     anchors={key: base64.b64encode(anchor.astype('<i4').tobytes()).decode() for key, (anchor, _) in pressed.items()},
+                     tucks={key: base64.b64encode(move.astype('<f4').tobytes()).decode() for key, (_, move) in pressed.items()})
+    return value

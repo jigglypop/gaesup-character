@@ -154,6 +154,15 @@ def repair_hair_backing(meshes, body, rig, spec, image_paths, *, shared_canvas=F
     columns, rows = spec['fitting'].get('hair_backing_grid', [81, 97])
     x_min, x_max = (hair_lo.x, hair_hi.x) if extended else (lo.x, hi.x)
     top = hair_hi.z if extended else hi.z
+    # Cells reach wherever the reference has hair within half a cell; the material's alpha then
+    # cuts the backing to the reference outline instead of the grid's steps.
+    cell_px = max(abs(project(x_max, top)[0] - project(x_min, top)[0])/max(columns-1, 1),
+                  abs(project(x_min, top)[1] - project(x_min, floor)[1])/max(rows-1, 1))
+    reach = mask.copy()
+    for _ in range(max(1, int(math.ceil(cell_px/2)))):
+        grown = reach.copy()
+        grown[1:] |= reach[:-1]; grown[:-1] |= reach[1:]; grown[:, 1:] |= reach[:, :-1]; grown[:, :-1] |= reach[:, 1:]
+        reach = grown
     radius_x = max((hi.x-lo.x)/2, (hair_hi.x-hair_lo.x)*.5, 1e-6)
     radius_y = max((hi.y-lo.y)/2, 1e-6)
     radius_z = max(top-center.z, 1e-6)
@@ -165,8 +174,7 @@ def repair_hair_backing(meshes, body, rig, spec, image_paths, *, shared_canvas=F
             px, py = project(float(x), float(z))
             ix, iy = round(px), round(py)
             # One-pixel inset avoids projecting transparent border RGB.
-            if (ix < 1 or iy < 1 or ix >= width-1 or iy >= height-1
-                    or not mask[iy-1:iy+2, ix-1:ix+2].all()):
+            if ix < 1 or iy < 1 or ix >= width-1 or iy >= height-1 or not reach[iy, ix]:
                 continue
             origin = Vector((x, origin_y, z))
             hit = skull.cast(origin, Vector((0, -1, 0)))
@@ -226,6 +234,11 @@ def repair_hair_backing(meshes, body, rig, spec, image_paths, *, shared_canvas=F
     texture = material.node_tree.nodes.new('ShaderNodeTexImage')
     texture.image = image
     texture.extension = 'EXTEND'
+    # Alpha clip (exported as glTF MASK): the backing ends at the reference's own outline.
+    clip = material.node_tree.nodes.new('ShaderNodeMath')
+    clip.operation = 'ROUND'
+    material.node_tree.links.new(texture.outputs['Alpha'], clip.inputs[0])
+    material.node_tree.links.new(clip.outputs['Value'], shader.inputs['Alpha'])
     texture_edge = int(spec.get('runtime', {}).get('texture_max_edge', max(width, height)))
     if max(width, height) > texture_edge:
         scale = texture_edge/max(width, height)

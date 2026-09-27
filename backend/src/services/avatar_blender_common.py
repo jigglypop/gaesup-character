@@ -141,6 +141,11 @@ def bind(meshes, body, rig, contract, *, transform=None):
                 row = dict(sorted(row.items(), key=lambda pair: pair[1], reverse=True)[:4])
                 total = sum(row.values())
                 if total <= 1e-8:
+                    # A degenerate body triangle has no barycentric weights: take its nearest corner's.
+                    corner = min(ids, key=lambda i: (points[i]-hit).length)
+                    row = dict(sorted(weights[corner].items(), key=lambda pair: pair[1], reverse=True)[:4])
+                    total = sum(row.values())
+                if total <= 1e-8:
                     raise ValueError('Zero transferred skin weight')
                 row = {k: v/total for k, v in row.items()}
             for name, weight in row.items():

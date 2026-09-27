@@ -84,7 +84,11 @@ export type WardrobePartRef = { job_id: string; version: string; sha256: string 
 export type WardrobeOutfit = { name: string; body: { job_id: string; version: string }; parts: Record<string, WardrobePartRef>; hair_color?: string | null; colors?: Record<string, Record<string, string>>; saved_at?: string };
 export type WardrobeColors = { slot: string; material: number; regions: { index: number; color: string; share: number; light: number }[] };
 export type WardrobeOutfits = { revision: string; outfits: Record<string, WardrobeOutfit> };
-export type WardrobeCoverage = { slot: string; hidden: Record<string, string>; triangles: Record<string, number>; covers_bottom: boolean };
+/** An inner garment, per "mesh:primitive": anchors, base64 int32 per vertex, the body vertex under it
+ * (anchor_keys index << 20 | vertex) or -1; tucks, base64 float32 x, y, z per vertex, the move in
+ * vertex space that presses it onto the skin. under: the outer slots it tucks under. */
+export type WardrobeCoverage = { slot: string; hidden: Record<string, string>; triangles: Record<string, number>; covers_bottom: boolean;
+  anchors?: Record<string, string>; tucks?: Record<string, string>; anchor_keys?: string[]; under?: string[] };
 export const wardrobeUrls = {
   body: (body: { job_id: string; version: string }) => `/api/avatar-factory/jobs/${body.job_id}/native-parts/${body.version}/body.glb`,
   part: (part: WardrobePart) => `/api/avatar-factory/jobs/${part.job_id}/native-parts/${part.version}/${part.slot}.glb`,

@@ -18,6 +18,7 @@ from src.services.avatar_shell_garment import body_arrays, body_tree, classify_r
 DEFAULT_KEY_RGB = (1., 0., 1.)
 HEAD_SLOTS = ('hair', 'hat', 'hairFront', 'hairBack')
 FRINGE_HUE_DEG = 40.   # the key's shaded and compressed edges drift further in hue than its body
+ANCHOR_HUE_DEG = 60.   # a provider's muted key stays this close to the requested hue
 
 
 def join_meshes(meshes, name):
@@ -102,15 +103,10 @@ def vertex_colors(obj):
     return np.divide(result, weight[:, None], out=np.zeros_like(result), where=weight[:, None] > 0)
 
 
-def key_likelihood(colors, key_rgb, *, faint=False, hue_deg=28.):
-    """1 for mannequin-coloured vertices: same hue family as the key, saturated, lit.
-
-    faint also accepts the pale highlights a provider bakes onto the mannequin.
-    """
-    rgb = np.clip(colors, 0, 1)
+def _hue(rgb):
+    """Hue in degrees per row, 0 for greys."""
     high, low = rgb.max(axis=1), rgb.min(axis=1)
     chroma = high - low
-    saturation = np.divide(chroma, high, out=np.zeros_like(high), where=high > 1e-6)
     hue = np.zeros(len(rgb))
     r, g, b = rgb[:, 0], rgb[:, 1], rgb[:, 2]
     mask = chroma > 1e-6
@@ -118,20 +114,34 @@ def key_likelihood(colors, key_rgb, *, faint=False, hue_deg=28.):
     hue[rmax] = np.mod((g - b)[rmax]/chroma[rmax], 6)
     hue[gmax] = (b - r)[gmax]/chroma[gmax] + 2
     hue[bmax] = (r - g)[bmax]/chroma[bmax] + 4
-    hue = hue*60.
+    return hue*60.
+
+
+def _hue_distance(hue, reference):
+    return np.abs((hue - reference + 180) % 360 - 180)
+
+
+def key_likelihood(colors, key_rgb, *, faint=False, hue_deg=28., anchor=None):
+    """1 for mannequin-coloured vertices: same hue family as the key, saturated, lit.
+
+    faint also accepts the pale highlights a provider bakes onto the mannequin. anchor: the requested
+    key when key_rgb is the muted colour a provider baked it as. Colours near either hue match (JPEG
+    mixes the pure key into the part's own colour, magenta into grey as lavender), and never beyond
+    ANCHOR_HUE_DEG of the requested hue, so a dusty-pink key never reaches brown hair or skin.
+    """
+    rgb = np.clip(colors, 0, 1)
+    high, low = rgb.max(axis=1), rgb.min(axis=1)
+    chroma = high - low
+    saturation = np.divide(chroma, high, out=np.zeros_like(high), where=high > 1e-6)
     key = np.array(key_rgb, dtype=float)
-    kh, kl = key.max(), key.min()
-    kc = kh - kl
-    if kc < 1e-6:
+    if key.max() - key.min() < 1e-6:
         return np.zeros(len(rgb))
-    if kh == key[0]:
-        key_hue = np.mod((key[1]-key[2])/kc, 6)*60
-    elif kh == key[1]:
-        key_hue = ((key[2]-key[0])/kc + 2)*60
-    else:
-        key_hue = ((key[0]-key[1])/kc + 4)*60
-    difference = np.abs((hue - key_hue + 180) % 360 - 180)
-    return ((difference < hue_deg) & (saturation > (.15 if faint else .35)) & (high > .2)).astype(float)
+    hue = _hue(rgb)
+    matched = _hue_distance(hue, _hue(key[None])[0]) < hue_deg
+    if anchor is not None:
+        requested = _hue_distance(hue, _hue(np.array(anchor, dtype=float)[None])[0])
+        matched = (matched | (requested < hue_deg)) & (requested < ANCHOR_HUE_DEG)
+    return (matched & (saturation > (.15 if faint else .35)) & (high > .2)).astype(float)
 
 
 def observed_key(colors, key_rgb, *, share=.03):
@@ -142,14 +152,14 @@ def observed_key(colors, key_rgb, *, share=.03):
     if colors is None or not len(colors):
         return tuple(key_rgb), False
     rgb = np.clip(colors, 0, 1)
-    near = key_likelihood(rgb, key_rgb, faint=True, hue_deg=60.) > .5
+    near = key_likelihood(rgb, key_rgb, faint=True, hue_deg=ANCHOR_HUE_DEG) > .5
     strict = key_likelihood(rgb, key_rgb) > .5
     if near.mean() < share or strict.sum() >= .5*near.sum():
         return tuple(key_rgb), False
     return tuple(float(v) for v in np.median(rgb[near], axis=0)), True
 
 
-def face_key_votes(obj, key_rgb):
+def face_key_votes(obj, key_rgb, anchor=None):
     """Per loop triangle: how many of its three corners and its centre sample the key colour.
 
     Seam vertices average the garment and the mannequin, so vertex colours miss the band of
@@ -179,7 +189,7 @@ def face_key_votes(obj, key_rgb):
         samples = np.concatenate([corners, corners.mean(axis=1, keepdims=True)], axis=1)
         x = np.clip((np.mod(samples[..., 0], 1.)*width).astype(int), 0, width-1)
         y = np.clip((np.mod(samples[..., 1], 1.)*height).astype(int), 0, height-1)
-        keyed = key_likelihood(pixels[y, x, :3].reshape(-1, 3), key_rgb, faint=True, hue_deg=FRINGE_HUE_DEG)
+        keyed = key_likelihood(pixels[y, x, :3].reshape(-1, 3), key_rgb, faint=True, hue_deg=FRINGE_HUE_DEG, anchor=anchor)
         votes[rows] = keyed.reshape(-1, 4).sum(axis=1).astype(np.int64)
     return votes
 
@@ -211,7 +221,7 @@ def _push_pull(rgb, valid, levels=12):
     return filled
 
 
-def repaint_key_texels(obj, key_rgb):
+def repaint_key_texels(obj, key_rgb, anchor=None):
     """Give mannequin-coloured texels the nearest garment colour, so filtering at UV borders and
     mip levels never blends the key into the part. JPEG leaves a fringe of shifted hues around
     the key: texels within a few pixels of it go too. Returns the number of texels changed."""
@@ -223,10 +233,10 @@ def repaint_key_texels(obj, key_rgb):
         pixels = np.empty(width*height*4, dtype=np.float32); image.pixels.foreach_get(pixels)
         pixels = pixels.reshape(height, width, 4)
         colors = pixels[..., :3].reshape(-1, 3)
-        key = key_likelihood(colors, key_rgb, faint=True).reshape(height, width) > .5
+        key = key_likelihood(colors, key_rgb, faint=True, anchor=anchor).reshape(height, width) > .5
         if not key.any() or key.all():
             continue
-        fringe = key_likelihood(colors, key_rgb, faint=True, hue_deg=FRINGE_HUE_DEG).reshape(height, width) > .5
+        fringe = key_likelihood(colors, key_rgb, faint=True, hue_deg=FRINGE_HUE_DEG, anchor=anchor).reshape(height, width) > .5
         key = _dilate(key, 3) | (_dilate(key, 8) & fringe)
         pixels[..., :3] = np.where(key[..., None], _push_pull(pixels[..., :3], ~key), pixels[..., :3])
         image.pixels.foreach_set(pixels.reshape(-1))
@@ -263,6 +273,48 @@ def touching_components(points, triangles, member, touching):
     roots = np.array([find(i) for i in range(len(parent))])
     touched = np.unique(roots[weld[member & touching]])
     return member & np.isin(roots[weld], touched)
+
+
+def enclosed_patches(points, triangles, patch, mannequin, ends, *, share=.5, largest=.02):
+    """patch vertices in small connected patches (up to `largest` of the vertices) whose bordering
+    vertices are mostly not mannequin: a piece of the part a drawing mislabels, not the mannequin
+    reaching the part's edge. ends: vertices over the head, hands and feet; a patch mostly there
+    is the mannequin showing past an opening (a foot below a cuff), never the part."""
+    weld = _welded(points)
+    count = weld.max()+1
+    inside = np.zeros(count, bool); inside[weld[patch]] = True
+    end = np.zeros(count, bool); end[weld[ends]] = True
+    outside = np.zeros(count, bool); outside[weld[mannequin & ~patch]] = True
+    parent = np.arange(count)
+
+    def find(i):
+        root = i
+        while parent[root] != root:
+            root = parent[root]
+        while parent[i] != root:
+            parent[i], i = root, parent[i]
+        return root
+    corners = weld[triangles]
+    edges = np.concatenate([corners[:, [0, 1]], corners[:, [1, 2]], corners[:, [2, 0]]])
+    for a, b in edges[inside[edges[:, 0]] & inside[edges[:, 1]]]:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+    border = edges[inside[edges[:, 0]] != inside[edges[:, 1]]]
+    border = np.where(inside[border[:, 0]][:, None], border, border[:, ::-1])  # (patch vertex, neighbour)
+    roots = np.array([find(a) for a in border[:, 0]], dtype=np.int64)
+    members = np.flatnonzero(inside)
+    member_roots = np.array([find(i) for i in members], dtype=np.int64)
+    sizes = dict(zip(*np.unique(member_roots, return_counts=True)))
+    enclosed = np.zeros(count, bool)
+    for root in np.unique(roots):
+        neighbours = np.unique(border[roots == root, 1])
+        if (sizes.get(root, 0) <= largest*count and outside[neighbours].mean() < share
+                and end[members[member_roots == root]].mean() < .5):
+            enclosed[root] = True
+    enclosed_vertex = np.zeros(count, bool)
+    enclosed_vertex[members] = enclosed[member_roots]
+    return patch & enclosed_vertex[weld]
 
 
 def scale_translate(source, target):
@@ -367,14 +419,16 @@ def initial_alignment(points, body_points):
     return transform @ rotation
 
 
-def remove_small_islands(obj, min_fraction=.01, *, hugging=None, mannequin=None, detached_m=.05):
+def remove_small_islands(obj, min_fraction=.01, *, hugging=None, mannequin=None, detached_m=.05,
+                         residue_fraction=.1):
     """Delete small disconnected pieces. Vertices split at UV seams count as joined.
 
     hugging(points) -> per-vertex |distance| to the body; when given, only small
     pieces lying on the body surface (mannequin residue) are deleted, never a
-    separate lock or ornament. mannequin: per-vertex key-colour flags; a small
-    piece that is mostly key-coloured is residue wherever it lies. A small piece
-    farther than detached_m from the largest piece (a speck near the floor) goes too.
+    separate lock or ornament. mannequin: per-vertex residue flags (key colour, drawn
+    mannequin); a piece that is mostly residue is deleted wherever it lies, up to
+    residue_fraction of the faces. A small piece farther than detached_m from the
+    largest piece (a speck near the floor) goes too.
     """
     mesh = obj.data
     points, _ = mesh_arrays(obj)
@@ -398,9 +452,14 @@ def remove_small_islands(obj, min_fraction=.01, *, hugging=None, mannequin=None,
     labels = np.array([find(weld[vertices[0]]) for vertices in polygon_vertices])
     unique, counts = np.unique(labels, return_counts=True)
     small = set(unique[counts < max(1, min_fraction*len(polygon_vertices))].tolist())
+    largest = unique[np.argmax(counts)]
+    if mannequin is not None:
+        for label in unique[(counts < residue_fraction*len(polygon_vertices)) & (unique != largest)]:
+            members = np.unique(np.concatenate([polygon_vertices[i] for i in np.flatnonzero(labels == label)]))
+            if mannequin[members].mean() > .5:
+                small.add(int(label))
     if hugging is not None and small:
         distance = hugging(points)
-        largest = unique[np.argmax(counts)]
         main = points[np.unique(np.concatenate([polygon_vertices[i] for i in np.flatnonzero(labels == largest)]))]
         step = max(1, len(main)//4000)
         main = main[::step]
@@ -421,20 +480,43 @@ def remove_small_islands(obj, min_fraction=.01, *, hugging=None, mannequin=None,
     return {'islands': int(len(unique)), 'removed_islands': int(len(small))}
 
 
-def drawn_mannequin(drawing, key_rgb, points, *, margin_px=3):
-    """Per point: projects well inside the mannequin of the front drawing (the key colour, eroded by
-    margin_px so the garment's own hem and edges are never taken)."""
+DRAWN_CORE, DRAWN_MARGIN, DRAWN_GARMENT, DRAWN_OUTSIDE = 2, 1, 0, -1
+
+
+def drawn_classes(drawing, key_rgb, *, margin_m=.012, reach_m=.03):
+    """Per pixel of a drawing: DRAWN_CORE, DRAWN_MARGIN, DRAWN_GARMENT or DRAWN_OUTSIDE.
+
+    A provider rebuilds the mannequin and the part a little larger than drawn, so the background
+    within reach_m of the figure takes the class of the nearer of the two (the part on a tie).
+    Mannequin within margin_m of the part is only DRAWN_MARGIN: a hem the provider made a little
+    longer than drawn is never taken. Computed once per drawing and key."""
+    cached = getattr(drawing, 'drawn_classes', None)
+    if cached is not None and cached[0] == tuple(key_rgb):
+        return cached[1]
     from src.services.avatar_shell_garment import key_pixels
+    ppm = min(drawing.ppm_x, drawing.ppm_y)
     key = key_pixels(drawing.rgba, key_rgb, fringe=0)
-    core = key.copy()
-    for _ in range(margin_px):
-        shrunk = core.copy()
-        shrunk[1:] &= core[:-1]; shrunk[:-1] &= core[1:]; shrunk[:, 1:] &= core[:, :-1]; shrunk[:, :-1] &= core[:, 1:]
-        core = shrunk
+    part = (drawing.alpha >= .5) & ~key
+    grown_key, grown_part = key.copy(), part.copy()
+    for _ in range(int(round(reach_m*ppm))):
+        free = ~(grown_key | grown_part)
+        grown_part |= _dilate(grown_part, 1) & free
+        grown_key |= _dilate(grown_key, 1) & free & ~grown_part
+    classes = np.full(key.shape, DRAWN_OUTSIDE, dtype=np.int8)
+    classes[grown_part] = DRAWN_GARMENT
+    classes[grown_key] = DRAWN_MARGIN
+    classes[grown_key & ~_dilate(part, max(3, int(round(margin_m*ppm))))] = DRAWN_CORE
+    drawing.drawn_classes = (tuple(key_rgb), classes)
+    return classes
+
+
+def drawn_mannequin(drawing, key_rgb, points):
+    """Per point, the drawn_classes() class of the pixel it projects to in a drawing."""
+    classes = drawn_classes(drawing, key_rgb)
     pixels = drawing.project(points)
     x = np.clip(np.round(pixels[:, 0] - .5).astype(int), 0, drawing.width - 1)
     y = np.clip(np.round(pixels[:, 1] - .5).astype(int), 0, drawing.height - 1)
-    return core[y, x]
+    return classes[y, x]
 
 
 def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None, drawings=()):
@@ -457,10 +539,12 @@ def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None, drawi
     colors = vertex_colors(obj)
     requested = key_rgb
     key_rgb, adapted = observed_key(colors, key_rgb)
-    # An adapted key is muted by definition, so it is matched with the faint thresholds throughout.
-    key = key_likelihood(colors, key_rgb, faint=adapted) if colors is not None else np.zeros(len(points))
+    # An adapted key is muted by definition, so it is matched with the faint thresholds throughout,
+    # and only on the requested key's side of the colour wheel.
+    anchor = requested if adapted else None
+    key = key_likelihood(colors, key_rgb, faint=adapted, anchor=anchor) if colors is not None else np.zeros(len(points))
     keyed = key > .5
-    faint = key_likelihood(colors, key_rgb, faint=True) > .5 if colors is not None else keyed
+    faint = key_likelihood(colors, key_rgb, faint=True, anchor=anchor) > .5 if colors is not None else keyed
     report = {'method': 'worn_extract_v1', 'slot': slot, 'key_rgb': list(key_rgb),
               'requested_key_rgb': list(requested), 'key_adapted': bool(adapted),
               'provider_vertices': int(len(points)), 'key_vertices': int(keyed.sum())}
@@ -514,22 +598,62 @@ def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None, drawi
     if slot in HEAD_SLOTS and not use_key:
         # Without a key colour, surface left on the hands or feet is mannequin.
         body_like |= np.isin(nearest_region.astype(str), ('hand', 'foot')) & (np.abs(signed) < .03)
+    front = next((drawing for drawing in drawings if drawing.name == 'front'), None)
     if drawings:
-        # Near the body only: a loose garment edge swinging over the drawn mannequin is kept.
-        drawn = np.zeros(len(aligned), dtype=bool)
+        # Near the body only: a loose garment edge swinging over the drawn mannequin is kept. A view
+        # judges only the surface it shows: the back of the hair projects onto the front drawing's face.
+        from mathutils.bvhtree import BVHTree
+        from src.services.avatar_shell_garment import visible
+        own = BVHTree.FromPolygons([Vector(p) for p in aligned], [tuple(int(i) for i in t) for t in triangles],
+                                   all_triangles=True)
+        # Hair lies over the head by nature, and a provider adds locks the drawing does not show.
+        judged = (np.abs(signed) < .08) & ~body_like
+        if slot in HEAD_SLOTS:
+            judged &= nearest_region.astype(str) != 'head'
+        index = np.flatnonzero(judged)
+        drawn = np.zeros(len(aligned), dtype=bool); garment = np.zeros(len(aligned), dtype=bool)
         for drawing in drawings:
-            drawn |= drawn_mannequin(drawing, drawn_key, aligned)
-        drawn &= np.abs(signed) < .08
+            shown = visible(aligned[index], np.zeros((len(index), 3)), [drawing], [own])[drawing.name]
+            place = drawn_mannequin(drawing, drawn_key, aligned[index])
+            drawn[index[shown & (place == DRAWN_CORE)]] = True
+            garment[index[shown & (place == DRAWN_GARMENT)]] = True
+        if front is not None and slot not in HEAD_SLOTS:
+            # Surface no drawing shows clearly (the backs of the legs without a back view, a leg's
+            # outline in the side view) is judged by the front drawing alone: the mannequin's
+            # outline is the same from behind.
+            open_ = index[~drawn[index] & ~garment[index]]
+            drawn[open_[drawn_mannequin(front, drawn_key, aligned[open_]) == DRAWN_CORE]] = True
+        # Views are drawn a little differently from each other and from the provider's model: a
+        # patch the part surrounds is the part, whatever a drawing shows there.
+        mislabelled = enclosed_patches(points, triangles, drawn & ~body_like, body_like,
+                                       np.isin(nearest_region.astype(str), ('head', 'hand', 'foot')))
+        drawn &= ~mislabelled
         report['drawing_mannequin_vertices'] = int((drawn & ~body_like).sum())
+        report['drawing_patches_kept_vertices'] = int(mislabelled.sum())
         body_like |= drawn
     face_body = body_like[triangles].sum(axis=1) >= 2
     if use_key and colors is not None:
         # A face whose own texture is the key is mannequin, even where its seam vertices
         # average to the garment colour (the band left along hems and hairlines).
-        key_faces = (face_key_votes(obj, key_rgb) >= 3) & (np.abs(signed)[triangles].min(axis=1) < .06)
+        key_faces = (face_key_votes(obj, key_rgb, anchor) >= 3) & (np.abs(signed)[triangles].min(axis=1) < .06)
         report['key_faces'] = int((key_faces & ~face_body).sum())
         face_body |= key_faces
     report['removed_faces'] = int(face_body.sum()); report['provider_faces'] = int(len(triangles))
+    # A kept face with one mannequin corner reaches into the removed mannequin as a spike (a ragged
+    # hem): that corner moves to the middle of the face's other two corners.
+    corners = body_like[triangles]
+    spikes = ~face_body & (corners.sum(axis=1) == 1)
+    if spikes.any():
+        weld = _welded(points)
+        rows = triangles[spikes]
+        tip = rows[np.arange(len(rows)), corners[spikes].argmax(axis=1)]
+        target = np.zeros((weld.max()+1, 3)); count = np.zeros(weld.max()+1)
+        np.add.at(target, weld[tip], (aligned[rows].sum(axis=1) - aligned[tip])/2)
+        np.add.at(count, weld[tip], 1)
+        moved = count[weld] > 0
+        aligned = aligned.copy()
+        aligned[moved] = target[weld[moved]]/count[weld[moved], None]
+        report['spike_vertices_moved'] = int(moved.sum())
     # Write the aligned positions, then delete mannequin faces.
     mesh = obj.data
     flat = aligned.reshape(-1)
@@ -554,12 +678,16 @@ def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None, drawi
     def hugging(points):
         return np.array([abs((Vector(p) - tree.find_nearest(Vector(p))[0]).length) for p in points])
     remaining = vertex_colors(obj) if use_key else None
-    report['islands'] = remove_small_islands(obj, hugging=hugging, mannequin=(
-        key_likelihood(remaining, key_rgb, faint=True) > .5 if remaining is not None else None))
+    residue = key_likelihood(remaining, key_rgb, faint=True, anchor=anchor) > .5 if remaining is not None else None
+    if front is not None and slot not in HEAD_SLOTS:
+        # A small piece lying on the drawn mannequin is residue too (a limb's rim the provider made thicker).
+        drawn_here = drawn_mannequin(front, drawn_key, mesh_arrays(obj)[0]) >= DRAWN_MARGIN
+        residue = drawn_here if residue is None else residue | drawn_here
+    report['islands'] = remove_small_islands(obj, hugging=hugging, mannequin=residue)
     if not len(mesh.polygons):
         raise ValueError('Nothing remained after removing the mannequin')
     if use_key:
-        report['key_texels_repainted'] = repaint_key_texels(obj, key_rgb)
+        report['key_texels_repainted'] = repaint_key_texels(obj, key_rgb, anchor)
     report['part_vertices'] = len(mesh.vertices)
     report['part_faces'] = len(mesh.polygons)
     report['transform'] = [list(map(float, row)) for row in (head_transform @ transform)]

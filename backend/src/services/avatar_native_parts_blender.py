@@ -97,6 +97,52 @@ def extract_worn_meshes(part, meshes, body, rig, spec):
     return extracted, binding
 
 
+def pressed_under(fitted, body, rig):
+    """(apply, restore) for renders: this assembly's bottom pressed onto the skin where its top or
+    shoes cover the body, as the wardrobe presses any outfit (avatar_wardrobe_coverage). The
+    exported bottom stays as fitted, so it still layers under any other top."""
+    import numpy as np
+    from src.services.avatar_shell_garment import body_arrays
+    from src.services.avatar_wardrobe_coverage import ANCHOR_M, UNDER, _covered, nearest, press
+    # The coverage helpers chunk along glTF Y (up): hand them Blender Z as Y.
+    gltf = lambda a: np.stack([a[:, 0], a[:, 2], -a[:, 1]], axis=1)
+    blender = lambda a: np.stack([a[:, 0], -a[:, 2], a[:, 1]], axis=1)
+
+    def world(obj):
+        mesh = obj.data
+        local = np.empty(len(mesh.vertices)*3); mesh.vertices.foreach_get('co', local)
+        local = local.reshape(-1, 3); matrix = np.array(obj.matrix_world)
+        return local, local @ matrix[:3, :3].T + matrix[:3, 3], matrix
+    moves, data = [], None
+    for inner, outers in UNDER.items():
+        meshes = [obj for obj in fitted if obj['part_role'] == inner]
+        cover = [obj for obj in fitted if obj['part_role'] in outers]
+        if not meshes or not cover:
+            continue
+        data = data or body_arrays(body, rig)
+        skin, normals = gltf(data['positions']), gltf(data['normals'])
+        garment = gltf(np.concatenate([world(obj)[1] for obj in cover]))
+        if len(garment) > 20000:
+            garment = garment[np.random.default_rng(0).choice(len(garment), 20000, replace=False)]
+        covered = _covered(skin, normals, garment)
+        # The corners of covered body triangles, grown by one ring (as the wardrobe viewer does).
+        corners = np.zeros(len(skin), bool)
+        corners[data['triangles'][covered[data['triangles']].all(axis=1)].reshape(-1)] = True
+        corners[data['triangles'][corners[data['triangles']].any(axis=1)].reshape(-1)] = True
+        for obj in meshes:
+            local, points, matrix = world(obj)
+            index = nearest(gltf(points), skin, ANCHOR_M)
+            index[index >= 0] = np.where(corners[index[index >= 0]], index[index >= 0], -1)
+            moved = points + blender(press(gltf(points), skin, normals, index))
+            moves.append((obj, local, (moved - matrix[:3, 3]) @ np.linalg.inv(matrix[:3, :3]).T))
+
+    def put(which):
+        for obj, local, pressed in moves:
+            obj.data.vertices.foreach_set('co', (pressed if which else local).reshape(-1))
+            obj.data.update()
+    return (lambda: put(True)), (lambda: put(False))
+
+
 def mark_shell_coverage(body, slot, covered):
     """Store which body vertices a shell garment covers, for the body-layer crop."""
     for obj in body:
@@ -551,6 +597,8 @@ def run(payload):
     covered_materials, coverage, crop_lines = mark_body_coverage(
         body, garment_meshes, rig, spec, coverage_profiles, shell_slots=tuple(shell_coverage))
     hidden = hide_covered_materials(covered_materials)
+    press_bottom, release_bottom = pressed_under(fitted, body, rig)
+    press_bottom()
     camera, view_center = camera_setup(spec['body_height_m'])
     soft_lighting(bpy.context.scene)
     directions = [('front', (0, -1, 0)), ('side', (1, 0, 0)), ('back', (0, 1, 0)), ('opposite', (-1, 0, 0))]
@@ -603,6 +651,7 @@ def run(payload):
         detail_files.append(name)
     for obj, hidden_before in visibility.items():
         obj.hide_render = hidden_before
+    release_bottom()
     rig.data.pose_position = 'POSE'
     export(output/'model.glb', [metric_frame, rig, *body, *fitted])
     strip_covered_primitives(output/'model.glb')
@@ -631,7 +680,9 @@ def run(payload):
     bpy.context.view_layer.update()
     hide_covered_materials(covered_materials)
     bpy.context.scene.cycles.use_denoising = False
+    press_bottom()
     render(output/'motion.png', camera, view_center, (0, -1, 0), 512)
+    release_bottom()
     saved_blend = os.getenv('ASSET_SAVE_MASTER_BLEND') == '1'
     if saved_blend:
         bpy.ops.wm.save_as_mainfile(filepath=str(output/'master.blend'))

@@ -6,6 +6,7 @@ import { partLabels as labels } from '../factory/parts';
 import '../factory/meshy-motion.css';
 import { usePolling } from '../use-polling';
 import { ModelViewer } from '../viewer';
+import type { Tuck } from '../native-wardrobe';
 import { WardrobeShape } from './WardrobeShape';
 import './wardrobe.css';
 
@@ -23,6 +24,19 @@ function decodeBits(value: string) {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
+}
+function decodeTuck(coverage: WardrobeCoverage): Tuck | null {
+  if (!coverage.anchors || !coverage.tucks || !coverage.anchor_keys) return null;
+  const decode = <T,>(values: Record<string, string>, make: (buffer: ArrayBuffer, length: number) => T) => Object.fromEntries(
+    Object.entries(values).map(([key, value]) => { const bytes = decodeBits(value); return [key, make(bytes.buffer, bytes.length >> 2)]; }));
+  return { anchors: decode(coverage.anchors, (buffer, length) => new Int32Array(buffer, 0, length)),
+    moves: decode(coverage.tucks, (buffer, length) => new Float32Array(buffer, 0, length)), keys: coverage.anchor_keys };
+}
+function unionBits(target: Record<string, Uint8Array>, hidden: Record<string, string>) {
+  for (const [key, value] of Object.entries(hidden)) {
+    const bits = decodeBits(value);
+    target[key] = target[key] ? target[key].map((byte, index) => byte | (bits[index] || 0)) : bits;
+  }
 }
 type PendingSave = { id: string; key: string; revision: string; input: WardrobeOutfit };
 
@@ -129,14 +143,22 @@ export default function Wardrobe() {
     const union: Record<string, Uint8Array> = {};
     for (const part of Object.values(applied.current)) {
       const coverage = coverages[coverageKey(part)];
-      if (!coverage) continue;
-      for (const [key, value] of Object.entries(coverage.hidden)) {
-        const bits = decodeBits(value);
-        if (!union[key]) union[key] = bits;
-        else union[key] = union[key].map((byte, index) => byte | (bits[index] || 0));
-      }
+      if (coverage) unionBits(union, coverage.hidden);
     }
     viewer.setHiddenBodyTriangles(Object.keys(union).length ? union : null);
+    // Garments from different jobs overlap by centimetres: an inner garment (a waistband) is pressed
+    // onto the skin where the outer garments worn with it (top, shoes) cover the body.
+    for (const [slotName, part] of Object.entries(applied.current)) {
+      const coverage = coverages[coverageKey(part)];
+      const tuck = coverage && decodeTuck(coverage);
+      if (!tuck) continue;
+      const outer: Record<string, Uint8Array> = {};
+      for (const over of coverage.under || []) {
+        const covering = applied.current[over] && coverages[coverageKey(applied.current[over])];
+        if (covering) unionBits(outer, covering.hidden);
+      }
+      viewer.setTucked(slotName, tuck, Object.keys(outer).length ? outer : null);
+    }
   }, [appliedKey, coverages, viewer]);
 
   function applyOutfit(outfit: WardrobeOutfit, listed: WardrobePart[]) {

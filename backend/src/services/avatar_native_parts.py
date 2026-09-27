@@ -21,6 +21,17 @@ SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes')
 RECIPE = 'native-parts-v14-matte-limb-fit'
 
 
+def placed_head_bounds(bounds, spec, slot):
+    """True when a head part's measured canvas bounds are a placement on the shared canvas: the
+    part reaches the crown and is not much wider than the slot's fitting bounds. A provider that
+    fills its frame with the part gives bounds spanning the body, which must not place or back it."""
+    crown = (spec or {}).get('anchors', {}).get('crown')
+    fitted = (spec or {}).get('fitting', {}).get('bounds', {}).get(slot)
+    if not crown or not fitted:
+        return True
+    return bounds[1][1] >= crown[1] - .03 and bounds[1][0] - bounds[0][0] <= 1.35*(fitted[1][0] - fitted[0][0])
+
+
 class AvatarNativeParts:
     def __init__(self, factory):
         self.factory = factory
@@ -350,7 +361,8 @@ class AvatarNativeParts:
                 if drawings:
                     entry['drawings'] = {view: path for view, (path, _) in drawings.items()}
                     entry['drawing_sha256'] = {view: sha for view, (_, sha) in drawings.items()}
-            if slot in ('hair', 'hat') and part_inputs[slot].get('target_bounds_m'):
+            if (slot in ('hair', 'hat') and part_inputs[slot].get('target_bounds_m')
+                    and placed_head_bounds(part_inputs[slot]['target_bounds_m'], pipeline.get('production_spec'), slot)):
                 views = part_inputs[slot].get('views', {})
                 measured_views = [views.get(view, {}) for view in ('front', 'side')]
                 if all(view.get('origin') != 'uploaded_part'
