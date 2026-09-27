@@ -167,7 +167,7 @@ def _content_type(path):
     # Windows MIME registrations do not consistently include WebP or glTF.
     known = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
              '.webp': 'image/webp', '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json',
-             '.json': 'application/json', '.svg': 'image/svg+xml'}
+             '.json': 'application/json', '.svg': 'image/svg+xml', '.gif': 'image/gif'}
     return known.get(LocalPath(path).suffix.lower()) or mimetypes.guess_type(str(path))[0] or 'application/octet-stream'
 
 

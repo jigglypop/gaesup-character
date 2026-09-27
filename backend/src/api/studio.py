@@ -121,6 +121,33 @@ def vectorize_asset(job_id: str, body: VectorInput, user: UserContext = Depends(
     return StudioGenerations(factory, user.user_id).vectorize(job_id, body.colors)
 
 
+class RigInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    joints: dict[str, tuple[float, float]] | None = Field(default=None, max_length=32)
+    revision: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+
+
+@router.post('/generations/{job_id}/rig')
+def rig_asset(job_id: str, body: RigInput, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    return StudioGenerations(factory, user.user_id).rig(job_id, body.joints, body.revision)
+
+
+class MotionInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    template: Literal['idle', 'wave', 'jump', 'nod', 'shake', 'sway']
+    strength: float = Field(default=1.0, ge=.5, le=1.5)
+    speed: float = Field(default=1.0, ge=.5, le=2.0)
+    fps: Literal[12, 15, 24] = 15
+    size: Literal[240, 360, 480] = 360
+
+
+@router.post('/generations/{job_id}/motions')
+def motion_asset(job_id: str, body: MotionInput, user: UserContext = Depends(get_current_user),
+                 factory=Depends(get_factory)):
+    return StudioGenerations(factory, user.user_id).motion(job_id, body.template, body.strength, body.speed,
+                                                           body.fps, body.size)
+
+
 @router.get('/generations/{job_id}/artifacts/{name}')
 def generation_artifact(job_id: str, name: str, download: bool = False, user: UserContext = Depends(get_current_user),
                         factory=Depends(get_factory)):
@@ -129,7 +156,8 @@ def generation_artifact(job_id: str, name: str, download: bool = False, user: Us
     if not download:
         return artifact_response(path)
     title = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', ' ', service.get(job_id)['name']).strip() or job_id
-    return artifact_response(path, filename=f'{title}{PurePath(name).suffix}')
+    stem, suffix = PurePath(name).stem, PurePath(name).suffix
+    return artifact_response(path, filename=f'{title}{suffix}' if stem == 'image' else f'{title}-{stem}{suffix}')
 
 
 @router.get('/illustration-selection')

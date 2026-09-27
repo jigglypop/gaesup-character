@@ -25,6 +25,20 @@ export type Generation = {
   gpu?: { estimated_bytes_with_mips: number };
   reference_id?: string | null;
   vector?: GenerationVector | null;
+  rig?: GenerationRig | null;
+  motions?: Partial<Record<MotionTemplate, GenerationMotion>> | null;
+};
+export type Joint = [number, number];
+export type GenerationRig = {
+  sha256: string; revision: string; skeleton: string; joints: Record<string, Joint>; proposed: Record<string, Joint>;
+  adjusted: boolean; width: number; height: number; vertices: number; triangles: number; source_sha256: string; created_at: string;
+};
+export type MotionTemplate = 'idle' | 'wave' | 'jump' | 'nod' | 'shake' | 'sway';
+export type MotionFormat = 'gif' | 'webp' | 'apng';
+export type MotionInput = { template: MotionTemplate; strength: number; speed: number; fps: 12 | 15 | 24; size: 240 | 360 | 480 };
+export type GenerationMotion = MotionInput & {
+  rig_sha256: string; revision: string; frames: number; duration_ms: number;
+  files: Record<MotionFormat, string>; bytes: Record<MotionFormat, number>; created_at: string;
 };
 export type VectorColors = 12 | 16 | 24 | 32;
 export type GenerationVector = {
@@ -108,5 +122,11 @@ export const generationsApi = {
   resume: (id: string) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 }),
   vectorize: (id: string, colors: VectorColors) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/vector`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ colors }), timeoutMs: 60000,
+  }),
+  rig: (id: string, joints?: Record<string, Joint>, revision?: string) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/rig`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...(joints ? { joints } : {}), ...(revision ? { revision } : {}) }), timeoutMs: 60000,
+  }),
+  motion: (id: string, input: MotionInput) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/motions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), timeoutMs: 60000,
   }),
 };

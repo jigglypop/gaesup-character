@@ -16,6 +16,8 @@ from src.services.avatar_openai_images import (DEFAULT_BASE, DEFAULT_MODEL, gene
                                               generate_standard_part_image, OpenAIImageHTTPError,
                                               image_error_message)
 from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.illustration_motion import FORMATS, MOTION_REVISION, encode, render_frames
+from src.services.illustration_rig import build_rig
 from src.services.illustration_vector import VECTOR_REVISION, trace_illustration
 from src.services.meshy_status import task_problem
 from src.services.process_identity import identity, state as process_state
@@ -86,7 +88,7 @@ class StudioGenerations:
             status = 'paused' if resumable else 'blocked'
         task = read_json(directory/'meshy/character.json') if record['kind'] == 'prop' else {}
         return {**{key: record.get(key) for key in ('id', 'request_key', 'kind', 'category', 'name', 'prompt',
-                    'size', 'stage', 'created_at', 'gpu', 'reference_id', 'vector')}, 'status': status,
+                    'size', 'stage', 'created_at', 'gpu', 'reference_id', 'vector', 'rig', 'motions')}, 'status': status,
                 'can_resume': bool(resumable and (not alive or status == 'accepted')),
                 'error': record.get('error') or (reason if not alive else None),
                 'task_id': task.get('task_id'), 'progress': task.get('progress'),
@@ -273,31 +275,97 @@ class StudioGenerations:
         record['gpu'] = prop_model(run/'generated.glb', directory/'model.glb', record['size'])
         record['files']['model.glb'] = digest(directory/'model.glb')
 
+    def _local_work(self, job_id):
+        """The generation's worker lock, for local steps that must not overlap on one illustration."""
+        with _LOCK:
+            lock = _WORKERS.setdefault(str(self.directory(job_id)), Lock())
+        if not lock.acquire(blocking=False):
+            raise PipelineError('illustration_busy', '이 원화의 다른 작업을 처리하는 중입니다. 잠시 후 다시 불러오세요.', 409)
+        return lock
+
+    def _finished_illustration(self, job_id, action):
+        record = self._record(job_id)
+        if record.get('kind') != 'illustration' or record.get('status') != 'complete':
+            raise PipelineError('invalid_illustration', f'완료된 2D 원화만 {action}할 수 있습니다.', 422)
+        return record
+
+    def _publish(self, job_id, files, update):
+        """Write files, then record their hashes and `update` in one record save."""
+        directory = self.directory(job_id)
+        for name, content in files.items():
+            (directory/name).write_bytes(content)
+        with _LOCK:
+            record = self._record(job_id)
+            for name in files:
+                record['files'][name] = digest(directory/name)
+            update(record)
+            self._save(directory, record)
+
+    def rig(self, job_id, joints=None, revision=None):
+        """Save the 2D rig of a finished illustration: proposed joints when none are given."""
+        lock = self._local_work(job_id)
+        try:
+            record = self._finished_illustration(job_id, '리깅')
+            saved = record.get('rig') or {}
+            if revision is not None and saved.get('sha256') != revision:
+                raise PipelineError('rig_changed', '관절이 다른 곳에서 바뀌었습니다. 다시 불러온 뒤 저장하세요.', 409)
+            source_sha256 = record['files']['image.png']
+            rig, preview = build_rig(self.artifact(job_id, 'image.png').read_bytes(), joints)
+            rig['source_sha256'] = source_sha256
+            content = json.dumps(rig, sort_keys=True, ensure_ascii=False).encode()
+            sha256 = hashlib.sha256(content).hexdigest()
+            if saved.get('sha256') == sha256 and 'rig.json' in record['files']:
+                return self.get(job_id)
+            summary = {key: rig[key] for key in ('revision', 'skeleton', 'joints', 'proposed', 'adjusted',
+                                                 'width', 'height', 'vertices', 'triangles', 'source_sha256')}
+            self._publish(job_id, {'rig.json': content, 'rig-regions.png': preview},
+                          lambda current: current.update(rig={**summary, 'sha256': sha256, 'created_at': now()}))
+            return self.get(job_id)
+        finally:
+            lock.release()
+
+    def motion(self, job_id, template, strength, speed, fps, size):
+        """Render one looping motion of a rigged illustration as GIF, animated WebP and APNG."""
+        lock = self._local_work(job_id)
+        try:
+            record = self._finished_illustration(job_id, '모션으로')
+            rig = record.get('rig')
+            if not rig or 'rig.json' not in record['files']:
+                raise PipelineError('rig_required', '먼저 관절을 저장하세요.', 409)
+            if rig.get('source_sha256') != record['files']['image.png']:
+                raise PipelineError('rig_stale', '원화가 바뀌었습니다. 관절을 다시 저장하세요.', 409)
+            params = {'template': template, 'strength': round(float(strength), 2), 'speed': round(float(speed), 2),
+                      'fps': fps, 'size': size, 'rig_sha256': rig['sha256'], 'revision': MOTION_REVISION}
+            names = {fmt: f'motion-{template}.{extension}' for fmt, extension in FORMATS.items()}
+            saved = (record.get('motions') or {}).get(template) or {}
+            if all(saved.get(key) == value for key, value in params.items()) \
+                    and all(name in record['files'] for name in names.values()):
+                return self.get(job_id)
+            joints = json.loads(self.artifact(job_id, 'rig.json').read_bytes())['joints']
+            png = self.artifact(job_id, 'image.png').read_bytes()
+            frames = render_frames(png, joints, template, params['strength'], params['speed'], fps, size)
+            encoded = encode(frames, fps)
+            entry = {**params, 'frames': len(frames), 'duration_ms': int(round(1000 / fps)) * len(frames),
+                     'files': names, 'bytes': {fmt: len(content) for fmt, content in encoded.items()}, 'created_at': now()}
+            self._publish(job_id, {names[fmt]: content for fmt, content in encoded.items()},
+                          lambda current: current.setdefault('motions', {}).update({template: entry}))
+            return self.get(job_id)
+        finally:
+            lock.release()
+
     def vectorize(self, job_id, colors):
         """Trace a finished illustration into `image.svg`; local, free and deterministic per colour count."""
-        directory = self.directory(job_id)
-        with _LOCK:
-            lock = _WORKERS.setdefault(str(directory), Lock())
-        if not lock.acquire(blocking=False):
-            raise PipelineError('vector_busy', 'SVG를 만드는 중입니다. 잠시 후 다시 불러오세요.', 409)
+        lock = self._local_work(job_id)
         try:
-            record = self._record(job_id)
-            if record.get('kind') != 'illustration' or record.get('status') != 'complete':
-                raise PipelineError('invalid_vector', '완료된 2D 원화만 SVG로 만들 수 있습니다.', 422)
+            record = self._finished_illustration(job_id, 'SVG로 변환')
             source_sha256 = record['files']['image.png']
             saved = record.get('vector') or {}
             if ('image.svg' in record['files'] and saved.get('colors') == colors
                     and saved.get('revision') == VECTOR_REVISION and saved.get('source_sha256') == source_sha256):
                 return self.get(job_id)
             svg, stats = trace_illustration(self.artifact(job_id, 'image.png').read_bytes(), colors)
-            target = directory/'image.svg'
-            target.write_bytes(svg.encode())
-            with _LOCK:
-                record = self._record(job_id)
-                record['files']['image.svg'] = digest(target)
-                record['vector'] = {**stats, 'revision': VECTOR_REVISION, 'source_sha256': source_sha256,
-                                    'created_at': now()}
-                self._save(directory, record)
+            vector = {**stats, 'revision': VECTOR_REVISION, 'source_sha256': source_sha256, 'created_at': now()}
+            self._publish(job_id, {'image.svg': svg.encode()}, lambda current: current.update(vector=vector))
             return self.get(job_id)
         finally:
             lock.release()

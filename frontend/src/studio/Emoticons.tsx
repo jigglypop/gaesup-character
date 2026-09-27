@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePolling } from '../use-polling';
 import { generationsApi, type Generation, type VectorColors } from './generations-api';
+import { EmoticonRig } from './EmoticonRig';
 import './generations.css';
 import './emoticons.css';
 
@@ -134,6 +135,7 @@ export default function Emoticons() {
         </div>
       </>}
     </section>}
+    {current?.status === 'complete' && currentImage && <EmoticonRig key={current.id} generation={current} busy={busy} perform={perform} onChange={remember} />}
     <section className="generation-library"><h2>원화 갤러리 · {items.length}</h2>
       <div className="generation-list">{items.slice(0, limit).map(item => <button className={`generation-card${current?.id === item.id ? ' selected' : ''}`} key={item.id} onClick={() => setCurrentId(item.id)}>
         {artwork(item) ? <img src={artwork(item)!.url} alt={item.name} loading="lazy" decoding="async" /> : <div className="generation-no-preview">{labels[item.status]}</div>}
