@@ -166,9 +166,10 @@ MATTE_NORMAL_STRENGTH = .4
 
 
 def matte_materials(objects):
-    """No metal, no emission, near-full roughness and softened normal maps.
+    """No metal, no emission, near-full roughness, softened normal maps and both faces drawn.
 
-    Provider metal/roughness/emission maps are unlinked, so the exporter drops them.
+    Provider metal/roughness/emission maps are unlinked, so the exporter drops them. Double-sided
+    export shows a garment's inside at its openings and hides a provider's reversed triangles.
     """
     done = set()
     for obj in objects:
@@ -176,6 +177,7 @@ def matte_materials(objects):
             if not material or not material.use_nodes or material in done:
                 continue
             done.add(material)
+            material.use_backface_culling = False
             tree = material.node_tree
             for node in tree.nodes:
                 if node.type == 'NORMAL_MAP':

@@ -14,6 +14,8 @@ const slotOrder = ['hair', 'hairFront', 'hairBack', 'hat', 'top', 'bottom', 'sho
 const methodLabels: Record<string, string> = { 'worn-extract-v1': '입힌 채', 'body-shell-v1': '몸 셸', 'uniform-slot-v1': '단독' };
 const keyOf = (part: { job_id: string; version: string }, slot: string) => `${part.job_id}:${part.version}:${slot}`;
 const garmentSlots = ['top', 'bottom', 'shoes'];
+// Slots with a coverage record: garments hide skin and layer; a hat and hair layer too.
+const coveredSlots = [...garmentSlots, 'hat', 'hair'];
 const hairSlots = ['hair', 'hairFront', 'hairBack'];
 const shapeSlots = ['top', 'bottom'];
 type Worn = Record<string, WardrobePart>;
@@ -127,7 +129,7 @@ export default function Wardrobe() {
     if (!body) return;
     const controller = new AbortController();
     for (const part of Object.values(applied.current)) {
-      if (!garmentSlots.includes(part.slot) || coverages[coverageKey(part)]) continue;
+      if (!coveredSlots.includes(part.slot) || coverages[coverageKey(part)]) continue;
       void factoryApi.wardrobeCoverage(body.job_id, part, controller.signal)
         .then(value => setCoverages(current => ({ ...current, [`${body.job_id}|${keyOf(part, part.slot)}`]: value })))
         .catch(reason => { if (!controller.signal.aborted) setWearError(`${labels[part.slot] || part.slot} 가림 영역: ${(reason as Error).message}`); });
@@ -147,7 +149,8 @@ export default function Wardrobe() {
     }
     viewer.setHiddenBodyTriangles(Object.keys(union).length ? union : null);
     // Garments from different jobs overlap by centimetres: an inner garment (a waistband) is pressed
-    // onto the skin where the outer garments worn with it (top, shoes) cover the body.
+    // onto the skin where the outer garments worn with it (top, shoes) cover the body. Hair presses
+    // only under a top or hat that covers the head (a raised hood), never under a hood lying on the back.
     for (const [slotName, part] of Object.entries(applied.current)) {
       const coverage = coverages[coverageKey(part)];
       const tuck = coverage && decodeTuck(coverage);
@@ -155,7 +158,9 @@ export default function Wardrobe() {
       const outer: Record<string, Uint8Array> = {};
       for (const over of coverage.under || []) {
         const covering = applied.current[over] && coverages[coverageKey(applied.current[over])];
-        if (covering) unionBits(outer, covering.hidden);
+        if (!covering) continue;
+        if (slotName !== 'hair') unionBits(outer, covering.hidden);
+        else if (covering.covers_head) unionBits(outer, covering.over || covering.hidden);
       }
       viewer.setTucked(slotName, tuck, Object.keys(outer).length ? outer : null);
     }

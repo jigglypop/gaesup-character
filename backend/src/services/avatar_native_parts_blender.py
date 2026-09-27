@@ -98,12 +98,14 @@ def extract_worn_meshes(part, meshes, body, rig, spec):
 
 
 def pressed_under(fitted, body, rig):
-    """(apply, restore) for renders: this assembly's bottom pressed onto the skin where its top or
-    shoes cover the body, as the wardrobe presses any outfit (avatar_wardrobe_coverage). The
-    exported bottom stays as fitted, so it still layers under any other top."""
+    """(apply, restore) for renders: this assembly's inner parts pressed onto the skin where the
+    outer ones cover the body, as the wardrobe presses any outfit (avatar_wardrobe_coverage): the
+    bottom under the top and shoes, and hair on the head under a hat or a raised hood. The exported
+    parts stay as fitted, so they still layer with parts of any other job."""
     import numpy as np
     from src.services.avatar_shell_garment import body_arrays
-    from src.services.avatar_wardrobe_coverage import ANCHOR_M, UNDER, _covered, nearest, press
+    from src.services.avatar_wardrobe_coverage import (ANCHOR_M, HAIR_ANCHOR_M, HEAD_OUTSIDE_M, HEAD_SHARE, UNDER,
+                                                       _covered, nearest, press)
     # The coverage helpers chunk along glTF Y (up): hand them Blender Z as Y.
     gltf = lambda a: np.stack([a[:, 0], a[:, 2], -a[:, 1]], axis=1)
     blender = lambda a: np.stack([a[:, 0], -a[:, 2], a[:, 1]], axis=1)
@@ -116,22 +118,45 @@ def pressed_under(fitted, body, rig):
     moves, data = [], None
     for inner, outers in UNDER.items():
         meshes = [obj for obj in fitted if obj['part_role'] == inner]
-        cover = [obj for obj in fitted if obj['part_role'] in outers]
-        if not meshes or not cover:
+        if not meshes or not any(obj['part_role'] in outers for obj in fitted):
             continue
-        data = data or body_arrays(body, rig)
-        skin, normals = gltf(data['positions']), gltf(data['normals'])
-        garment = gltf(np.concatenate([world(obj)[1] for obj in cover]))
-        if len(garment) > 20000:
-            garment = garment[np.random.default_rng(0).choice(len(garment), 20000, replace=False)]
-        covered = _covered(skin, normals, garment)
+        if data is None:
+            data = body_arrays(body, rig)
+            skin, normals, triangles = gltf(data['positions']), gltf(data['normals']), data['triangles']
+            dominant = np.char.lower(np.array(data['bones'])[data['weights'].argmax(axis=1)])
+            head = np.char.find(dominant, 'head') >= 0
+            feet = (np.char.find(dominant, 'foot') >= 0) | (np.char.find(dominant, 'toe') >= 0)
+            upper = head & (skin[:, 1] >= np.median(skin[head, 1])) if head.any() else head
+        covered = np.zeros(len(skin), bool)
+        for role in outers:
+            cover = [obj for obj in fitted if obj['part_role'] == role]
+            if not cover:
+                continue
+            garment = gltf(np.concatenate([world(obj)[1] for obj in cover]))
+            if len(garment) > 20000:
+                garment = garment[np.random.default_rng(0).choice(len(garment), 20000, replace=False)]
+            flags = _covered(skin, normals, garment)
+            if inner == 'hair':
+                # A hat's crown or a hood's peak stands well off the scalp (the wardrobe's over).
+                flags[head] |= _covered(skin[head], normals[head], garment, outside=HEAD_OUTSIDE_M)
+                # Hair goes under a hat or a raised hood only, never under a hood lying on the back.
+                if not (upper.any() and flags[upper].mean() >= HEAD_SHARE):
+                    continue
+            covered |= flags
+        if not covered.any():
+            continue
         # The corners of covered body triangles, grown by one ring (as the wardrobe viewer does).
         corners = np.zeros(len(skin), bool)
-        corners[data['triangles'][covered[data['triangles']].all(axis=1)].reshape(-1)] = True
-        corners[data['triangles'][corners[data['triangles']].any(axis=1)].reshape(-1)] = True
+        corners[triangles[covered[triangles].all(axis=1)].reshape(-1)] = True
+        corners[triangles[corners[triangles].any(axis=1)].reshape(-1)] = True
+        # As tuck_region(): hair only on the head, a bottom never on the feet.
+        if inner == 'hair':
+            corners &= head
+        elif inner == 'bottom':
+            corners &= ~feet
         for obj in meshes:
             local, points, matrix = world(obj)
-            index = nearest(gltf(points), skin, ANCHOR_M)
+            index = nearest(gltf(points), skin, HAIR_ANCHOR_M if inner == 'hair' else ANCHOR_M)
             index[index >= 0] = np.where(corners[index[index >= 0]], index[index >= 0], -1)
             moved = points + blender(press(gltf(points), skin, normals, index))
             moves.append((obj, local, (moved - matrix[:3, 3]) @ np.linalg.inv(matrix[:3, :3]).T))
@@ -248,8 +273,9 @@ def fit_uniform_part(part, meshes, body, rig, spec, targets, imported):
         transform, _, measurement = fit_reference_frame(meshes, targets[slot], slot)
         measurement['frame'] = 'body_slot_bounds'
     place(meshes, transform)
-    if slot == 'hair':
-        # Still one uniform scale: enlarge only when the inner surface sits inside the skull.
+    if slot in ('hair', 'hat'):
+        # Still one uniform scale: enlarge only when the inner surface sits inside the skull (a cap
+        # sized to the head's width is too shallow for the deep SD head and its forehead shows through).
         measurement['cavity_fitting'] = fit_hair_cavity(meshes, body, rig, spec)
     if slot in ('hair', 'hairFront', 'hairBack'):
         adjustment = fit_hair_scalp_bounded(meshes, body, rig, spec)

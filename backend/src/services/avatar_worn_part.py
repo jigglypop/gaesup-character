@@ -19,6 +19,8 @@ DEFAULT_KEY_RGB = (1., 0., 1.)
 HEAD_SLOTS = ('hair', 'hat', 'hairFront', 'hairBack')
 FRINGE_HUE_DEG = 40.   # the key's shaded and compressed edges drift further in hue than its body
 ANCHOR_HUE_DEG = 60.   # a provider's muted key stays this close to the requested hue
+HOOD_VERTICES = 500    # garment surface over the head beyond this is a raised hood (or a cowl)
+HOOD_BLEND_M = .04     # above the collar a hood moves from the body's registration to the head's
 
 
 def join_meshes(meshes, name):
@@ -562,12 +564,15 @@ def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None, drawi
             found[i] = triangle_region[tree.find_nearest(Vector(point))[2]]
         return found.astype(str)
     head_transform = np.eye(4)
-    if slot in HEAD_SLOTS:
+    on_head = nearest_regions(aligned) == 'head'
+    # A raised hood hugs the provider's head, which can be smaller than the frozen head: without
+    # the head's own registration the hood would sit centimetres inside the frozen head.
+    hood = slot not in HEAD_SLOTS and use_key and int((on_head & ~keyed & ~faint).sum()) >= HOOD_VERTICES
+    if slot in HEAD_SLOTS or hood:
         # The provider's head can differ in size from the frozen head: refine on it alone.
         head_body = data['positions'][regions == 'head']
         head_tree = body_tree({'positions': data['positions'],
                                'triangles': data['triangles'][(regions[data['triangles']] == 'head').all(axis=1)]})
-        on_head = nearest_regions(aligned) == 'head'
         candidates = (keyed & on_head) if use_key else (on_head & (aligned[:, 2] >= marks['collar_z']))
         if candidates.sum() >= 30 and len(head_body):
             head_transform, head = trimmed_icp(aligned[candidates], head_tree, np.eye(4),
@@ -576,7 +581,14 @@ def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None, drawi
             if not .8 <= scale <= 1.25:
                 head_transform = np.eye(4); head['rejected_scale'] = scale
             report['registration']['head'] = head
-            aligned = apply(head_transform, aligned)
+            if hood:
+                # The garment moves with the head only above the collar, blending in over HOOD_BLEND_M.
+                blend = np.clip((aligned[:, 2] - marks['collar_z'])/HOOD_BLEND_M, 0., 1.)[:, None]
+                aligned = aligned + blend*(apply(head_transform, aligned) - aligned)
+                report['registration']['hood_vertices'] = int((blend[:, 0] > 0).sum())
+                head_transform = np.eye(4)
+            else:
+                aligned = apply(head_transform, aligned)
     signed = np.empty(len(aligned)); nearest_region = np.empty(len(aligned), dtype=object)
     for i, point in enumerate(aligned):
         hit, normal, index, distance = tree.find_nearest(Vector(point))
@@ -586,7 +598,9 @@ def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None, drawi
         # Hair roots slightly inside a differently shaped head are kept and pushed
         # out later; only deep interior surfaces of the head (mouth, eye sockets) are
         # removed. A garment found inside the body is pushed out, never cut.
-        body_like = (keyed & (np.abs(signed) < .03)) | ((signed < -.015) & (nearest_region.astype(str) == 'head'))
+        # Only a head part's own surface is cut inside the head: a garment's (a hood) is pushed out.
+        inside_head = (signed < -.015) & (nearest_region.astype(str) == 'head')
+        body_like = (keyed & (np.abs(signed) < .03)) | (inside_head & (keyed | faint if slot not in HEAD_SLOTS else True))
         # A provider rebuilds the mannequin centimetres off the frozen body (thicker
         # limbs, larger feet): key-coloured surface joined to a part that touches the
         # body is mannequin at any distance. A detached key-coloured ornament stays.

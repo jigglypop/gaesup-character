@@ -86,8 +86,9 @@ export type WardrobeColors = { slot: string; material: number; regions: { index:
 export type WardrobeOutfits = { revision: string; outfits: Record<string, WardrobeOutfit> };
 /** An inner garment, per "mesh:primitive": anchors, base64 int32 per vertex, the body vertex under it
  * (anchor_keys index << 20 | vertex) or -1; tucks, base64 float32 x, y, z per vertex, the move in
- * vertex space that presses it onto the skin. under: the outer slots it tucks under. */
-export type WardrobeCoverage = { slot: string; hidden: Record<string, string>; triangles: Record<string, number>; covers_bottom: boolean;
+ * vertex space that presses it onto the skin. under: the outer slots it tucks under. A part covering
+ * the head (covers_head) also has over: the head triangles hair tucks under (a hat's crown stands off the scalp). */
+export type WardrobeCoverage = { slot: string; hidden: Record<string, string>; triangles: Record<string, number>; covers_bottom: boolean; covers_head?: boolean; over?: Record<string, string>;
   anchors?: Record<string, string>; tucks?: Record<string, string>; anchor_keys?: string[]; under?: string[] };
 export const wardrobeUrls = {
   body: (body: { job_id: string; version: string }) => `/api/avatar-factory/jobs/${body.job_id}/native-parts/${body.version}/body.glb`,

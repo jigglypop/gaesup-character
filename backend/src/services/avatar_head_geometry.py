@@ -149,6 +149,17 @@ def fit_reference_frame(meshes, reference_bounds, slot):
                            'source_proportions_preserved': True}
 
 
+def crown_width(meshes, *, brim=.8):
+    """Width of a hat's crown. A brim (the hat much wider low down than over its upper 60%) never
+    sets the size, or a straw hat shrinks until its crown perches on top of the head."""
+    points = np.array([tuple(obj.matrix_world @ vertex.co) for obj in meshes for vertex in obj.data.vertices])
+    low, height = points[:, 2].min(), np.ptp(points[:, 2])
+    upper = points[points[:, 2] >= low + .4*height]
+    overall = np.ptp(points[:, 0])
+    crown = np.ptp(upper[:, 0]) if len(upper) > 10 else overall
+    return (crown, True) if crown < brim*overall else (overall, False)
+
+
 def fit_hat(meshes, target, width_scale=1.0, reference_bounds=None):
     """Uniformly fit headwear to the measured body head and crown seat."""
     if reference_bounds is not None:
@@ -156,11 +167,13 @@ def fit_hat(meshes, target, width_scale=1.0, reference_bounds=None):
         # of being expanded to the entire head width like a cap.
         return fit_reference_frame(meshes, reference_bounds, 'hat')
     lo, hi = bounds(meshes); a, b = target_box(target)
-    scale = (b.x-a.x)/(hi.x-lo.x)*width_scale
+    width, brimmed = crown_width(meshes)
+    scale = (b.x-a.x)/width*width_scale
     source = Vector(((lo.x+hi.x)/2, (lo.y+hi.y)/2, hi.z))
     destination = Vector(((a.x+b.x)/2, (a.y+b.y)/2, b.z))
     transform = Matrix.Translation(destination) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-source)
     return transform, [], {'method': 'uniform_hat_scale_on_measured_body_head', 'scale': scale,
+                           'sized_by': 'crown' if brimmed else 'overall_width',
                            'target_head_width_m': b.x-a.x,
                            'fitted_width_m': (hi.x-lo.x)*scale,
                            'crown_height_m': b.z, 'source_proportions_preserved': True}
@@ -199,6 +212,19 @@ def hat_target_over_hair(target, hair, spec):
                     'target_width_before_clearance_m': width}
 
 
+def dome_top(points, width, *, share=.55, step=.005):
+    """Top of the hair's dome, below a bun or top knot. Scanning down from the top, the first slice
+    at least `share` of the dome's width sits .165 of its radius under a round dome's top; a narrow
+    knot above it is not the crown (it sank the whole style over the face)."""
+    top, low = points[:, 2].max(), points[:, 2].min()
+    radius = width/2
+    for z in np.arange(top, low, -step):
+        band = points[np.abs(points[:, 2]-z) <= step/2]
+        if len(band) >= 8 and np.ptp(band[:, 0]) >= share*width:
+            return float(min(top, z+(1-np.sqrt(1-share*share))*radius))
+    return float(top)
+
+
 def hair_scalp_frame(meshes, target):
     """Estimate the attachment region separately from tips and hanging locks.
 
@@ -212,6 +238,7 @@ def hair_scalp_frame(meshes, target):
     a, b = target_box(target)
     crown = float(np.percentile(points[:, 2], 99))
     lower, upper = np.percentile(points, [2, 98], axis=0)
+    crown = min(crown, dome_top(points, upper[0]-lower[0]))
     target_span = b-a
     for _ in range(3):
         width, depth = upper[:2]-lower[:2]

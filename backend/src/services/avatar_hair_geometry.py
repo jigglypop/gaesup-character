@@ -84,6 +84,9 @@ def fit_hair_cavity(meshes, body, rig, spec):
     return report
 
 
+SIDE_MARGIN_M = .02   # a derived rear surface reaches this far beyond the head's width
+
+
 def _reference(path):
     image = bpy.data.images.load(path, check_existing=False)
     width, height = image.size
@@ -181,7 +184,9 @@ def repair_hair_backing(meshes, body, rig, spec, image_paths, *, shared_canvas=F
             if (hit is not None and z >= max(lo.z, collar)
                     and hit[0].y >= center.y and hit[1].y > .1):
                 point = hit[0]+hit[1]*clearance
-            elif extended:
+            elif extended and abs(x-center.x) <= (hi.x-lo.x)/2+SIDE_MARGIN_M:
+                # Only behind the head's own width: twin tails and side locks are whole strands,
+                # and a sheet beside them shows its grid edge from the front.
                 # The old root-only patch stopped at the neck and never filled
                 # the absent rear of a bob. Continue the measured rear curvature
                 # down through the opaque reference silhouette, keeping every

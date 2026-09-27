@@ -1,7 +1,9 @@
-import { MeshPhysicalMaterial, MeshStandardMaterial, type Material, type Mesh, type Object3D } from 'three';
+import { DoubleSide, MeshPhysicalMaterial, MeshStandardMaterial, type Material, type Mesh, type Object3D } from 'three';
 
-/** One soft matte finish for every character surface: no metal, no glow, near-full roughness and
- * softened provider normal maps. The assembly export writes the same values (avatar_blender_common.py). */
+/** One soft matte finish for every character surface: no metal, no glow, near-full roughness,
+ * softened provider normal maps and both faces drawn (a sleeve, collar or hem shows its inside, and a
+ * provider's reversed triangle is not a hole). The assembly export writes the same values
+ * (avatar_blender_common.py). */
 export const MATTE_ROUGHNESS = .95;
 export const MATTE_NORMAL_SCALE = .4;
 /** Equipment keeps its own finish (a blade may be metal). */
@@ -9,6 +11,7 @@ const OWN_FINISH = new Set(['weapon', 'tool', 'glasses']);
 
 export function matteMaterial(material: Material) {
   if (!(material instanceof MeshStandardMaterial)) return;
+  material.side = DoubleSide;
   material.metalness = 0; material.metalnessMap = null;
   material.roughness = MATTE_ROUGHNESS; material.roughnessMap = null;
   material.emissive.set(0); material.emissiveMap = null;
