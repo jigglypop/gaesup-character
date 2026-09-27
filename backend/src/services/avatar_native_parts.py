@@ -324,6 +324,9 @@ class AvatarNativeParts:
             path = self.factory.artifact(owner, job, f'generated-{slot}.glb')
             entry = {'slot': slot, 'path': str(path), 'sha256': digest(path), 'part_method': method,
                      'garment_kind': garment_kinds[slot], 'fit_profile': part_inputs[slot].get('fit_profile')}
+            # Tripo returns models facing glTF +X; Meshy and the fitting code expect +Z.
+            if (read_json(job_directory/'parts'/slot/'character.json') or {}).get('provider') == 'tripo':
+                entry['front_axis'] = '+x'
             if method == 'worn':
                 from src.services.avatar_part_methods import KEY_COLORS
                 entry['key_rgb'] = list(KEY_COLORS[part_inputs[slot].get('key_color') or 'magenta'])
@@ -366,6 +369,7 @@ class AvatarNativeParts:
                     'expression_uv_sha256': digest(Path(__file__).with_name('avatar_expression_uv_blender.py')),
                     'garment_kinds': garment_kinds,
                     'part_methods': {p['slot']: p.get('part_method', 'isolated') for p in parts},
+                    'front_axes': {p['slot']: p['front_axis'] for p in parts if p.get('front_axis')},
                     'shell_worker_sha256': digest(Path(__file__).with_name('avatar_shell_garment.py')),
                     'worn_worker_sha256': digest(Path(__file__).with_name('avatar_worn_part.py')),
                     'fit_profiles': {p['slot']: p.get('fit_profile') for p in parts if p.get('fit_profile')},

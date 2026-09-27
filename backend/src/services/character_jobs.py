@@ -265,6 +265,9 @@ def refresh(directory: Path, client: httpx.Client, task_id: str | None = None) -
         _write_json(directory / (value["stage"] + "-result.json"), task)
         status, progress = tripo_state(task)
         value.update(task_id=task_id, status=status, progress=progress)
+        error = (task.get('data') or {}).get('error_code')
+        if status in ('FAILED', 'CANCELED') and isinstance(error, int) and not isinstance(error, bool):
+            value['provider_error'] = error
         _write_json(directory / "character.json", value)
         return value
     endpoint = value.get('generation_endpoint', '/openapi/v1/image-to-3d') if value["stage"] == "generation" else "/openapi/v1/rigging"

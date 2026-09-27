@@ -288,6 +288,13 @@ def run(payload):
             if sha(path) != part.get('image_sha256', {}).get(view):
                 raise ValueError('Part reference image changed')
         additions = load(part['path'])
+        if part.get('front_axis') == '+x':
+            # glTF +X arrives as Blender +X; the fitting code expects the front at Blender -Y.
+            turn = Matrix.Rotation(-1.5707963267948966, 4, 'Z')
+            for obj in additions:
+                if obj.parent is None:
+                    obj.matrix_world = turn @ obj.matrix_world
+            bpy.context.view_layer.update()
         meshes = [o for o in additions if o.type == 'MESH']
         if not meshes or any(o.type == 'ARMATURE' for o in additions):
             raise ValueError('Expected an unrigged generated part')

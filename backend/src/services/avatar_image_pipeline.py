@@ -27,6 +27,7 @@ from src.services.avatar_openai_images import (DEFAULT_MODEL, DEFAULT_BASE, Open
                                                 generate_part_image as generate_openai_part_image)
 from src.services.avatar_factory import IMAGE_PROFILE as PROFILE, _LOCK, digest
 from src.services.character_parts import blender_executable
+from src.services.model_providers import failure_text, uncertain_text
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity, state as process_state
 from src.services.avatar_production_spec import (
@@ -546,9 +547,9 @@ class AvatarImagePipeline:
                 if resubmittable(task, retry_failed):
                     continue
                 if task and not task.get('task_id'):
-                    raise PipelineError('task_recovery_required', f'{part["slot"]}: Meshy 요청 접수 여부 확인 필요 · 3D 파츠부터 실행으로 다시 요청할 수 있습니다.')
+                    raise PipelineError('task_recovery_required', uncertain_text(part['slot'], task))
                 if task.get('status') in ('FAILED', 'CANCELED'):
-                    raise PipelineError('provider_failed', f'{part["slot"]}: Meshy {task["status"]} · 3D 파츠부터 실행으로 다시 요청할 수 있습니다.')
+                    raise PipelineError('provider_failed', failure_text(part['slot'], task))
             if job['status'] in ('failed', 'recovery_required') and (directory/'output/input.json').is_file():
                 # Keep failed work files and their exact input/seal before rebuilding locally.
                 attempt = uuid.uuid4().hex
@@ -807,7 +808,7 @@ class AvatarImagePipeline:
                                 raise PipelineError('meshy_budget_exhausted', '허용된 Meshy 생성 횟수를 모두 사용했습니다.')
                             task = self._submit_model(owner, job_id, state, part, run, output, client)
                         if not task.get('task_id'):
-                            raise PipelineError('task_recovery_required', f'{part["slot"]}: Meshy 요청 접수 여부 확인 필요 · 3D 파츠부터 실행으로 다시 요청할 수 있습니다.')
+                            raise PipelineError('task_recovery_required', uncertain_text(part['slot'], task))
                         part['model'] = {k: task.get(k) for k in ('status', 'task_id', 'progress')}
                         self.publish(owner, job_id, state)
                     deadline = time.monotonic()+deadline_seconds
@@ -824,7 +825,7 @@ class AvatarImagePipeline:
                             part['model'] = {k: task.get(k) for k in ('status', 'task_id', 'progress')}
                             self.publish(owner, job_id, state)
                             if task['status'] in ('FAILED', 'CANCELED'):
-                                raise PipelineError('provider_failed', f'{part["slot"]}: Meshy {task["status"]} · 성공한 파츠 보존 · 3D 파츠부터 실행으로 다시 요청할 수 있습니다.')
+                                raise PipelineError('provider_failed', failure_text(part['slot'], task))
                             if task['status'] == 'SUCCEEDED':
                                 character_jobs.download(run, 'generation'); part['model']['status'] = 'ready'
                             else:

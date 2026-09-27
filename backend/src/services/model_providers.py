@@ -64,6 +64,22 @@ def tripo_task_id(response_json):
     return data.get('task_id')
 
 
+def failure_text(slot, task):
+    """Why a part's 3D task failed, naming the provider that ran it. A Tripo content-policy refusal
+    (task error 2008) is refused again for the same drawing, so it does not suggest a plain retry."""
+    provider = 'Tripo' if task.get('provider') == 'tripo' else 'Meshy'
+    code = task.get('provider_error')
+    if provider == 'Tripo' and code == 2008:
+        return f'{slot}: Tripo 콘텐츠 정책 검사에서 거절됨 (2008) · 같은 그림은 다시 거절되므로 방식이나 설명을 바꿔 새로 요청하세요.'
+    detail = f' (오류 {code})' if isinstance(code, int) and not isinstance(code, bool) else ''
+    return f'{slot}: {provider} {task.get("status")}{detail} · 성공한 파츠 보존 · 3D 파츠부터 실행으로 다시 요청할 수 있습니다.'
+
+
+def uncertain_text(slot, task):
+    provider = 'Tripo' if task.get('provider') == 'tripo' else 'Meshy'
+    return f'{slot}: {provider} 요청 접수 여부 확인 필요 · 3D 파츠부터 실행으로 다시 요청할 수 있습니다.'
+
+
 # Tripo reports an empty balance with code 2010 (also as HTTP 403).
 TRIPO_CREDIT_CODES = (2010,)
 
