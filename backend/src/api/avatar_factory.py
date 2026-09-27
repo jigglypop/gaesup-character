@@ -197,6 +197,8 @@ class VariantInput(BaseModel):
     meshy_options: MeshyPartOptions | None = None
     part_methods: dict[Literal['hair', 'hat', 'top', 'bottom'], Literal['isolated', 'body_shell', 'worn']] | None = None
     model_provider: Literal['meshy', 'tripo'] | None = None
+    # Front and side by default; the back view gives the 3D provider the rear of long hair and garments.
+    view_mode: Literal['front_side', 'front_side_back'] | None = None
 
 
 class HairRedrawInput(BaseModel):

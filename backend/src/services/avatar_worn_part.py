@@ -421,10 +421,32 @@ def remove_small_islands(obj, min_fraction=.01, *, hugging=None, mannequin=None,
     return {'islands': int(len(unique)), 'removed_islands': int(len(small))}
 
 
-def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None):
-    """Return ([part object], report) in the body frame; mannequin faces removed."""
+def drawn_mannequin(drawing, key_rgb, points, *, margin_px=3):
+    """Per point: projects well inside the mannequin of the front drawing (the key colour, eroded by
+    margin_px so the garment's own hem and edges are never taken)."""
+    from src.services.avatar_shell_garment import key_pixels
+    key = key_pixels(drawing.rgba, key_rgb, fringe=0)
+    core = key.copy()
+    for _ in range(margin_px):
+        shrunk = core.copy()
+        shrunk[1:] &= core[:-1]; shrunk[:-1] &= core[1:]; shrunk[:, 1:] &= core[:, :-1]; shrunk[:, :-1] &= core[:, 1:]
+        core = shrunk
+    pixels = drawing.project(points)
+    x = np.clip(np.round(pixels[:, 0] - .5).astype(int), 0, drawing.width - 1)
+    y = np.clip(np.round(pixels[:, 1] - .5).astype(int), 0, drawing.height - 1)
+    return core[y, x]
+
+
+def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None, drawings=()):
+    """Return ([part object], report) in the body frame; mannequin faces removed.
+
+    drawings: the views the provider was given, on the shared canvas. A provider can repaint the
+    mannequin in other colours (Tripo turns parts of it grey); surface projecting onto the drawn
+    mannequin in any view is removed as well (front for the fronts, side and back for the rest).
+    """
     name = name or slot
     key_rgb = tuple(key_rgb or DEFAULT_KEY_RGB)
+    drawn_key = key_rgb
     obj = join_meshes(meshes, f'{name}_worn')
     points, triangles = mesh_arrays(obj)
     if len(points) < 50:
@@ -492,6 +514,14 @@ def extract_worn_part(meshes, body, rig, slot, *, key_rgb=None, name=None):
     if slot in HEAD_SLOTS and not use_key:
         # Without a key colour, surface left on the hands or feet is mannequin.
         body_like |= np.isin(nearest_region.astype(str), ('hand', 'foot')) & (np.abs(signed) < .03)
+    if drawings:
+        # Near the body only: a loose garment edge swinging over the drawn mannequin is kept.
+        drawn = np.zeros(len(aligned), dtype=bool)
+        for drawing in drawings:
+            drawn |= drawn_mannequin(drawing, drawn_key, aligned)
+        drawn &= np.abs(signed) < .08
+        report['drawing_mannequin_vertices'] = int((drawn & ~body_like).sum())
+        body_like |= drawn
     face_body = body_like[triangles].sum(axis=1) >= 2
     if use_key and colors is not None:
         # A face whose own texture is the key is mannequin, even where its seam vertices

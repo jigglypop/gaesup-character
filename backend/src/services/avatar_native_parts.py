@@ -314,12 +314,21 @@ class AvatarNativeParts:
                 if 'front' not in images:
                     raise PipelineError('part_images_missing', f'{slot}: 몸 셸 의상에는 저장된 정면 이미지가 필요합니다.', 409)
                 shape = part_inputs[slot].get('shape')
+                # A drawing made for the worn method stands on the key-coloured mannequin; the shell
+                # cuts that colour out so only the garment makes the silhouette.
+                key_color = part_inputs[slot].get('key_color')
                 shell_inputs = {'views': hashes, 'shape': shape} if shape else hashes
+                if key_color:
+                    shell_inputs = {'views': hashes, 'shape': shape, 'key': key_color}
                 identity_hash = hashlib.sha256(json.dumps(shell_inputs, sort_keys=True).encode()).hexdigest()
-                parts.append({'slot': slot, 'part_method': 'body_shell', 'path': None, 'sha256': identity_hash,
-                              'garment_kind': (part_inputs[slot].get('fit_profile') or {}).get('kind') or garment_kinds[slot],
-                              'fit_profile': part_inputs[slot].get('fit_profile'), 'shape': shape,
-                              'image_paths': images, 'image_sha256': hashes})
+                entry = {'slot': slot, 'part_method': 'body_shell', 'path': None, 'sha256': identity_hash,
+                         'garment_kind': (part_inputs[slot].get('fit_profile') or {}).get('kind') or garment_kinds[slot],
+                         'fit_profile': part_inputs[slot].get('fit_profile'), 'shape': shape,
+                         'image_paths': images, 'image_sha256': hashes}
+                if key_color:
+                    from src.services.avatar_part_methods import KEY_COLORS
+                    entry['key_rgb'] = list(KEY_COLORS[key_color])
+                parts.append(entry)
                 continue
             path = self.factory.artifact(owner, job, f'generated-{slot}.glb')
             entry = {'slot': slot, 'path': str(path), 'sha256': digest(path), 'part_method': method,
@@ -330,6 +339,17 @@ class AvatarNativeParts:
             if method == 'worn':
                 from src.services.avatar_part_methods import KEY_COLORS
                 entry['key_rgb'] = list(KEY_COLORS[part_inputs[slot].get('key_color') or 'magenta'])
+                # The drawings show where the mannequin was: surface there is mannequin in any colour.
+                drawings = {}
+                for view, image in part_inputs[slot].get('views', {}).items():
+                    name = image.get('file')
+                    drawing = job_directory/'output'/name if name and Path(name).name == name else None
+                    if (view in ('front', 'side', 'back') and drawing is not None and drawing.is_file()
+                            and digest(drawing) == image.get('sha256')):
+                        drawings[view] = (str(drawing), image['sha256'])
+                if drawings:
+                    entry['drawings'] = {view: path for view, (path, _) in drawings.items()}
+                    entry['drawing_sha256'] = {view: sha for view, (_, sha) in drawings.items()}
             if slot in ('hair', 'hat') and part_inputs[slot].get('target_bounds_m'):
                 views = part_inputs[slot].get('views', {})
                 measured_views = [views.get(view, {}) for view in ('front', 'side')]
@@ -370,6 +390,7 @@ class AvatarNativeParts:
                     'garment_kinds': garment_kinds,
                     'part_methods': {p['slot']: p.get('part_method', 'isolated') for p in parts},
                     'front_axes': {p['slot']: p['front_axis'] for p in parts if p.get('front_axis')},
+                    'worn_drawings': {p['slot']: p['drawing_sha256'] for p in parts if p.get('drawing_sha256')},
                     'shell_worker_sha256': digest(Path(__file__).with_name('avatar_shell_garment.py')),
                     'worn_worker_sha256': digest(Path(__file__).with_name('avatar_worn_part.py')),
                     'fit_profiles': {p['slot']: p.get('fit_profile') for p in parts if p.get('fit_profile')},

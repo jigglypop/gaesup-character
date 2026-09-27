@@ -39,7 +39,8 @@ def build_body_shell_part(part, body, rig, spec):
             raise ValueError('Part reference image changed')
     canvas = dict(spec['canvas'])
     meshes, report, covered = build_shell_garment(body, rig, part['slot'], part['image_paths'], canvas,
-                                                  kind=part.get('garment_kind', 'source'), shape=part.get('shape'))
+                                                  kind=part.get('garment_kind', 'source'), shape=part.get('shape'),
+                                                  key_rgb=part.get('key_rgb'))
     for obj in meshes:
         obj['standard_slot'] = part['slot']
     report.update(binding='copied_body_weights', fit_method='body-shell-v1', available=True,
@@ -58,7 +59,14 @@ def extract_worn_meshes(part, meshes, body, rig, spec):
     """
     from src.services.avatar_limb_fit import centre_limbs, check_limbs
     from src.services.avatar_worn_part import extract_worn_part
-    extracted, report = extract_worn_part(meshes, body, rig, part['slot'], key_rgb=part.get('key_rgb'))
+    drawings = []
+    if part.get('drawings'):
+        from src.services.avatar_shell_garment import CanvasView
+        for view, path in part['drawings'].items():
+            if sha(path) != part.get('drawing_sha256', {}).get(view):
+                raise ValueError('Part drawing changed')
+            drawings.append(CanvasView(view, path, dict(spec['canvas'])))
+    extracted, report = extract_worn_part(meshes, body, rig, part['slot'], key_rgb=part.get('key_rgb'), drawings=drawings)
     garment_kind = (part.get('fit_profile') or {}).get('kind') or part.get('garment_kind')
     centring = centre_limbs(extracted, body, rig, part['slot'], garment_kind)
     runtime_policy = spec.get('runtime') or {}

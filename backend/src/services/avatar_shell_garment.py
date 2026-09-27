@@ -96,9 +96,31 @@ def region_of(category):
             'torso' if category in ('spine', 'hips', 'neck') else None)
 
 
+def key_pixels(rgba, key_rgb, *, hue_deg=40., fringe=2):
+    """Pixels of the key-coloured mannequin a worn drawing stands on, with their antialiased edge."""
+    rgb = np.clip(rgba[..., :3], 0, 1)
+    high, low = rgb.max(-1), rgb.min(-1)
+    chroma = high - low
+    saturation = np.divide(chroma, high, out=np.zeros_like(high), where=high > 1e-6)
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    safe = np.where(chroma > 1e-6, chroma, 1)
+    hue = np.where(high == r, np.mod((g - b)/safe, 6), np.where(high == g, (b - r)/safe + 2, (r - g)/safe + 4))*60.
+    key = np.clip(np.array(key_rgb, dtype=float), 0, 1)
+    kr, kg, kb = key
+    kh, kc = key.max(), key.max() - key.min()
+    key_hue = (np.mod((kg - kb)/kc, 6) if kh == kr else ((kb - kr)/kc + 2) if kh == kg else ((kr - kg)/kc + 4))*60.
+    mask = (np.abs((hue - key_hue + 180) % 360 - 180) < hue_deg) & (saturation > .35) & (high > .3) & (chroma > 1e-6)
+    for _ in range(fringe):
+        grown = mask.copy()
+        grown[1:] |= mask[:-1]; grown[:-1] |= mask[1:]; grown[:, 1:] |= mask[:, :-1]; grown[:, :-1] |= mask[:, 1:]
+        mask = grown
+    return mask
+
+
 class CanvasView:
-    """One canvas image with its orthographic projection."""
-    def __init__(self, name, path, canvas, *, mirrored_from=None):
+    """One canvas image with its orthographic projection. key_rgb: the mannequin colour of a worn
+    drawing, cut out so only the garment remains in the silhouette."""
+    def __init__(self, name, path, canvas, *, mirrored_from=None, key_rgb=None):
         self.name = name
         image = bpy.data.images.load(str(path), check_existing=False)
         width, height = image.size
@@ -109,6 +131,8 @@ class CanvasView:
         self.rgba = pixels.reshape(height, width, 4)[::-1].copy()
         if mirrored_from:
             self.rgba = self.rgba[:, ::-1].copy()
+        if key_rgb is not None:
+            self.rgba[key_pixels(self.rgba, key_rgb), 3] = 0.
         self.width, self.height = width, height
         scale_x, scale_y = width/canvas['width'], height/canvas['height']
         self.ppm_x, self.ppm_y = canvas['pixels_per_metre']*scale_x, canvas['pixels_per_metre']*scale_y
@@ -1005,15 +1029,15 @@ def assign_weights(obj, rig, bones, weights, *, rigid=None):
     modifier = obj.modifiers.new('CanonicalBodySkin', 'ARMATURE'); modifier.object = rig
 
 
-def load_views(image_paths, canvas):
+def load_views(image_paths, canvas, key_rgb=None):
     views = []
     for name in ('front', 'side', 'back', 'opposite'):
         path = (image_paths or {}).get(name)
         if path:
-            views.append(CanvasView(name, path, canvas))
+            views.append(CanvasView(name, path, canvas, key_rgb=key_rgb))
     names = {view.name for view in views}
     if 'side' in names and 'opposite' not in names:
-        view = CanvasView('opposite', image_paths['side'], canvas, mirrored_from='side')
+        view = CanvasView('opposite', image_paths['side'], canvas, mirrored_from='side', key_rgb=key_rgb)
         view.synthetic = True
         views.append(view)
     if 'front' not in names:
@@ -1021,7 +1045,7 @@ def load_views(image_paths, canvas):
     return views
 
 
-def build_shell_garment(body, rig, slot, image_paths, canvas, *, kind='source', name=None, shape=None):
+def build_shell_garment(body, rig, slot, image_paths, canvas, *, kind='source', name=None, shape=None, key_rgb=None):
     """Create one skinned garment object for `slot` from canvas views.
 
     shape {'sleeve', 'hem', 'fit'} overrides the drawn sleeve length, hem and ease
@@ -1033,7 +1057,7 @@ def build_shell_garment(body, rig, slot, image_paths, canvas, *, kind='source', 
     name = name or slot
     data = body_arrays(body, rig)
     canvas = {**canvas, 'floor_z': float(data['positions'][:, 2].min())}
-    views = load_views(image_paths, canvas)
+    views = load_views(image_paths, canvas, key_rgb)
     vertex_region, vertex_side, marks = classify_regions(data['positions'], rig)
     tree = body_tree(data)
     axes = region_axes(marks, data['positions'], vertex_region, vertex_side)
