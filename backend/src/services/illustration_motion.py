@@ -13,7 +13,7 @@ from PIL import Image
 from src.services.character_pipeline import PipelineError
 from src.services.illustration_rig import BONES, BONE_NAMES, skin
 
-MOTION_REVISION = 'illustration-motion-v1'
+MOTION_REVISION = 'illustration-motion-v2'
 TEMPLATES = {'idle': 2.0, 'wave': 1.2, 'jump': 1.0, 'nod': 1.0, 'shake': .8, 'sway': 1.6}
 FORMATS = {'gif': 'gif', 'webp': 'webp', 'apng': 'png'}
 _SUPERSAMPLE = 2
@@ -157,8 +157,6 @@ def render_frames(png, joints, template, strength, speed, fps, size):
     if template not in TEMPLATES:
         raise PipelineError('invalid_template', '모션 종류를 다시 선택하세요.', 422)
     skinned = skin(png, joints)
-    rgba = skinned['rgba'].astype(np.float32) / 255
-    texture = np.dstack([rgba[..., :3] * rgba[..., 3:], rgba[..., 3:]])
     ys, xs = np.nonzero(skinned['mask'])
     left, right, top, bottom = xs.min(), xs.max(), ys.min(), ys.max()
     height = bottom - top + 1
@@ -170,18 +168,23 @@ def render_frames(png, joints, template, strength, speed, fps, size):
     offset = np.array([full / 2 - ground[0] * scale, full - margin - ground[1] * scale])
     frames = max(8, min(96, int(round(TEMPLATES[template] / speed * fps))))
     vertices = np.c_[skinned['vertices'], np.ones(len(skinned['vertices']))]
-    weights, triangles, layers = skinned['weights'], skinned['triangles'], skinned['layers']
-    order = [np.flatnonzero(layers == layer) for layer in sorted(set(layers.tolist()))]
+    weights, triangles, parts, layers = skinned['weights'], skinned['triangles'], skinned['parts'], skinned['layers']
+    textures = skinned['textures']
     sources = skinned['vertices'][triangles]
+    # Back to front by layer; each part samples its own texture (its pixels plus the fill under the front).
+    order = [[(bone, np.flatnonzero(parts == bone)) for bone in sorted(set(parts[layers == level].tolist()))]
+             for level in sorted(set(layers.tolist()))]
     images = []
     for index in range(frames):
         matrices = bone_matrices(pose(template, index / frames, strength, joints, height), joints, ground)
         moved = np.einsum('bij,vj->vbi', matrices, vertices)[..., :2]
         placed = (moved * weights[..., None]).sum(1) * scale + offset
         canvas = np.zeros((full, full, 4), np.float32)
-        for group in order:
+        for level in order:
             layer = np.zeros_like(canvas)
-            _raster(layer, full, placed[triangles[group]], sources[group], texture)
+            for bone, group in level:
+                x0, y0, texture = textures[bone]
+                _raster(layer, full, placed[triangles[group]], sources[group] - (x0, y0), texture)
             canvas = layer + canvas * (1 - layer[..., 3:])
         small = canvas.reshape(size, _SUPERSAMPLE, size, _SUPERSAMPLE, 4).mean((1, 3))
         alpha = small[..., 3:]
