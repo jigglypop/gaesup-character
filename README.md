@@ -106,11 +106,11 @@ uv run asset-quality <조립 폴더> [<조립 폴더> ...] [--images views.json 
 
 `infra/ec2.yaml` 스택은 기본적으로 SSM 포트 포워딩(`Access` 출력)으로만 접속합니다. 인터넷에서 쓰려면:
 
-1. provider secret(JSON)에 `STUDIO_LOGIN_USER`(3~64자, 영문·숫자·`._-`)와 `STUDIO_LOGIN_PASSWORD`(12자 이상)를 넣습니다. 선택 키: `TRIPO_API_KEY`, `AVATAR_3D_PROVIDER`, `BLENDER_CONCURRENCY`.
+1. provider secret(JSON)의 선택 키: `TRIPO_API_KEY`, `AVATAR_3D_PROVIDER`, `BLENDER_CONCURRENCY`.
 2. 리전의 CloudFront 관리형 prefix list ID를 확인합니다.
    ```bash
    aws ec2 describe-managed-prefix-lists --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing --query "PrefixLists[0].PrefixListId" --output text
    ```
 3. 스택 파라미터 `PublicStudio=true`, `CloudFrontPrefixListId=<위 값>`, `InstanceType=c7i.xlarge`로 배포합니다.
 
-`StudioUrl` 출력(`https://….cloudfront.net`)에서 비밀번호를 입력해 씁니다. 80 포트는 CloudFront만 받고, 로그인 정보가 secret에 없으면 공개 주소의 API는 404입니다. 실행 중인 컨테이너는 다음 배포 때 secret을 다시 읽습니다.
+`StudioUrl` 출력(`https://….cloudfront.net`)으로 바로 씁니다. 80 포트는 CloudFront만 받습니다. 실행 중인 컨테이너는 다음 배포 때 secret을 다시 읽습니다.

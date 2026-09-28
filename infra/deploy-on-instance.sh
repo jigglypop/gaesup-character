@@ -24,6 +24,7 @@ source "$config_file"
 : "${AWS_REGION:?AWS_REGION is required}"
 : "${PROVIDER_SECRET_ARN:?PROVIDER_SECRET_ARN is required}"
 PUBLIC_SITE_ORIGIN="${PUBLIC_SITE_ORIGIN:-}"
+PUBLIC_STUDIO="${PUBLIC_STUDIO:-false}"
 
 exec 9>/var/lock/asset-studio-deploy.lock
 flock -n 9 || { echo 'another deployment is active' >&2; exit 3; }
@@ -113,6 +114,7 @@ docker run -d --restart unless-stopped --name "$candidate" --network host \
   -e AWS_REGION="$AWS_REGION" \
   -e STUDIO_RELEASE_SHA="$release_sha" \
   -e PUBLIC_SITE_ORIGIN="$PUBLIC_SITE_ORIGIN" \
+  -e PUBLIC_STUDIO="$PUBLIC_STUDIO" \
   -v /opt/asset-studio/provider.json:/run/studio-secrets.json:ro \
   -v /opt/asset-studio/scratch:/app/data \
   "$image" >/dev/null

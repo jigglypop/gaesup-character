@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Gaesup asset studio with S3 durability, SSM administration, optional static public site, and optional password-protected HTTPS studio
+Description: Gaesup asset studio with S3 durability, SSM administration, optional static public site, and optional HTTPS studio
 Parameters:
   VpcId: {Type: 'AWS::EC2::VPC::Id'}
   SubnetId: {Type: 'AWS::EC2::Subnet::Id'}
@@ -21,7 +21,7 @@ Parameters:
     Type: String
     Default: 'false'
     AllowedValues: ['false', 'true']
-    Description: When true, a CloudFront HTTPS address serves the whole studio. nginx requires STUDIO_LOGIN_USER and STUDIO_LOGIN_PASSWORD from the provider secret, and port 80 accepts CloudFront only.
+    Description: When true, a CloudFront HTTPS address serves the whole studio, and port 80 accepts CloudFront only.
   CloudFrontPrefixListId:
     Type: String
     Default: ''
@@ -96,7 +96,7 @@ Resources:
       FromPort: 80
       ToPort: 80
       SourcePrefixListId: !Ref CloudFrontPrefixListId
-      Description: CloudFront origin requests; nginx requires the studio login
+      Description: CloudFront origin requests
   Instance:
     Type: AWS::EC2::Instance
     Properties:
@@ -126,6 +126,7 @@ Resources:
           AWS_REGION='${AWS::Region}'
           PROVIDER_SECRET_ARN='${ProviderSecretArn}'
           PUBLIC_SITE_ORIGIN='${PublicSiteOrigin}'
+          PUBLIC_STUDIO='${PublicStudio}'
           CONFIG
           chmod 600 /etc/asset-studio.env
           release_sha="$(basename '${ReleaseKey}' .tar.gz)"
