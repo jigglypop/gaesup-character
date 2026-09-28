@@ -92,6 +92,7 @@ SCALP_REAR = .3       # below the ears, skin facing this far backward is scalp d
 SCALP_NAPE = .3       # the nape: this share of the head's height below its centre
 SCALP_EAR = .97       # a height band this close to the head's widest holds the ears
 SCALP_WIDTH = .85     # below the ears, the scalp spans this share of the half width (the ears' backs stay skin)
+SCALP_SPECK = .05     # a cap island smaller than this share of the largest is dropped
 
 
 def _srgb_to_linear(values):
@@ -188,6 +189,21 @@ def add_scalp_cap(meshes, body, rig, spec):
     faces = weld[triangles[scalp[triangles].all(axis=1)]]
     if not len(faces):
         return {**report, 'reason': 'no_scalp_surface'}
+    # Specks a bump of the forehead passes (a normal tilted up) show as dots between bangs.
+    parent = np.arange(weld.max()+1)
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]; i = parent[i]
+        return i
+    for a, b, c in faces:
+        for other in (b, c):
+            ra, ro = find(a), find(other)
+            if ra != ro:
+                parent[ro] = ra
+    roots = np.array([find(a) for a in faces[:, 0]])
+    labels, sizes = np.unique(roots, return_counts=True)
+    faces = faces[np.isin(roots, labels[sizes >= sizes.max()*SCALP_SPECK])]
     # One vertex per welded position (the body is split at UV seams).
     first = np.zeros(weld.max()+1, dtype=np.int64)
     first[weld[::-1]] = np.arange(len(weld))[::-1]
