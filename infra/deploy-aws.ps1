@@ -17,7 +17,11 @@ if (-not (Get-Command aws -ErrorAction SilentlyContinue)) { throw 'AWS CLI is re
 function Invoke-Aws([string[]]$Arguments, [switch]$AllowFailure) {
   $common = @('--region', $Region, '--cli-connect-timeout', '5', '--cli-read-timeout', '20', '--output', 'json')
   if ($Profile) { $common += @('--profile', $Profile) }
-  $text = & aws @Arguments @common 2>&1
+  # Windows PowerShell 5.1 turns any redirected stderr line into a terminating error under Stop;
+  # the exit code decides failure instead.
+  $previous = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try { $text = & aws @Arguments @common 2>&1 } finally { $ErrorActionPreference = $previous }
+  $text = $text | ForEach-Object { "$_" }
   if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) { throw "AWS CLI request failed: $($Arguments[0..1] -join ' ')" }
   return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = ($text -join "`n") }
 }
