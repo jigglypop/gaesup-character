@@ -85,6 +85,132 @@ def fit_hair_cavity(meshes, body, rig, spec):
 
 
 SIDE_MARGIN_M = .02   # a derived rear surface reaches this far beyond the head's width
+SCALP_CAP_M = .0015   # the scalp cap lies this far outside the skin, under the strands' 3 mm
+SCALP_TOP = .45       # skin whose normal rises this steeply is scalp (the forehead and face stay below)
+SCALP_SIDE = -.5      # above the ears, skin facing no further forward than this is scalp (the temples)
+SCALP_REAR = .3       # below the ears, skin facing this far backward is scalp down to the nape
+SCALP_NAPE = .3       # the nape: this share of the head's height below its centre
+SCALP_EAR = .97       # a height band this close to the head's widest holds the ears
+SCALP_WIDTH = .85     # below the ears, the scalp spans this share of the half width (the ears' backs stay skin)
+
+
+def _srgb_to_linear(values):
+    return np.where(values <= .04045, values/12.92, ((values+.055)/1.055)**2.4)
+
+
+def _base_image(material):
+    if not material or not material.node_tree:
+        return None
+    shader = next((node for node in material.node_tree.nodes if node.type == 'BSDF_PRINCIPLED'), None)
+    links = shader.inputs['Base Color'].links if shader else []
+    node = links[0].from_node if links else None
+    if node is None or node.type != 'TEX_IMAGE':
+        node = next((n for n in material.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image), None)
+    return node.image if node is not None and node.image and node.image.size[0] else None
+
+
+def hair_colour(meshes, samples=4000):
+    """Median linear RGB of the strands' own texels (their base colour without a texture)."""
+    rng = np.random.default_rng(0)
+    colours = []
+    for obj in meshes:
+        mesh = obj.data
+        if obj.get('scalp_backing') or not len(mesh.polygons):
+            continue
+        uv_layer = mesh.uv_layers.active
+        if uv_layer is not None:
+            uv = np.empty(len(mesh.loops)*2); uv_layer.data.foreach_get('uv', uv); uv = uv.reshape(-1, 2)
+            material_index = np.empty(len(mesh.polygons), dtype=np.int64); mesh.polygons.foreach_get('material_index', material_index)
+            loop_start = np.empty(len(mesh.polygons), dtype=np.int64); mesh.polygons.foreach_get('loop_start', loop_start)
+            loop_total = np.empty(len(mesh.polygons), dtype=np.int64); mesh.polygons.foreach_get('loop_total', loop_total)
+            loop_material = np.full(len(mesh.loops), -1, dtype=np.int64)
+            for start, total, index in zip(loop_start, loop_total, material_index):
+                loop_material[start:start+total] = index
+        for index, slot in enumerate(obj.material_slots):
+            image = _base_image(slot.material) if uv_layer is not None else None
+            if image is None:
+                shader = (next((n for n in slot.material.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+                          if slot.material and slot.material.node_tree else None)
+                if shader is not None:
+                    colours.append(np.array(shader.inputs['Base Color'].default_value[:3], dtype=np.float64)[None])
+                continue
+            loops = np.flatnonzero(loop_material == index)
+            if not len(loops):
+                continue
+            loops = rng.choice(loops, min(len(loops), samples), replace=False)
+            width, height = image.size
+            pixels = np.empty(width*height*image.channels, dtype=np.float32)
+            image.pixels.foreach_get(pixels)
+            pixels = pixels.reshape(height, width, image.channels)
+            u = np.clip((uv[loops, 0] % 1)*width, 0, width-1).astype(np.int64)
+            v = np.clip((uv[loops, 1] % 1)*height, 0, height-1).astype(np.int64)
+            texels = pixels[v, u].astype(np.float64)
+            if image.channels == 4:
+                texels = texels[texels[:, 3] >= .5]
+            texels = texels[:, :3]
+            if not image.is_float and image.colorspace_settings.name.lower() in ('srgb', 'srgb 2.2', 'srgb - texture'):
+                texels = _srgb_to_linear(texels)
+            colours.append(texels)
+    colours = np.concatenate(colours) if colours else np.zeros((0, 3))
+    return np.median(colours, axis=0) if len(colours) else None
+
+
+def add_scalp_cap(meshes, body, rig, spec):
+    """A hair-coloured cap over the scalp, under the strands.
+
+    The base body is bald, so skin shows wherever the strands part (a spiky crown, the back of
+    twin tails). As game hair does, a thin cap in the strands' median colour covers the upper
+    skull and the back of the head down to the nape; the face, forehead and ears stay skin.
+    """
+    from src.services.avatar_shell_garment import body_arrays
+    report = {'method': 'scalp_cap_v1', 'added_faces': 0, 'input_strands_preserved': True}
+    colour = hair_colour(meshes)
+    if colour is None:
+        return {**report, 'reason': 'hair_colour_unavailable'}
+    data = body_arrays(body, rig)
+    positions, normals, triangles, weld = data['positions'], data['normals'], data['triangles'], data['weld']
+    dominant = np.char.lower(np.array(data['bones'])[data['weights'].argmax(axis=1)])
+    head = np.char.find(dominant, 'head') >= 0
+    lo, hi, _ = head_region(body, rig, spec)
+    center = (lo+hi)/2
+    # The ears: the highest height band nearly as wide as the head's widest ends at their top.
+    lateral = np.abs(positions[:, 0]-center.x)
+    edges = np.linspace(lo.z, hi.z, 13)
+    widths = np.array([lateral[head & (positions[:, 2] >= a) & (positions[:, 2] < b)].max(initial=0.)
+                       for a, b in zip(edges[:-1], edges[1:])])
+    ear_top = edges[1:][widths >= widths.max()*SCALP_EAR].max()
+    # Blender: +Z up, +Y the back of the head.
+    top = (normals[:, 2] >= SCALP_TOP) & (positions[:, 2] >= center.z)   # not the ledge under the chin
+    side = (positions[:, 2] >= ear_top) & (normals[:, 1] >= SCALP_SIDE)
+    rear = ((normals[:, 1] >= SCALP_REAR) & (positions[:, 2] >= center.z-(hi.z-lo.z)*SCALP_NAPE)
+            & (lateral <= widths.max()*SCALP_WIDTH))
+    scalp = head & (top | side | rear)
+    faces = weld[triangles[scalp[triangles].all(axis=1)]]
+    if not len(faces):
+        return {**report, 'reason': 'no_scalp_surface'}
+    # One vertex per welded position (the body is split at UV seams).
+    first = np.zeros(weld.max()+1, dtype=np.int64)
+    first[weld[::-1]] = np.arange(len(weld))[::-1]
+    used, inverse = np.unique(faces, return_inverse=True)
+    points = positions[first[used]] + normals[first[used]]*SCALP_CAP_M
+    mesh = bpy.data.meshes.new('HairScalpCap')
+    mesh.from_pydata(points.tolist(), [], inverse.reshape(-1, 3).tolist())
+    mesh.update()
+    mesh.polygons.foreach_set('use_smooth', [True]*len(mesh.polygons))
+    shade = colour*.85
+    material = bpy.data.materials.new('HairScalpCap')
+    material.use_nodes = True
+    material.use_backface_culling = False
+    shader = next(node for node in material.node_tree.nodes if node.type == 'BSDF_PRINCIPLED')
+    shader.inputs['Base Color'].default_value = (*shade.tolist(), 1.)
+    shader.inputs['Roughness'].default_value = .65
+    mesh.materials.append(material)
+    obj = bpy.data.objects.new('HairScalpCap', mesh)
+    obj['scalp_cap'] = True
+    bpy.context.scene.collection.objects.link(obj)
+    meshes.append(obj)
+    return {**report, 'added_faces': len(faces), 'added_vertices': len(used),
+            'colour_linear': [round(float(c), 4) for c in shade], 'clearance_m': SCALP_CAP_M}
 
 
 def _reference(path):

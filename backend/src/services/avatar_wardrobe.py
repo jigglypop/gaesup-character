@@ -23,6 +23,9 @@ MAX_OUTFITS = 200
 _FIELDS = ('job_id', 'version', 'profile_id', 'geometry_sha256', 'body_sha256')
 _ID = re.compile(r'[a-f0-9]{24}')
 _SLOT = re.compile(r'[A-Za-z]{2,20}')
+# A long coat reaches the lower thighs like a dress but is worn over a bottom; its description says which.
+_OUTERWEAR = re.compile(r'코트|재킷|자켓|점퍼|가디건|야상|블레이저|파카|패딩|바람막이|\b(coat|jacket|cardigan|parka|blazer|anorak)\b')
+_DRESS = re.compile(r'원피스|드레스|\bdress\b')
 # Assembly records never change after a version is sealed; keep recent ones in memory.
 _records = OrderedDict()
 _records_lock = RLock()
@@ -244,14 +247,21 @@ class Wardrobe:
         part_sha = self._record(job_id, version).get('files', {}).get(f'{slot}.glb')
         if not part_sha:
             raise PipelineError('not_found', '파츠 파일을 찾을 수 없습니다.', 404)
-        target = self.library.root/'wardrobe-coverage'/f"{body['body_sha256'][:20]}-{part_sha[:20]}-v7.json"
-        cached = read_json(target)
-        if cached:
-            return cached
-        native = AvatarNativeParts(self.factory)
-        value = coverage(self._body_geometry(native, body), native.artifact(self.owner, job_id, version, f'{slot}.glb').read_bytes(), slot)
-        _write_json(target, value)
+        target = self.library.root/'wardrobe-coverage'/f"{body['body_sha256'][:20]}-{part_sha[:20]}-v8.json"
+        value = read_json(target)
+        if not value:
+            native = AvatarNativeParts(self.factory)
+            value = coverage(self._body_geometry(native, body), native.artifact(self.owner, job_id, version, f'{slot}.glb').read_bytes(), slot)
+            _write_json(target, value)
+        if value['covers_bottom'] and self._outerwear(job_id, slot):
+            value = {**value, 'covers_bottom': False}
         return value
+
+    def _outerwear(self, job_id, slot):
+        part = next((p for p in read_json(self.factory.directory(self.owner, job_id)/'pipeline.json').get('parts', [])
+                     if p.get('slot') == slot), {})
+        text = (part.get('description') or '').lower()
+        return bool(_OUTERWEAR.search(text)) and not _DRESS.search(text)
 
     def colors(self, job_id, slot, version):
         """Colour regions of a part texture ({regions: [...]}) and the path of their mask PNG, cached per part file."""

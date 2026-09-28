@@ -22,7 +22,7 @@ from src.services.avatar_body_layers import (
     mark_body_coverage, hide_covered_materials, restore_covered_materials, strip_covered_primitives,
 )
 from src.services.avatar_head_geometry import headwear_palette, prepare_rear_hair, fit_hat, fit_reference_frame, hat_target_over_hair, fit_hair, fit_hair_length, fit_hair_scalp, fit_hair_scalp_bounded, head_preview_body, whiten_base_body, seat_legacy_hair_roots
-from src.services.avatar_hair_geometry import fit_hair_cavity, repair_hair_backing
+from src.services.avatar_hair_geometry import add_scalp_cap, fit_hair_cavity, repair_hair_backing
 from src.services.avatar_arm_geometry import fit_sleeves, bind_top_regions, t_rest_pose
 from src.services.avatar_render_budget import optimize_part
 from src.services.avatar_expression_uv_blender import prepare_expression_uv
@@ -89,11 +89,14 @@ def extract_worn_meshes(part, meshes, body, rig, spec):
         if not bone:
             raise ValueError('Missing pelvis for skirt attachment')
     rigid = skirt or slot in ('hair', 'head', 'hairFront', 'hairBack', 'hat')
+    scalp_cap = add_scalp_cap(extracted, body, rig, spec) if slot == 'hair' else None
     binding = bind(extracted, body, rig, {'anchors': [], 'max_anchor_error_m': .0001,
                    'binding': 'rigid' if rigid else 'transfer', 'bone': bone, 'slot': slot,
                    'max_transfer_distance_m': None}, transform=Matrix.Identity(4))
     binding.update(measurement=report, runtime_budget=runtime_budget, clearance=adjustment,
                    limb_fit=limb_fit, fit_method='worn-extract-v1', available=True)
+    if scalp_cap is not None:
+        binding['scalp_cap'] = scalp_cap
     return extracted, binding
 
 
@@ -158,7 +161,7 @@ def pressed_under(fitted, body, rig):
             local, points, matrix = world(obj)
             index = nearest(gltf(points), skin, HAIR_ANCHOR_M if inner == 'hair' else ANCHOR_M)
             index[index >= 0] = np.where(corners[index[index >= 0]], index[index >= 0], -1)
-            moved = points + blender(press(gltf(points), skin, normals, index))
+            moved = points + blender(press(gltf(points), skin, normals, index, corners))
             moves.append((obj, local, (moved - matrix[:3, 3]) @ np.linalg.inv(matrix[:3, :3]).T))
 
     def put(which):
@@ -288,6 +291,7 @@ def fit_uniform_part(part, meshes, body, rig, spec, targets, imported):
                                               shared_canvas=bool(part.get('reference_bounds_m')))
         head_preparation['source_image_sha256'] = part.get('image_sha256', {}).get('back')
         runtime_budget['backing_added_triangles'] = head_preparation.get('added_faces', 0)*2
+    scalp_cap = add_scalp_cap(meshes, body, rig, spec) if slot == 'hair' else None
     kind = (part.get('fit_profile') or {}).get('kind') or part.get('garment_kind', 'source')
     skirt = slot == 'bottom' and kind == 'skirt'
     bone = 'Head'
@@ -303,6 +307,8 @@ def fit_uniform_part(part, meshes, body, rig, spec, targets, imported):
                   fit_method='uniform-slot-v1')
     if head_preparation is not None:
         report['head_preparation'] = head_preparation
+    if scalp_cap is not None:
+        report['scalp_cap'] = scalp_cap
     if slot == 'bottom':
         report['garment_kind'] = kind
     a, b = bounds(meshes)
@@ -555,6 +561,7 @@ def run(payload):
                                                   shared_canvas=bool(part.get('reference_bounds_m')))
             head_preparation['source_image_sha256'] = part.get('image_sha256', {}).get('back')
             runtime_budget['backing_added_triangles'] = head_preparation.get('added_faces', 0)*2
+        scalp_cap = add_scalp_cap(meshes, body, rig, spec) if slot == 'hair' else None
         # Transfer weights only after the final garment size has been applied.
         report = (bind_shoes_rigid(meshes, rig, shoe_regions) if slot == 'shoes'
                   else bind(meshes, body, rig, contract, transform=Matrix.Identity(4)))
@@ -573,6 +580,8 @@ def run(payload):
         report['clearance'] = adjustment
         if head_preparation is not None:
             report['head_preparation'] = head_preparation
+        if scalp_cap is not None:
+            report['scalp_cap'] = scalp_cap
         a, b = bounds(meshes)
         report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
         names = []

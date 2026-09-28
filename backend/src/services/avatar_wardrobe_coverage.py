@@ -25,7 +25,7 @@ HEAD_SHARE = .3            # a top or hat covering this share of the upper head 
 ANCHOR_M = .08             # a garment vertex farther than this from the skin never tucks under
 HEAD_OUTSIDE_M = (-.005, .15)   # a hat's crown or a hood's peak stands this far off the scalp
 HAIR_ANCHOR_M = .15        # hair this far off the scalp still tucks under a hat or raised hood
-TUCK_M = .0015             # a tucked garment lies this far outside the skin (fitted parts keep 3 mm)
+TUCK_M = .001              # a tucked garment lies this far outside the skin (fitted parts keep 3 mm)
 VERTEX_BITS = 20           # anchor = body primitive ordinal << VERTEX_BITS | body vertex
 _COMPONENTS = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16, 5125: np.uint32, 5126: np.float32}
 _WIDTH = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4, 'MAT4': 16}
@@ -147,14 +147,27 @@ def nearest(points, targets, reach):
     return found
 
 
-def press(points, skin, normals, index):
-    """Moves pressing each point with a skin vertex (index >= 0) to TUCK_M outside it along its normal."""
-    move = np.zeros((len(points), 3))
-    found = index >= 0
-    normal = normals[index[found]]
-    along = ((points[found] - skin[index[found]])*normal).sum(axis=1)
-    move[found] = -np.maximum(along - TUCK_M, 0.)[:, None]*normal
-    return move
+def press(points, skin, normals, index, allowed=None, rounds=3):
+    """Moves pressing each point with a skin vertex (index >= 0) to TUCK_M outside the skin.
+
+    The skin vertex nearest a loose garment centimetres off the skin can lie to one side of where
+    the pressed point lands. Each later round anchors the point again to the skin vertex now
+    nearest it (within `allowed`) and presses along that normal, so the point ends TUCK_M off the
+    skin beneath it, not off a neighbour's tangent plane. Points never move outward."""
+    points = np.asarray(points, np.float64)
+    target, current = points.copy(), index.copy()
+    found = np.flatnonzero(index >= 0)
+    for round_ in range(rounds if len(found) else 0):
+        if round_:
+            again = nearest(target[found], skin, ANCHOR_M)
+            keep = again >= 0
+            if allowed is not None:
+                keep &= allowed[np.maximum(again, 0)]
+            current[found[keep]] = again[keep]
+        normal = normals[current[found]]
+        along = ((target[found] - skin[current[found]])*normal).sum(axis=1)
+        target[found] -= np.maximum(along - TUCK_M, 0.)[:, None]*normal
+    return target - points
 
 
 def _driven(primitive, *names):
@@ -194,7 +207,7 @@ def tucks(body, part, slot):
         index = nearest(positions, skin, HAIR_ANCHOR_M if slot == 'hair' else ANCHOR_M)
         index[index >= 0] = np.where(allowed[index[index >= 0]], index[index >= 0], -1)
         anchor = np.where(index >= 0, labels[np.maximum(index, 0)], -1)
-        move = press(positions, skin, normals, index)
+        move = press(positions, skin, normals, index, allowed)
         pressed = np.flatnonzero(np.abs(move).sum(axis=1) > 0)
         if len(pressed):
             move[pressed] = np.linalg.solve(primitive['linear'][pressed].astype(np.float64), move[pressed, :, None])[..., 0]
