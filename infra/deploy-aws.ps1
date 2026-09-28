@@ -35,7 +35,7 @@ flock -n 8 || { echo 'another release preparation is active' >&2; exit 3; }
 incoming="/opt/asset-studio/incoming/`$release_sha"
 rm -rf "`$incoming"
 install -d -m 700 "`$incoming/source"
-aws s3 cp 's3://$Bucket/$ReleaseKey' "`$incoming/release.tar.gz" --region '$Region' --checksum-mode enabled --only-show-errors
+aws s3 cp 's3://$Bucket/$ReleaseKey' "`$incoming/release.tar.gz" --region '$Region' --checksum-mode ENABLED --only-show-errors
 printf '%s  %s\n' "`$release_sha" "`$incoming/release.tar.gz" | sha256sum -c -
 tar -xzf "`$incoming/release.tar.gz" -C "`$incoming/source"
 printf '%s\n' "`$release_sha" > "`$incoming/source/.release-sha256"
@@ -46,7 +46,11 @@ rm -f "`$incoming/release.tar.gz"
 $artifactRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'dist/aws'
 New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
 $parametersPath = Join-Path $artifactRoot 'ssm-parameters.json'
-@{ commands = @($remote); executionTimeout = @("$TimeoutSeconds") } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $parametersPath -Encoding utf8NoBOM
+# A Windows checkout has CRLF line endings; the instance's shell needs LF.
+$remote = $remote -replace "`r", ''
+# UTF-8 without a BOM in Windows PowerShell 5.1 and PowerShell 7 alike.
+$utf8 = New-Object System.Text.UTF8Encoding $false
+[IO.File]::WriteAllText($parametersPath, (@{ commands = @($remote); executionTimeout = @("$TimeoutSeconds") } | ConvertTo-Json -Depth 4), $utf8)
 $send = Invoke-Aws @('ssm', 'send-command', '--document-name', 'AWS-RunShellScript', '--instance-ids', $InstanceId, '--comment', "asset-studio $($releaseSha.Substring(0,12))", '--parameters', ('file://' + $parametersPath), '--timeout-seconds', "$TimeoutSeconds")
 $commandId = (($send.Text | ConvertFrom-Json).Command.CommandId)
 if (-not $commandId) { throw 'SSM did not return a command ID.' }
@@ -71,5 +75,5 @@ if ($invocation.Status -ne 'Success') {
   throw "SSM deployment failed with status $($invocation.Status): $commandId"
 }
 $receipt = [ordered]@{ command_id=$commandId; instance_id=$InstanceId; bucket=$Bucket; release_key=$ReleaseKey; sha256=$releaseSha; status=$invocation.Status; deployed_at=(Get-Date).ToUniversalTime().ToString('o') }
-$receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $artifactRoot 'deployment-receipt.json') -Encoding utf8NoBOM
+[IO.File]::WriteAllText((Join-Path $artifactRoot 'deployment-receipt.json'), ($receipt | ConvertTo-Json), $utf8)
 $receipt | ConvertTo-Json
