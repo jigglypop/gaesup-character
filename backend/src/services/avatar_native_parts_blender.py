@@ -103,12 +103,13 @@ def extract_worn_meshes(part, meshes, body, rig, spec):
 def pressed_under(fitted, body, rig):
     """(apply, restore) for renders: this assembly's inner parts pressed onto the skin where the
     outer ones cover the body, as the wardrobe presses any outfit (avatar_wardrobe_coverage): the
-    bottom under the top and shoes, and hair on the head under a hat or a raised hood. The exported
-    parts stay as fitted, so they still layer with parts of any other job."""
+    bottom under the top and into boots, low shoes under the bottom's hem, and hair on the head
+    under a hat or a raised hood. The exported parts stay as fitted, so they still layer with
+    parts of any other job."""
     import numpy as np
     from src.services.avatar_shell_garment import body_arrays
-    from src.services.avatar_wardrobe_coverage import (ANCHOR_M, HAIR_ANCHOR_M, HEAD_OUTSIDE_M, HEAD_SHARE, UNDER,
-                                                       _covered, nearest, press)
+    from src.services.avatar_wardrobe_coverage import (ANCHOR_M, BOOT_SHIN_SHARE, HAIR_ANCHOR_M, HEAD_OUTSIDE_M,
+                                                       HEAD_SHARE, UNDER, _covered, nearest, press)
     # The coverage helpers chunk along glTF Y (up): hand them Blender Z as Y.
     gltf = lambda a: np.stack([a[:, 0], a[:, 2], -a[:, 1]], axis=1)
     blender = lambda a: np.stack([a[:, 0], -a[:, 2], a[:, 1]], axis=1)
@@ -118,30 +119,41 @@ def pressed_under(fitted, body, rig):
         local = np.empty(len(mesh.vertices)*3); mesh.vertices.foreach_get('co', local)
         local = local.reshape(-1, 3); matrix = np.array(obj.matrix_world)
         return local, local @ matrix[:3, :3].T + matrix[:3, 3], matrix
-    moves, data = [], None
-    for inner, outers in UNDER.items():
-        meshes = [obj for obj in fitted if obj['part_role'] == inner]
-        if not meshes or not any(obj['part_role'] in outers for obj in fitted):
+    roles = {obj['part_role'] for obj in fitted}
+    pairs = [(inner, [role for role in outers if role in roles]) for inner, outers in UNDER.items() if inner in roles]
+    pairs = [(inner, outers) for inner, outers in pairs if outers]
+    if not pairs:
+        return (lambda: None), (lambda: None)
+    data = body_arrays(body, rig)
+    skin, normals, triangles = gltf(data['positions']), gltf(data['normals']), data['triangles']
+    dominant = np.char.lower(np.array(data['bones'])[data['weights'].argmax(axis=1)])
+    head = np.char.find(dominant, 'head') >= 0
+    shins = np.isin(dominant, ('leftleg', 'rightleg'))
+    upper = head & (skin[:, 1] >= np.median(skin[head, 1])) if head.any() else head
+    garments = {}
+
+    def garment(role):
+        if role not in garments:
+            points = gltf(np.concatenate([world(obj)[1] for obj in fitted if obj['part_role'] == role]))
+            if len(points) > 20000:
+                points = points[np.random.default_rng(0).choice(len(points), 20000, replace=False)]
+            garments[role] = points, _covered(skin, normals, points)
+        return garments[role]
+    boot = 'shoes' in roles and bool(shins.any() and garment('shoes')[1][shins].mean() >= BOOT_SHIN_SHARE)
+    moves = []
+    for inner, outers in pairs:
+        # A bottom goes into boots; low shoes go under the bottom's hem.
+        if (inner, boot) == ('shoes', True):
             continue
-        if data is None:
-            data = body_arrays(body, rig)
-            skin, normals, triangles = gltf(data['positions']), gltf(data['normals']), data['triangles']
-            dominant = np.char.lower(np.array(data['bones'])[data['weights'].argmax(axis=1)])
-            head = np.char.find(dominant, 'head') >= 0
-            feet = (np.char.find(dominant, 'foot') >= 0) | (np.char.find(dominant, 'toe') >= 0)
-            upper = head & (skin[:, 1] >= np.median(skin[head, 1])) if head.any() else head
         covered = np.zeros(len(skin), bool)
         for role in outers:
-            cover = [obj for obj in fitted if obj['part_role'] == role]
-            if not cover:
+            if (inner, role, boot) == ('bottom', 'shoes', False):
                 continue
-            garment = gltf(np.concatenate([world(obj)[1] for obj in cover]))
-            if len(garment) > 20000:
-                garment = garment[np.random.default_rng(0).choice(len(garment), 20000, replace=False)]
-            flags = _covered(skin, normals, garment)
+            points, flags = garment(role)
             if inner == 'hair':
                 # A hat's crown or a hood's peak stands well off the scalp (the wardrobe's over).
-                flags[head] |= _covered(skin[head], normals[head], garment, outside=HEAD_OUTSIDE_M)
+                flags = flags.copy()
+                flags[head] |= _covered(skin[head], normals[head], points, outside=HEAD_OUTSIDE_M)
                 # Hair goes under a hat or a raised hood only, never under a hood lying on the back.
                 if not (upper.any() and flags[upper].mean() >= HEAD_SHARE):
                     continue
@@ -152,12 +164,10 @@ def pressed_under(fitted, body, rig):
         corners = np.zeros(len(skin), bool)
         corners[triangles[covered[triangles].all(axis=1)].reshape(-1)] = True
         corners[triangles[corners[triangles].any(axis=1)].reshape(-1)] = True
-        # As tuck_region(): hair only on the head, a bottom never on the feet.
+        # As tuck_region(): hair only on the head.
         if inner == 'hair':
             corners &= head
-        elif inner == 'bottom':
-            corners &= ~feet
-        for obj in meshes:
+        for obj in (obj for obj in fitted if obj['part_role'] == inner):
             local, points, matrix = world(obj)
             index = nearest(gltf(points), skin, HAIR_ANCHOR_M if inner == 'hair' else ANCHOR_M)
             index[index >= 0] = np.where(corners[index[index >= 0]], index[index >= 0], -1)

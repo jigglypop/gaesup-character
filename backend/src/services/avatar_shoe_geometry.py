@@ -160,7 +160,9 @@ def fit_shoes_rigid(meshes, targets):
         source_size, target_size = hi-lo, target_hi-target_lo
         if min(source_size) <= 1e-6 or min(target_size) <= 1e-6:
             raise ValueError(f'Degenerate {side} shoe bounds')
-        scale_limits.extend(target_size[axis]/source_size[axis] for axis in range(3))
+        # The footprint (width, length) sets the scale; a boot's shaft keeps its authored height
+        # instead of shrinking the whole boot into a sneaker's box and inside the calf.
+        scale_limits.extend(target_size[axis]/source_size[axis] for axis in (0, 1))
     minimum_gap = .008
     target_centers_x = {side: sum(target_boxes[side][corner].x for corner in (0, 1))/2
                         for side in sides}

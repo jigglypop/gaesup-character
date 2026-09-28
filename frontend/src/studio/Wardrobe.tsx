@@ -149,8 +149,9 @@ export default function Wardrobe() {
     }
     viewer.setHiddenBodyTriangles(Object.keys(union).length ? union : null);
     // Garments from different jobs overlap by centimetres: an inner garment (a waistband) is pressed
-    // onto the skin where the outer garments worn with it (top, shoes) cover the body. Hair presses
-    // only under a top or hat that covers the head (a raised hood), never under a hood lying on the back.
+    // onto the skin where the outer garments worn with it (top, shoes) cover the body; shoes offer only
+    // the leg above them unless they are boots. Hair presses only under a top or hat that covers the
+    // head (a raised hood), never under a hood lying on the back.
     for (const [slotName, part] of Object.entries(applied.current)) {
       const coverage = coverages[coverageKey(part)];
       const tuck = coverage && decodeTuck(coverage);
@@ -159,7 +160,7 @@ export default function Wardrobe() {
       for (const over of coverage.under || []) {
         const covering = applied.current[over] && coverages[coverageKey(applied.current[over])];
         if (!covering) continue;
-        if (slotName !== 'hair') unionBits(outer, covering.hidden);
+        if (slotName !== 'hair') unionBits(outer, covering.over || covering.hidden);
         else if (covering.covers_head) unionBits(outer, covering.over || covering.hidden);
       }
       viewer.setTucked(slotName, tuck, Object.keys(outer).length ? outer : null);

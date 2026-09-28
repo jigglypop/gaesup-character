@@ -20,8 +20,9 @@ GARMENT_SLOTS = ('top', 'bottom', 'shoes', 'hat', 'hair')
 OUTSIDE_M = (-.005, .06)   # garment distance along the skin normal that counts as covering
 SIDEWAYS_M = .02           # a garment point farther sideways belongs to a neighbouring area
 DRESS_LEG_SHARE = .5       # a top covering this share of the lower thighs takes the bottom's place (a jacket to mid-thigh does not)
-UNDER = {'bottom': ('top', 'shoes'), 'hair': ('top', 'hat')}   # inner slot: the outer slots it tucks under
+UNDER = {'bottom': ('top', 'shoes'), 'hair': ('top', 'hat'), 'shoes': ('bottom',)}   # inner slot: the outer slots it may tuck under
 HEAD_SHARE = .3            # a top or hat covering this share of the upper head (a raised hood) presses hair
+BOOT_SHIN_SHARE = .5       # shoes covering this share of the shins are boots, which a bottom tucks into
 ANCHOR_M = .08             # a garment vertex farther than this from the skin never tucks under
 HEAD_OUTSIDE_M = (-.005, .15)   # a hat's crown or a hood's peak stands this far off the scalp
 HAIR_ANCHOR_M = .15        # hair this far off the scalp still tucks under a hat or raised hood
@@ -182,12 +183,14 @@ def _head(primitive):
 
 def tuck_region(slot, primitive):
     """Body vertices an inner slot may tuck over: hair only on the head (locks on the shoulders stay
-    over the garment), a bottom never on the feet (a wide hem over a sandal stays a hem)."""
+    over the garment). A bottom tucks anywhere it is covered: under a top, into boots (coverage over)."""
     if slot == 'hair':
         return _head(primitive)
-    if slot == 'bottom':
-        return ~_driven(primitive, 'foot', 'toe')
     return np.ones(len(primitive['positions']), bool)
+
+
+def _shins(primitive):
+    return np.isin(np.char.lower(primitive['joints'].astype(str)), ('leftleg', 'rightleg'))
 
 
 def tucks(body, part, slot):
@@ -218,7 +221,9 @@ def tucks(body, part, slot):
 def coverage(body, part_content, slot):
     """{hidden: {primitive key: base64 bitset of triangles}, triangles: {key: count}, covers_bottom,
     covers_head}. A part covering the head also gets over: hidden plus the head a longer reach
-    finds under it, which hair tucks under.
+    finds under it, which hair tucks under. Shoes get boot and over: a bottom tucks into boots
+    (covering BOOT_SHIN_SHARE of the shins; over is all of them), while low shoes (over empty)
+    tuck under the bottom's hem instead, so the hem falls over a sandal strap or a sneaker collar.
 
     An inner slot (UNDER) also gets, per part primitive key, anchors (base64 int32 per vertex) and
     tucks (base64 float32 x, y, z per vertex) from tucks(), anchor_keys (body primitive keys by
@@ -230,7 +235,7 @@ def coverage(body, part_content, slot):
     garment = np.concatenate([p['positions'] for p in part] or [np.zeros((0, 3), np.float32)])
     if len(garment) > 20000:
         garment = garment[np.random.default_rng(0).choice(len(garment), 20000, replace=False)]
-    hidden, over, counts, thighs, heads = {}, {}, {}, [], []
+    hidden, over, counts, thighs, heads, shins = {}, {}, {}, [], [], []
     for primitive in body:
         positions, triangles = primitive['positions'], primitive['triangles']
         normals = _normals(positions, triangles)
@@ -248,6 +253,7 @@ def coverage(body, part_content, slot):
             reached[head] |= _covered(positions[head], normals[head], garment, outside=HEAD_OUTSIDE_M)
         over[primitive['key']] = base64.b64encode(np.packbits(reached[triangles].all(axis=1), bitorder='little').tobytes()).decode()
         heads.append((positions[head, 1], reached[head]))
+        shins.append(covered[_shins(primitive)])
     # The lower half of the thighs: a hip-length sweater reaches the top of them, a dress the rest.
     heights = np.concatenate([height for height, _ in thighs]) if thighs else np.zeros(0)
     lower = heights < np.median(heights) if len(heights) else heights.astype(bool)
@@ -263,7 +269,11 @@ def coverage(body, part_content, slot):
              'covers_head': bool(slot in ('top', 'hat') and head_share >= HEAD_SHARE), 'head_share': round(head_share, 3)}
     if value['covers_head']:
         value['over'] = over
-    if slot in UNDER:
+    if slot == 'shoes':
+        shin = np.concatenate(shins) if shins else np.zeros(0, bool)
+        value['boot'] = bool(shin.any() and shin.mean() >= BOOT_SHIN_SHARE)
+        value['over'] = hidden if value['boot'] else {}
+    if slot in UNDER and not value.get('boot'):
         pressed = tucks(body, part, slot)
         value.update(under=list(UNDER[slot]), anchor_keys=[p['key'] for p in body],
                      anchors={key: base64.b64encode(anchor.astype('<i4').tobytes()).decode() for key, (anchor, _) in pressed.items()},
