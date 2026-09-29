@@ -1,6 +1,6 @@
 import { Component, Suspense, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { createRoot, events, extend, useFrame, useThree } from '@react-three/fiber';
-import { GaesupWorld, GaesupWorldContent, GaesupController, useGaesupStore } from 'gaesup-world';
+import { GaesupWorld, GaesupWorldContent, GaesupController, useGaesupStoreApi } from 'gaesup-world';
 import { CuboidCollider, Physics, RigidBody, type RapierRigidBody } from '@react-three/rapier';
 import { WebGPURenderer } from 'three/webgpu';
 import * as THREE from 'three';
@@ -21,16 +21,19 @@ type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing
 const worldMode = { type: 'character', controller: 'keyboard', control: 'thirdPerson' } as const;
 
 const release = (gltf: GLTF) => disposeObjectResources(gltf.scenes);
+/** Where the walking preview drops the character; one vector, so re-renders do not respawn it. */
+const START = new THREE.Vector3(0, .12, 0);
 
 class PreviewBoundary extends Component<{ children: ReactNode; onError(error: Error): void }, { failed: boolean }> {
-  state = { failed: false };
+  override state = { failed: false };
   static getDerivedStateFromError() { return { failed: true }; }
-  componentDidCatch(error: Error) { this.props.onError(error); }
-  render() { return this.state.failed ? null : this.props.children; }
+  override componentDidCatch(error: Error) { this.props.onError(error); }
+  override render() { return this.state.failed ? null : this.props.children; }
 }
 
 function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProps) {
   const gl = useThree(state => state.gl);
+  const storeApi = useGaesupStoreApi();
   const body = useRef<RapierRigidBody>(null!);
   const outer = useRef<THREE.Group>(null!);
   const inner = useRef<THREE.Group>(null!);
@@ -55,12 +58,12 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
   useEffect(() => {
     const canvas = gl.domElement;
     canvas.tabIndex = 0; canvas.setAttribute('aria-label', '개숲월드 캐릭터 이동 영역');
-    const activate = () => { canvas.focus(); useGaesupStore.getState().setInteractionActive(true); };
-    const deactivate = () => useGaesupStore.getState().setInteractionActive(false);
+    const activate = () => { canvas.focus(); storeApi.getState().setInteractionActive(true); };
+    const deactivate = () => storeApi.getState().setInteractionActive(false);
     canvas.addEventListener('pointerdown', activate); canvas.addEventListener('blur', deactivate);
     deactivate();
     return () => { canvas.removeEventListener('pointerdown', activate); canvas.removeEventListener('blur', deactivate); deactivate(); };
-  }, [gl]);
+  }, [gl, storeApi]);
   useEffect(() => {
     return () => { mixer.stopAllAction(); mixer.uncacheRoot(model.gltf.scene); };
   }, [mixer, model]);
@@ -74,8 +77,8 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
     const requested = matched < 0 && playing.current >= 0 ? playing.current : matched;
     if (requested !== playing.current) {
       mixer.stopAllAction();
-      if (requested >= 0) {
-        const clip = model.gltf.animations[requested];
+      const clip = requested >= 0 ? model.gltf.animations[requested] : undefined;
+      if (clip) {
         const action = mixer.clipAction(clip).reset();
         action.setLoop(/^jump$|^fall$/i.test(clip.name) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
         action.clampWhenFinished = true; action.fadeIn(.12).play();
@@ -90,7 +93,7 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
       if (!ready.current && count > 0) { ready.current = true; onReady(); }
     }
   });
-  return <GaesupController key={model.url} clickToMove={false} position={[0, .12, 0]}
+  return <GaesupController key={model.url} clickToMove={false} position={START}
     rigidBodyRef={body} outerGroupRef={outer} innerGroupRef={inner}
     colliderSize={{ height: Math.max(size.y, .3), radius: Math.max(.15, Math.min(size.x, size.z) * .3) }}
     excludeBaseNodes={excluded}>
@@ -100,6 +103,7 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
 
 function EditingScene({ model, animation, editing, studio, hidden, onEditor, onPaint, onReady }: ViewProps) {
   const { camera, gl, invalidate } = useThree();
+  const storeApi = useGaesupStoreApi();
   const controls = useRef<OrbitControls | null>(null);
   const group = useRef<THREE.Group>(null!);
   const mixer = useMemo(() => new THREE.AnimationMixer(model.gltf.scene), [model]);
@@ -110,7 +114,7 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
     });
   }, [model, hidden]);
   useEffect(() => {
-    useGaesupStore.getState().setInteractionActive(false);
+    storeApi.getState().setInteractionActive(false);
     model.restorePose();
     model.gltf.scene.updateMatrixWorld(true);
     let box = new THREE.Box3().setFromObject(model.gltf.scene);
@@ -127,7 +131,7 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
     const editor = editing ? new FaceEditor(model.gltf, gl.domElement, camera, onPaint, `atelier.faces:${model.url}`) : null; onEditor(editor); onReady();
     invalidate();
     return () => { editor?.dispose(); orbit.removeEventListener('change', changed); orbit.dispose(); controls.current = null; onEditor(null); };
-  }, [model, editing, studio, camera, gl, onEditor, onPaint, onReady]);
+  }, [model, editing, studio, camera, gl, onEditor, onPaint, onReady, storeApi]);
   useEffect(() => {
     mixer.stopAllAction();
     if (studio && animation >= 0 && model.gltf.animations[animation]) mixer.clipAction(model.gltf.animations[animation]).reset().play();
@@ -267,13 +271,13 @@ function CharacterViewport(props: ViewProps) {
       minZoom: .75, maxZoom: 1.6, zoomSpeed: .001, enableCollision: false,
       smoothing: { position: .14, rotation: .14, fov: .12 }, bounds: { minX: -54, maxX: 54, minY: .35, maxY: 24, minZ: -54, maxZ: 54 } };
   }, [props.model]);
-  if (props.card) return <GaesupWorld urls={urls} enablePhysics={false}>
+  if (props.card) return <GaesupWorld urls={urls}>
     <PreviewBoundary onError={props.onError}>
       <SoftLights />
       <CardScene {...props} />
     </PreviewBoundary>
   </GaesupWorld>;
-  if (props.studio) return <GaesupWorld urls={urls} enablePhysics={false}>
+  if (props.studio) return <GaesupWorld urls={urls}>
     <PreviewBoundary onError={props.onError}>
       <color attach="background" args={['#191f17']} />
       <SoftLights />
@@ -281,7 +285,7 @@ function CharacterViewport(props: ViewProps) {
       <EditingScene {...props} />
     </PreviewBoundary>
   </GaesupWorld>;
-  return <GaesupWorld urls={urls} mode={worldMode} cameraOption={cameraOption} enablePhysics>
+  return <GaesupWorld urls={urls} mode={worldMode} cameraOption={cameraOption}>
     <PreviewBoundary onError={props.onError}>
         <Suspense fallback={null}>
           <Physics gravity={[0, -9.81, 0]}>

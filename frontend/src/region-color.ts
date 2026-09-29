@@ -1,12 +1,15 @@
 import { Color, MeshStandardMaterial, type Texture } from 'three';
 import { float, max, mix, texture, uniform, vec3, vec4 } from 'three/tsl';
+import type { Node } from 'three/webgpu';
 
 /** Recolour up to four texture regions (one mask channel each; the fourth is stored inverted in alpha)
  * while keeping each texel's shading.
  * lights: mean linear luminance of each region, so a texel keeps its brightness relative to its region. */
 export function regionColorControl(material: MeshStandardMaterial, mask: Texture, lights: number[]) {
   const sampled = material.map ? texture(material.map) : null;
-  const base = sampled ? sampled.rgb.mul(uniform(material.color.clone())) : uniform(material.color.clone());
+  // A colour uniform is a vec3 in the shader; the typings keep it apart.
+  const tint = uniform(material.color.clone()) as unknown as Node<'vec3'>;
+  const base = sampled ? sampled.rgb.mul(tint) : tint;
   const regions = texture(mask);
   const luminance = base.dot(vec3(.2126, .7152, .0722));
   const targets = [0, 1, 2, 3].map(() => uniform(new Color('#ffffff')));

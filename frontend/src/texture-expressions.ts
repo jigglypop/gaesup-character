@@ -6,8 +6,8 @@ import { matteMaterial } from './matte-materials';
 export const expressionNames = { neutral: '기본', smile: '웃음', cry: '울음', angry: '화남', surprise: '놀람', blink: '눈 감기' };
 export type ExpressionName = keyof typeof expressionNames;
 export type FaceLayout = { eye: number; mouth: number; spacing: number; size: number };
-type Surface = { index: number; texture: THREE.Texture; original: THREE.Source };
-type Entry = { surface: Surface; source: THREE.Source; image: ImageBitmap };
+type Surface = { index: number; texture: THREE.Texture; original: THREE.TextureSource<unknown> };
+type Entry = { surface: Surface; source: THREE.Source<ImageBitmap>; image: ImageBitmap };
 type SavedMap = { material: number; url: string; sha256: string };
 
 export function prepareExpressionMaterial(material: THREE.MeshStandardMaterial) {
@@ -42,7 +42,7 @@ export class TextureExpressions {
   private restore() {
     this.surfaces.forEach(surface => this.update(surface, surface.original));
   }
-  private update(surface: Surface, source: THREE.Source) {
+  private update(surface: Surface, source: THREE.TextureSource<unknown>) {
     // WebGPU material nodes retain the texture used when the graph is built.
     // Keep that texture (and its UV channel/transform) and replace its pixels.
     surface.texture.source = source;

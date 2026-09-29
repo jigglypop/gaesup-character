@@ -8,9 +8,13 @@ $ErrorActionPreference = 'Stop'
 if ($ApiPort -eq $UiPort) { throw 'API and UI ports must be different.' }
 $projectRoot = $PSScriptRoot
 $frontendRoot = Join-Path $projectRoot 'frontend'
-$vitePath = Join-Path $frontendRoot 'node_modules\vite\bin\vite.js'
-if (-not (Test-Path -LiteralPath $vitePath)) {
-    throw 'Frontend dependencies are missing. Run npm ci in frontend/ first.'
+# A workspace install (a monorepo that includes this repo, such as mogaesup) hoists vite to the parent's node_modules.
+$vitePath = @(
+    (Join-Path $frontendRoot 'node_modules\vite\bin\vite.js'),
+    (Join-Path $projectRoot '..\node_modules\vite\bin\vite.js')
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $vitePath) {
+    throw 'Frontend dependencies are missing. Run npm ci in frontend/ (or npm install at the monorepo root) first.'
 }
 $uvPath = (Get-Command uv -ErrorAction Stop).Source
 $nodePath = (Get-Command node -ErrorAction Stop).Source

@@ -1,11 +1,14 @@
 import { Color, MeshStandardMaterial } from 'three';
 import { mix, texture, uniform, vec3, vec4 } from 'three/tsl';
+import type { Node } from 'three/webgpu';
 
 /** Recolor in linear light while retaining the texture's strand luminance and PBR maps. */
 export function hairColorControl(material: MeshStandardMaterial) {
   const target = uniform(new Color('#8a7998')), amount = uniform(0);
   const sampled = material.map ? texture(material.map) : null;
-  const original = sampled ? sampled.rgb.mul(uniform(material.color.clone())) : uniform(material.color.clone());
+  // A colour uniform is a vec3 in the shader; the typings keep it apart.
+  const tint = uniform(material.color.clone()) as unknown as Node<'vec3'>;
+  const original = sampled ? sampled.rgb.mul(tint) : tint;
   const luminance = original.dot(vec3(.2126, .7152, .0722));
   const recolored = mix(original, target.mul(luminance.mul(2.5)).clamp(0, 1), amount);
   Object.assign(material, { colorNode: sampled ? vec4(recolored, sampled.a) : recolored });
